@@ -148,7 +148,19 @@ function Dashboard() {
       </div>
 
       {data && rows.length > 0 && (
-        <section className="insights" aria-label="Smart insights">
+        <section className="ins-wrap" aria-labelledby="ins-title">
+          <div className="ins-head">
+            <span className="ins-spark" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="22" height="22"><path d="M12 2l2.2 6.3L20.5 10l-6.3 2.2L12 18.5l-2.2-6.3L3.5 10l6.3-1.7z" fill="currentColor" /><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9z" fill="currentColor" opacity=".7" /></svg>
+            </span>
+            <div className="ins-titles">
+              <h2 id="ins-title">Smart Insights <span className="ins-badge">Auto-generated</span></h2>
+              <p>Analysed {fmt(scoped.length)} plan lines against {(data?.uploads || []).filter((u) => u.src !== 'plan').length} stock reports · {tips.length} finding{tips.length === 1 ? '' : 's'} · updated {ago(data?.generatedAt)}</p>
+            </div>
+            <span className={`ins-status ${live === 'live' ? 'on' : ''}`}><i />{live === 'live' ? 'Live analysis' : 'Re-analysing every 20 s'}</span>
+            <span className="ins-scan" aria-hidden="true" />
+          </div>
+          <div className="insights">
           {tips.map((i, n) => (
             <button key={i.id} type="button" className={`insight ${i.tone}`} style={{ animationDelay: `${n * 60}ms` }} disabled={!i.view} onClick={() => i.view && openView(i.view)}>
               <span className="dot" />
@@ -156,6 +168,7 @@ function Dashboard() {
               {i.view && <span className="go" aria-hidden="true">→</span>}
             </button>
           ))}
+          </div>
         </section>
       )}
 

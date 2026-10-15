@@ -322,3 +322,25 @@ table.ledger { border-collapse: separate; border-spacing: 0; width: 100%; font-s
 .prio .trk { display: block; width: 44px; height: 5px; border-radius: 3px; background: var(--panel-2); overflow: hidden; }
 .prio .trk i { display: block; height: 100%; border-radius: 3px; }
 .prio b { font-weight: 600; min-width: 20px; text-align: right; }
+
+/* smart insights header */
+.ins-wrap { display: grid; gap: 10px; }
+.ins-head { position: relative; overflow: hidden; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 14px 16px; border-radius: var(--r);
+  border: 1px solid color-mix(in srgb, var(--brand-a) 35%, var(--line));
+  background: linear-gradient(110deg, color-mix(in srgb, var(--brand-a) 12%, var(--panel)), var(--panel) 55%, color-mix(in srgb, var(--brand-c) 10%, var(--panel))); }
+.ins-spark { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 10px; flex: none; color: #fff;
+  background: linear-gradient(135deg, var(--brand-a), var(--brand-b)); box-shadow: 0 6px 18px color-mix(in srgb, var(--brand-a) 40%, transparent); }
+.ins-spark svg { animation: twinkle 3.2s ease-in-out infinite; }
+@keyframes twinkle { 0%, 100% { transform: rotate(0) scale(1); } 50% { transform: rotate(18deg) scale(1.12); } }
+.ins-titles { min-width: 0; flex: 1 1 260px; }
+.ins-titles h2 { margin: 0; font-family: var(--font-cond); font-size: 19px; font-weight: 600; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ins-titles p { margin: 2px 0 0; font-size: 12.5px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.ins-badge { font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase; padding: 2px 8px; border-radius: 999px;
+  color: var(--credit-ink); background: linear-gradient(100deg, var(--brand-a), var(--brand-c), var(--brand-a)); background-size: 200% 100%; animation: shimmer 4s linear infinite; }
+.ins-status { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--ink-2); padding: 4px 10px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line); }
+.ins-status i { width: 7px; height: 7px; border-radius: 50%; background: var(--brand-a); animation: blink 1.4s ease-in-out infinite; }
+.ins-status.on i { background: var(--ok); }
+@keyframes blink { 50% { opacity: .25; } }
+.ins-scan { position: absolute; top: 0; bottom: 0; left: -30%; width: 30%; pointer-events: none;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--brand-c) 22%, transparent), transparent); animation: scan 4.5s ease-in-out infinite; }
+@keyframes scan { 0% { left: -30%; } 60%, 100% { left: 110%; } }
