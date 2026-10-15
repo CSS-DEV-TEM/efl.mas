@@ -91,11 +91,11 @@ function Uploads() {
   }, [jobs]);
 
   return (
-    <main className="page">
+    <main className="page anim">
       <div className="page-head">
         <div>
           <h1>Upload reports</h1>
-          <p>Drop the pull plan and the SAP reports. Each upload replaces that report's previous data, the calculation runs again and every open dashboard updates live.</p>
+          <p>Drop the weekly plan and the SAP reports. Each upload replaces that report's previous data, the calculation runs again and every open dashboard updates live.</p>
         </div>
       </div>
 

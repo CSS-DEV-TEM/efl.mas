@@ -1,6 +1,9 @@
 'use client';
 import { memo, useEffect, useMemo, useState } from 'react';
 import { coverage, fmtDate, fmtQty, isDone, shortBy, type Line } from '@/lib/calc';
+import { ACTION_HELP, ACTION_PILL, DUE_PILL, action, due, priority, todayLocal } from '@/lib/smart';
+
+const TODAY = todayLocal();
 
 const COV_PILL: Record<string, string> = { Covered: 'ok', Partial: 'warn', 'QI / Block only': 'info', 'No stock': 'bad' };
 export const STATUS_OPTIONS = ['Done', 'Pending', 'Loaded', 'Shortage', 'Roll issue', 'In QI', 'Hold'];
@@ -13,6 +16,9 @@ const COLS: Col[] = [
   { id: 'li', label: 'LI', n: true, get: (l) => Number(l.li) || 0 },
   { id: 'item', label: 'Item code', get: (l) => l.item },
   { id: 'date', label: 'Date', get: (l) => l.date || '', render: (l) => fmtDate(l.date) },
+  { id: 'due', label: 'Due', grp: 'Smart', get: (l) => ['Overdue', 'Today', 'Tomorrow', 'This week', 'Later', 'No date'].indexOf(due(l, TODAY)), render: (l) => { const d = due(l, TODAY); return isDone(l) ? <span className="pill mute">{d}</span> : <span className={`pill ${DUE_PILL[d]}`}>{d}</span>; } },
+  { id: 'action', label: 'Next action', grp: 'Smart', get: (l) => action(l), render: (l) => { const a = action(l); return <span className={`pill ${ACTION_PILL[a]}`} title={ACTION_HELP[a]}>{a}</span>; } },
+  { id: 'priority', label: 'Priority', grp: 'Smart', n: true, get: (l) => priority(l, TODAY), render: (l) => { const p = priority(l, TODAY); return <span className="prio" title={`Priority ${p} / 100`}><span className="trk"><i style={{ width: `${p}%`, background: p >= 70 ? 'var(--bad)' : p >= 45 ? 'var(--warn)' : 'var(--ok)' }} /></span><b>{p}</b></span>; } },
   { id: 'qty', label: 'QTY', n: true, get: (l) => l.qty, render: (l) => q(l.qty) },
   { id: 'ur', label: 'UR', grp: 'Full', n: true, get: (l) => l.ur, render: (l) => q(l.ur) },
   { id: 'qi', label: 'QI', grp: 'Full', n: true, get: (l) => l.qi, render: (l) => q(l.qi) },
@@ -27,7 +33,7 @@ const COLS: Col[] = [
   { id: 'pfc_block', label: 'Block', grp: 'PFC', n: true, full: true, get: (l) => l.pfc_block, render: (l) => q(l.pfc_block) },
   { id: 'plant_qty', label: 'At plant', grp: 'PLANT', n: true, get: (l) => l.plant_qty, render: (l) => q(l.plant_qty) },
   { id: 'short', label: 'Short', grp: 'QTY − UR', n: true, get: (l) => shortBy(l), render: (l) => q(shortBy(l)) },
-  { id: 'coverage', label: 'Coverage', get: (l) => coverage(l), render: (l) => <span className={`pill ${COV_PILL[coverage(l)]}`}>{coverage(l)}</span> },
+  { id: 'coverage', label: 'Coverage', full: true, get: (l) => coverage(l), render: (l) => <span className={`pill ${COV_PILL[coverage(l)]}`}>{coverage(l)}</span> },
   { id: 'stock_plant', label: 'Plant', grp: 'Stock at', full: true, get: (l) => l.stock_plant || '' },
   { id: 'stock_sloc', label: 'St Loc', grp: 'Stock at', full: true, get: (l) => l.stock_sloc || '' },
   { id: 'tn_qty', label: 'TN QTY', grp: 'TRR', n: true, get: (l) => l.tn_qty, render: (l) => q(l.tn_qty) },
@@ -45,7 +51,7 @@ export interface LedgerProps {
 }
 
 export default function Ledger({ rows, canEdit, full, flash, onSave }: LedgerProps) {
-  const [sort, setSort] = useState<{ id: string; dir: 1 | -1 }>({ id: 'date', dir: 1 });
+  const [sort, setSort] = useState<{ id: string; dir: 1 | -1 }>({ id: 'priority', dir: -1 });
   const [limit, setLimit] = useState(250);
   useEffect(() => setLimit(250), [rows.length]);
 

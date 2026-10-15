@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { clearSession, getSession, type User } from '@/lib/api';
 import { useLive, type LiveMessage, type LiveState } from '@/lib/live';
+import { Credit, Logo } from '@/components/Brand';
 
 interface Ctx {
   user: User;
@@ -19,7 +20,7 @@ export const useShell = () => {
   return c;
 };
 
-const SRC_NAME: Record<string, string> = { plan: 'Pull plan', zmmbe: 'ZMMBE', kfc: 'ZMMBE KFC', pfc: 'ZMMBE PFC', plant: 'PLANT report', trr: 'TRR' };
+const SRC_NAME: Record<string, string> = { plan: 'Weekly plan', zmmbe: 'ZMMBE', kfc: 'ZMMBE KFC', pfc: 'ZMMBE PFC', plant: 'PLANT report', trr: 'TRR' };
 
 export default function Shell({ children, admin }: { children: React.ReactNode; admin?: boolean }) {
   const router = useRouter();
@@ -65,19 +66,20 @@ export default function Shell({ children, admin }: { children: React.ReactNode; 
     { href: '/upload/', label: 'Uploads' },
     ...(user.role === 'admin' ? [{ href: '/users/', label: 'Users' }] : []),
   ];
-  const liveText = state === 'live' ? 'Live' : state === 'connecting' ? 'Connecting…' : 'Offline · retrying';
+  const liveText = state === 'live' ? 'Live' : state === 'connecting' ? 'Connecting…' : 'Auto-refresh every 20 s';
 
   return (
     <ShellCtx.Provider value={{ user, live: state, online, subscribe, toast }}>
       <header className="bar">
         <div className="bar-in">
-          <div className="brand">Shade Pull Plan <small>Tracker</small></div>
+          <Link href="/" className="brand"><Logo size={30} /><span className="brand-text">MAS Weekly Plan <small>Tracker</small></span></Link>
           <nav className="nav">
             {nav.map((n) => (
               <Link key={n.href} href={n.href} className={(n.href === '/' ? path === '/' : path?.startsWith(n.href.replace(/\/$/, ''))) ? 'on' : ''}>{n.label}</Link>
             ))}
           </nav>
           <div className="bar-right">
+            <Credit compact />
             <span className={`live ${state === 'live' ? 'on' : state === 'offline' ? 'off' : ''}`} title={online.length ? 'Online: ' + online.join(', ') : ''}>
               <i />{liveText}{state === 'live' && online.length > 0 ? ` · ${online.length} online` : ''}
             </span>
@@ -87,6 +89,7 @@ export default function Shell({ children, admin }: { children: React.ReactNode; 
         </div>
       </header>
       {children}
+      <footer className="site-foot"><Logo size={22} /><span>EFL · MAS Weekly Plan Tracker</span><Credit /></footer>
       <div className="toasts" aria-live="polite">
         {toasts.map((t) => <div key={t.id} className="toast">{t.text}</div>)}
       </div>

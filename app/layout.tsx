@@ -2,8 +2,8 @@ import type { Metadata, Viewport } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Shade Pull Plan Tracker',
-  description: 'Live pull plan tracking from ZMMBE, KFC, PFC, PLANT and TRR reports',
+  title: 'MAS Weekly Plan Tracker',
+  description: 'EFL · MAS weekly plan tracking from ZMMBE, KFC, PFC, PLANT and TRR reports',
 };
 export const viewport: Viewport = { width: 'device-width', initialScale: 1, viewportFit: 'cover' };
 

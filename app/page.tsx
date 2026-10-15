@@ -7,7 +7,9 @@ import { ProgressByDate, QtyByDate, COV_COLOR } from '@/components/Charts';
 import { api } from '@/lib/api';
 import { COVERAGES, ago, compact, coverage, fmt, fmtDate, isDone, totals, type Coverage, type Line, type Upload } from '@/lib/calc';
 import { exportPullPlan } from '@/lib/export';
+import { CountUp } from '@/components/Brand';
 import { SRC_INFO, SRC_ORDER } from '@/lib/mapping';
+import { ACTION_HELP, insights, matchView, planWeek, todayLocal, type Action, type View } from '@/lib/smart';
 
 export default function Page() {
   return <Shell><Dashboard /></Shell>;
@@ -17,7 +19,7 @@ interface PullPlan { rows: Line[]; uploads: Upload[]; counts: { src: string; n: 
 interface Activity { at: string; username: string; action: string; detail: string }
 
 function Dashboard() {
-  const { user, subscribe, online, toast } = useShell();
+  const { user, subscribe, online, toast, live } = useShell();
   const [data, setData] = useState<PullPlan | null>(null);
   const [err, setErr] = useState('');
   const [activity, setActivity] = useState<Activity[]>([]);
@@ -32,6 +34,21 @@ function Dashboard() {
   const [remark, setRemark] = useState('');
   const [search, setSearch] = useState('');
   const [full, setFull] = useState(false);
+  const [view, setView] = useState<View>({ kind: 'all' });
+  const searchRef = useRef<HTMLInputElement>(null);
+  const tableRef = useRef<HTMLElement>(null);
+  const today = todayLocal();
+
+  // "/" jumps to search, Esc clears the smart view
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement;
+      if (e.key === '/' && !/INPUT|TEXTAREA|SELECT/.test(t.tagName)) { e.preventDefault(); searchRef.current?.focus(); }
+      if (e.key === 'Escape' && !/INPUT|TEXTAREA|SELECT/.test(t.tagName)) setView({ kind: 'all' });
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -40,6 +57,12 @@ function Dashboard() {
     } catch (e) { setErr(e instanceof Error ? e.message : 'Could not load data.'); }
   }, []);
   useEffect(() => { load(); }, [load]);
+  // when the realtime connection is down (or not set up on the Worker), refresh every 20 s instead
+  useEffect(() => {
+    if (live === 'live') return;
+    const t = setInterval(() => { if (document.visibilityState === 'visible') load(); }, 20000);
+    return () => clearInterval(t);
+  }, [live, load]);
   useEffect(() => { const t = setInterval(() => tick((x) => x + 1), 30000); return () => clearInterval(t); }, []);
 
   // realtime: a new upload reloads everything; a status edit patches the one line in place
@@ -68,11 +91,22 @@ function Dashboard() {
   const tableRows = useMemo(() => {
     const s = search.trim().toLowerCase();
     return scoped.filter((r) =>
-      (state === 'all' || (state === 'done' ? isDone(r) : !isDone(r))) &&
+      (view.kind !== 'all' ? matchView(r, view, today) : state === 'all' || (state === 'done' ? isDone(r) : !isDone(r))) &&
       (!cov || coverage(r) === cov) &&
       (!s || [r.so, r.li, r.item, r.status, r.comment, r.vehicle, r.remarks, r.tn_number, r.stock_plant].join(' ').toLowerCase().includes(s)));
-  }, [scoped, state, cov, search]);
+  }, [scoped, state, cov, search, view, today]);
   const t = useMemo(() => totals(scoped), [scoped]);
+  const week = useMemo(() => planWeek(rows), [rows]);
+  const tips = useMemo(() => insights(scoped, data?.uploads || [], today), [scoped, data?.uploads, today]);
+  const viewCounts = useMemo(() => {
+    const c: Record<string, number> = {};
+    const views: [string, View][] = [['urgent', { kind: 'urgent' }], ['priority', { kind: 'priority' }],
+      ...(['Ready to pull', 'Release QI / Block', 'Partial pull', 'Follow up TN', 'No stock'] as Action[]).map((a) => [a, { kind: 'action', value: a }] as [string, View])];
+    for (const [k, v] of views) c[k] = scoped.filter((r) => matchView(r, v, today)).length;
+    return c;
+  }, [scoped, today]);
+  const openView = (v: View) => { setView(v); setTimeout(() => tableRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50); };
+  const viewKey = view.kind === 'action' ? view.value : view.kind;
 
   const save = useCallback(async (key: string, field: 'status' | 'comment' | 'vehicle', value: string) => {
     setData((d) => d && { ...d, rows: d.rows.map((r) => (r.key === key ? { ...r, [field]: value || null, updated_by: user.username } : r)) });
@@ -87,10 +121,10 @@ function Dashboard() {
   if (err && !data) return <main className="page"><div className="notice bad">{err}</div></main>;
 
   return (
-    <main className="page">
+    <main className="page anim">
       <div className="page-head">
         <div>
-          <h1>Pull plan tracking</h1>
+          <h1>{week ? <>Week {week} <span className="h1-sub">plan tracking</span></> : 'Weekly plan tracking'}</h1>
           <p>
             {data ? <>Calculated {ago(data.generatedAt)} from the latest uploads. {t.open > 0 ? <><b>{fmt(t.shortLines)}</b> open lines need <b>{fmt(t.short, 0)}</b> more than the Full UR stock holds.</> : 'All lines in view are done.'}</> : 'Loading…'}
           </p>
@@ -113,24 +147,36 @@ function Dashboard() {
         })}
       </div>
 
+      {data && rows.length > 0 && (
+        <section className="insights" aria-label="Smart insights">
+          {tips.map((i, n) => (
+            <button key={i.id} type="button" className={`insight ${i.tone}`} style={{ animationDelay: `${n * 60}ms` }} disabled={!i.view} onClick={() => i.view && openView(i.view)}>
+              <span className="dot" />
+              <span className="txt"><b>{i.title}</b><span>{i.detail}</span></span>
+              {i.view && <span className="go" aria-hidden="true">→</span>}
+            </button>
+          ))}
+        </section>
+      )}
+
       {data && rows.length === 0 ? (
         <div className="card empty">
-          <strong>No pull plan yet</strong>
-          <span>Upload the pull plan and the ZMMBE, KFC, PFC, PLANT and TRR reports to start tracking.</span>
+          <strong>No weekly plan yet</strong>
+          <span>Upload the weekly plan and the ZMMBE, KFC, PFC, PLANT and TRR reports to start tracking.</span>
           {canEdit && <Link className="btn primary" href="/upload/">Go to uploads</Link>}
         </div>
       ) : (
         <>
           <section className="kpis" aria-label="Key figures">
-            <div className="kpi"><span className="k">Plan lines</span><span className={`v ${!data ? 'skel' : ''}`}>{fmt(t.lines)}</span>
+            <div className="kpi"><span className="k">Plan lines</span><span className={`v ${!data ? 'skel' : ''}`}><CountUp value={t.lines} format={(n) => fmt(n)} /></span>
               <span className="s">{fmt(t.done)} done · {fmt(t.open)} open</span>
               <div className="meter"><span style={{ width: `${t.lines ? (t.done / t.lines) * 100 : 0}%`, background: 'var(--ok)' }} /></div></div>
-            <div className="kpi"><span className="k">Required QTY</span><span className="v">{compact(t.qty)}</span><span className="s">Variance (QTY − Assigned) {compact(t.variance)}</span></div>
-            <div className="kpi"><span className="k">Full UR stock</span><span className="v">{compact(t.ur)}</span><span className="s">QI {compact(t.qi)} · Block {compact(t.block)}</span></div>
-            <div className="kpi"><span className="k">KFC / PFC UR</span><span className="v">{compact(t.kfc_ur)}</span><span className="s">PFC {compact(t.pfc_ur)}</span></div>
-            <div className="kpi"><span className="k">At plant (PLANT)</span><span className="v">{compact(t.plant_qty)}</span><span className="s">TN QTY {compact(t.tn_qty)}</span></div>
-            <div className={`kpi ${t.shortLines ? 'bad' : 'ok'}`}><span className="k">Open & short of UR</span><span className="v">{fmt(t.shortLines)}</span><span className="s">{compact(t.short)} QTY not covered</span></div>
-            <div className="kpi"><span className="k">Stock coverage</span><span className="v">{t.lines ? Math.round((t.cov.Covered / t.lines) * 100) : 0}%</span>
+            <div className="kpi"><span className="k">Required QTY</span><span className="v"><CountUp value={t.qty} format={compact} /></span><span className="s">Variance (QTY − Assigned) {compact(t.variance)}</span></div>
+            <div className="kpi"><span className="k">Full UR stock</span><span className="v"><CountUp value={t.ur} format={compact} /></span><span className="s">QI {compact(t.qi)} · Block {compact(t.block)}</span></div>
+            <div className="kpi"><span className="k">KFC / PFC UR</span><span className="v"><CountUp value={t.kfc_ur} format={compact} /></span><span className="s">PFC {compact(t.pfc_ur)}</span></div>
+            <div className="kpi"><span className="k">At plant (PLANT)</span><span className="v"><CountUp value={t.plant_qty} format={compact} /></span><span className="s">TN QTY {compact(t.tn_qty)}</span></div>
+            <div className={`kpi ${t.shortLines ? 'bad' : 'ok'}`}><span className="k">Open & short of UR</span><span className="v"><CountUp value={t.shortLines} format={(n) => fmt(n)} /></span><span className="s">{compact(t.short)} QTY not covered</span></div>
+            <div className="kpi"><span className="k">Stock coverage</span><span className="v"><CountUp value={t.lines ? (t.cov.Covered / t.lines) * 100 : 0} format={(n) => Math.round(n) + '%'} /></span>
               <span className="s">lines with UR ≥ QTY</span>
               <div className="meter">{COVERAGES.map((c) => <span key={c} title={`${c}: ${t.cov[c]}`} style={{ width: `${t.lines ? (t.cov[c] / t.lines) * 100 : 0}%`, background: COV_COLOR[c] }} />)}</div></div>
           </section>
@@ -156,7 +202,7 @@ function Dashboard() {
             <div className="seg" role="group" aria-label="Done filter">
               {(['open', 'done', 'all'] as const).map((s) => <button key={s} className={state === s ? 'on' : ''} onClick={() => setState(s)}>{s === 'open' ? 'Open' : s === 'done' ? 'Done' : 'All'}</button>)}
             </div>
-            <input type="search" placeholder="Search SO, item, TN, vehicle, comment…" value={search} onChange={(e) => setSearch(e.target.value)} aria-label="Search" />
+            <input ref={searchRef} type="search" placeholder="Search SO, item, TN, vehicle…  ( / )" value={search} onChange={(e) => setSearch(e.target.value)} aria-label="Search" />
             {filtersOn && <button className="btn sm" onClick={() => { setDate(null); setPlant(''); setRemark(''); setCov(''); setSearch(''); }}>Clear filters</button>}
           </div>
 
@@ -174,16 +220,27 @@ function Dashboard() {
           </div>
 
           <div className="main-split">
-            <section className="card table-card">
+            <section className="card table-card" ref={tableRef}>
               <div className="table-head">
                 <div>
-                  <h2>Pull plan lines</h2>
+                  <h2>Plan lines</h2>
                   <p className="sub" style={{ margin: 0 }}>{fmt(tableRows.length)} lines{canEdit ? ' · click Status, Comment or Vehicle to edit — everyone sees it instantly' : ''}</p>
                 </div>
                 <div className="seg" role="group" aria-label="Columns">
                   <button className={!full ? 'on' : ''} onClick={() => setFull(false)}>Key columns</button>
                   <button className={full ? 'on' : ''} onClick={() => setFull(true)}>All columns</button>
                 </div>
+              </div>
+              <div className="views" role="group" aria-label="Smart views">
+                {([['all', 'All lines', { kind: 'all' }], ['urgent', 'Urgent', { kind: 'urgent' }], ['priority', 'Priority', { kind: 'priority' }],
+                  ['Ready to pull', 'Ready to pull', { kind: 'action', value: 'Ready to pull' }], ['Release QI / Block', 'Release QI / Block', { kind: 'action', value: 'Release QI / Block' }],
+                  ['Partial pull', 'Partial pull', { kind: 'action', value: 'Partial pull' }], ['Follow up TN', 'Follow up TN', { kind: 'action', value: 'Follow up TN' }],
+                  ['No stock', 'No stock', { kind: 'action', value: 'No stock' }]] as [string, string, View][]).map(([k, label, v]) => (
+                  <button key={k} type="button" className={`view-chip ${viewKey === k ? 'on' : ''} v-${k.replace(/[^a-z]/gi, '').toLowerCase()}`} onClick={() => setView(v)}
+                    title={k in ACTION_HELP ? ACTION_HELP[k as Action] : k === 'urgent' ? 'Due today or overdue and not covered by UR' : k === 'priority' ? '1st priority / last pallet lines still open' : 'Uses the Open / Done filter'}>
+                    {label}{k !== 'all' && <span className="n">{fmt(viewCounts[k] ?? 0)}</span>}
+                  </button>
+                ))}
               </div>
               <Ledger rows={tableRows} canEdit={canEdit} full={full} flash={flash} onSave={save} />
               <datalist id="status-options">{STATUS_OPTIONS.map((s) => <option key={s} value={s} />)}</datalist>
@@ -193,7 +250,7 @@ function Dashboard() {
             <aside className="card">
               <h2>Live activity</h2>
               <p className="sub">Who is online and what changed.</p>
-              <div className="online">{online.length ? online.map((u) => <span key={u}>{u}</span>) : <span className="muted" style={{ background: 'none' }}>Connecting…</span>}</div>
+              <div className="online">{live === 'live' ? online.map((u) => <span key={u}>{u}</span>) : <span className="muted" style={{ background: 'none', padding: 0 }}>Realtime off · auto-refresh every 20 s</span>}</div>
               <div className="feed">
                 {activity.length === 0 && <div className="muted">Nothing yet.</div>}
                 {activity.map((a, i) => (

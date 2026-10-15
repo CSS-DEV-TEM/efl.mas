@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { api, getSession, saveSession, type User } from '@/lib/api';
+import { Credit, Logo } from '@/components/Brand';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -26,17 +27,20 @@ export default function LoginPage() {
 
   return (
     <main className="login-wrap">
+      <div className="login-bg" aria-hidden="true"><i /><i /><i /><span className="threads" /></div>
       <form className="login card" onSubmit={submit}>
+        <div className="login-logo"><Logo size={56} /></div>
         <div>
-          <h1>Shade Pull Plan</h1>
-          <p>Sign in to track pull plan lines against ZMMBE, KFC, PFC, PLANT and TRR stock.</p>
+          <h1>MAS Weekly Plan Tracker</h1>
+          <p>Sign in to track this week's plan lines against ZMMBE, KFC, PFC, PLANT and TRR stock.</p>
         </div>
         <div className="form">
           <label htmlFor="u">Username<input id="u" autoComplete="username" value={username} onChange={(e) => setU(e.target.value)} required /></label>
           <label htmlFor="p">Password<input id="p" type="password" autoComplete="current-password" value={password} onChange={(e) => setP(e.target.value)} required /></label>
           {err && <div className="notice bad" role="alert">{err}</div>}
-          <button className="btn primary" type="submit" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
+          <button className="btn primary login-btn" type="submit" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
         </div>
+        <div className="login-credit"><Credit /></div>
       </form>
     </main>
   );

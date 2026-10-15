@@ -78,7 +78,7 @@ export function QtyByDate({ rows, onPick, picked }: { rows: Line[]; onPick: (d: 
             let base = 0;
             const dim = picked && picked !== d.date;
             return (
-              <g key={d.date} opacity={dim ? 0.35 : 1} style={{ cursor: 'pointer' }}
+              <g key={d.date} className="bar-grow" opacity={dim ? 0.35 : 1} style={{ cursor: 'pointer', animationDelay: `${i * 90}ms` }}
                 onClick={() => onPick(picked === d.date ? null : d.date)}
                 onMouseMove={(e) => setTip({ ...place(e, ref.current), title: `${fmtDate(d.date)} · ${fmt(d.lines)} lines`, rows: [...COVERAGES.map((c) => [COV_COLOR[c], c, fmt(d[c], 1)] as [string, string, string]), [null, 'Total QTY', fmt(d.total, 1)]] })}
                 onMouseLeave={() => setTip(null)}>

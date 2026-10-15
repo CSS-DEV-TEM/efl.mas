@@ -46,7 +46,7 @@ function Users() {
   }
 
   return (
-    <main className="page" style={{ maxWidth: 900 }}>
+    <main className="page anim" style={{ maxWidth: 900 }}>
       <div className="page-head">
         <div>
           <h1>Users</h1>

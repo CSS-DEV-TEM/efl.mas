@@ -74,7 +74,7 @@ export const FIELDS: Record<Src, FieldDef[]> = {
 };
 
 export const SRC_INFO: Record<Src, { title: string; hint: string }> = {
-  plan: { title: 'Pull plan', hint: 'SO / LI / Item Code / Date / QTY / Plant' },
+  plan: { title: 'Weekly plan', hint: 'SO / LI / Item Code / Date / QTY / Plant' },
   zmmbe: { title: 'ZMMBE', hint: 'Full stock: UR, QI, Block, Assigned' },
   kfc: { title: 'ZMMBE KFC', hint: 'KFC stock: UR, QI, Block' },
   pfc: { title: 'ZMMBE PFC', hint: 'PFC stock: UR, QI, Block' },
