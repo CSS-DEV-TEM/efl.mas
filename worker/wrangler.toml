@@ -1,0 +1,27 @@
+name = "shade-tracker-api"
+main = "src/index.ts"
+compatibility_date = "2025-06-01"
+
+# Paste the database_id that `npx wrangler d1 create shade-tracker` prints.
+[[d1_databases]]
+binding = "DB"
+database_name = "shade-tracker"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+# Realtime hub (WebSockets)
+[[durable_objects.bindings]]
+name = "HUB"
+class_name = "LiveHub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["LiveHub"]
+
+[vars]
+# Your Vercel URL(s), comma separated. "*" allows any site (fine for testing).
+ALLOWED_ORIGINS = "*"
+
+# Secrets (set with `npx wrangler secret put NAME`, never put them in this file):
+#   JWT_SECRET      long random text used to sign logins
+#   ADMIN_USER      first admin's username (used only while there are no users)
+#   ADMIN_PASSWORD  first admin's password

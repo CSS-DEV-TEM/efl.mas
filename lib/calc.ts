@@ -1,0 +1,77 @@
+/** Types and the tracking figures worked out on top of the API's pull plan rows. */
+
+export interface Line {
+  row_no: number; key: string; so: string; li: string; item: string; date: string | null; qty: number;
+  plant: string | null; remarks: string | null;
+  ur: number; qi: number; block: number; assigned: number; variance: number;
+  kfc_ur: number; kfc_qi: number; kfc_block: number; pfc_ur: number; pfc_qi: number; pfc_block: number;
+  plant_qty: number; stock_plant: string | null; stock_sloc: string | null; at_plant: string | null;
+  tn_qty: number; tn_number: string | null; dup: number;
+  status: string | null; comment: string | null; vehicle: string | null; qi_note: string | null;
+  updated_by: string | null; updated_at: string | null;
+}
+
+export interface Upload { src: string; file_name: string | null; sheet_name: string | null; row_count: number; uploaded_by: string; uploaded_at: string }
+
+export type Coverage = 'Covered' | 'Partial' | 'QI / Block only' | 'No stock';
+export const COVERAGES: Coverage[] = ['Covered', 'Partial', 'QI / Block only', 'No stock'];
+
+/** Covered: Full UR ≥ QTY. Partial: some UR. QI / Block only: no UR but QI or blocked stock. No stock: nothing in ZMMBE. */
+export function coverage(l: Line): Coverage {
+  if (l.ur >= l.qty - 1e-9 && l.qty > 0) return 'Covered';
+  if (l.ur > 0) return 'Partial';
+  if (l.qi + l.block > 0) return 'QI / Block only';
+  return 'No stock';
+}
+export const isDone = (l: Line) => /\bdone\b/i.test(l.status || '');
+/** QTY not yet covered by Full UR stock. */
+export const shortBy = (l: Line) => Math.max(0, l.qty - l.ur);
+
+export interface Totals {
+  lines: number; done: number; open: number; qty: number; ur: number; qi: number; block: number; assigned: number;
+  variance: number; kfc_ur: number; pfc_ur: number; plant_qty: number; tn_qty: number; short: number; shortLines: number;
+  cov: Record<Coverage, number>; covQty: Record<Coverage, number>;
+}
+
+export function totals(rows: Line[]): Totals {
+  const t: Totals = {
+    lines: rows.length, done: 0, open: 0, qty: 0, ur: 0, qi: 0, block: 0, assigned: 0, variance: 0, kfc_ur: 0, pfc_ur: 0,
+    plant_qty: 0, tn_qty: 0, short: 0, shortLines: 0,
+    cov: { Covered: 0, Partial: 0, 'QI / Block only': 0, 'No stock': 0 },
+    covQty: { Covered: 0, Partial: 0, 'QI / Block only': 0, 'No stock': 0 },
+  };
+  // stock is per SO|LI|Item, so a key that appears twice in the plan is counted once
+  const seen = new Set<string>();
+  for (const l of rows) {
+    const d = isDone(l);
+    if (d) t.done++; else t.open++;
+    t.qty += l.qty; t.variance += l.variance;
+    const c = coverage(l);
+    t.cov[c]++; t.covQty[c] += l.qty;
+    if (!d && shortBy(l) > 0) { t.short += shortBy(l); t.shortLines++; }
+    if (seen.has(l.key)) continue;
+    seen.add(l.key);
+    t.ur += l.ur; t.qi += l.qi; t.block += l.block; t.assigned += l.assigned;
+    t.kfc_ur += l.kfc_ur; t.pfc_ur += l.pfc_ur; t.plant_qty += l.plant_qty; t.tn_qty += l.tn_qty;
+  }
+  return t;
+}
+
+export const fmt = (n: number, d = 0) => (Number.isFinite(n) ? n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }) : '–');
+export const fmtQty = (n: number) => (Math.abs(n) < 0.0005 ? '–' : fmt(n, Math.abs(n) >= 100 ? 0 : 2));
+export const compact = (n: number) => (Math.abs(n) >= 10000 ? new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(n) : fmt(n));
+export function fmtDate(d: string | null) {
+  if (!d) return '–';
+  const m = d.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return d;
+  const dt = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+  return dt.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
+}
+export function ago(iso: string | null | undefined) {
+  if (!iso) return '';
+  const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  if (s < 45) return 'just now';
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+  return `${Math.round(s / 86400)} d ago`;
+}
