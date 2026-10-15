@@ -3,6 +3,8 @@
   "private": true,
   "version": "1.0.0",
   "scripts": {
+    "prebuild": "node unpack-source.mjs",
+    "predev": "node unpack-source.mjs",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
