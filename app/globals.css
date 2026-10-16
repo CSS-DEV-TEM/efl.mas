@@ -468,3 +468,4 @@ table.mini .n { text-align: right; font-variant-numeric: tabular-nums; }
 table.mini td.neg { color: var(--bad); }
 .disp-pre { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; font-size: 12.5px; }
 .maprow select { min-width: 0; width: 100%; }
+.api-old { max-width: 1400px; margin: 12px auto 0; width: calc(100% - 32px); }

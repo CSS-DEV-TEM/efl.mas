@@ -2,7 +2,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { clearSession, getSession, type User } from '@/lib/api';
+import { NEEDS_API, api, clearSession, getSession, type User } from '@/lib/api';
 import { useLive, type LiveMessage, type LiveState } from '@/lib/live';
 import { Credit, Logo } from '@/components/Brand';
 
@@ -39,6 +39,13 @@ export default function Shell({ children, admin, allowGuest }: { children: React
     if (admin && s.user.role !== 'admin') { router.replace('/'); return; }
     setUser(s.user);
   }, [router, admin, allowGuest]);
+
+  // warn when the website was updated but the Cloudflare Worker was not
+  const [oldApi, setOldApi] = useState<number | null>(null);
+  useEffect(() => {
+    if (!user || guest) return;
+    api<{ version?: number }>('/api/health').then((h) => setOldApi((h.version ?? 0) < NEEDS_API ? h.version ?? 0 : null)).catch(() => {});
+  }, [user, guest]);
 
   const toast = useCallback((text: string) => {
     const id = Date.now() + Math.random();
@@ -99,6 +106,12 @@ export default function Shell({ children, admin, allowGuest }: { children: React
           </div>
         </div>
       </header>
+      {oldApi !== null && (
+        <div className="notice bad api-old" role="alert">
+          <b>The Worker (API) on Cloudflare is out of date</b> (version {oldApi || 'old'}, this website needs {NEEDS_API}). Uploads will lose data — e.g. SOs starting with a letter (E101697207) are dropped.
+          Paste the latest <b>worker.js</b> in Cloudflare → Worker → Edit code → Deploy, then reload this page.
+        </div>
+      )}
       {children}
       <footer className="site-foot"><Logo size={22} /><span>EFL · MAS Weekly Plan Tracker</span><Credit /></footer>
       <div className="toasts" aria-live="polite">
