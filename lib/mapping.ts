@@ -10,7 +10,8 @@
 import * as XLSX from 'xlsx';
 
 export type Src = 'plan' | 'zmmbe' | 'kfc' | 'pfc' | 'plant' | 'trr';
-export const SRC_ORDER: Src[] = ['plan', 'zmmbe', 'kfc', 'pfc', 'plant', 'trr'];
+/** Reports offered on the Uploads page (TRR is no longer uploaded). */
+export const SRC_ORDER: Src[] = ['plan', 'zmmbe', 'kfc', 'pfc', 'plant'];
 
 export interface FieldDef {
   id: string;
@@ -88,7 +89,6 @@ export function guessSrc(sheetName: string): Src | null {
   if (s.includes('kfc')) return 'kfc';
   if (s.includes('pfc')) return 'pfc';
   if (s.includes('zmmbe') || s === 'mmbe') return 'zmmbe';
-  if (s.includes('trr') || s === 'tn') return 'trr';
   if (s.includes('plant')) return 'plant';
   if (s.includes('pullplan') || s.includes('plan')) return 'plan';
   return null;

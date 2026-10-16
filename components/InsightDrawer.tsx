@@ -3,13 +3,22 @@ import { useEffect, useMemo, useState } from 'react';
 import { fmt, fmtDate, fmtQty, isDone, shortBy, type Line } from '@/lib/calc';
 import { ACTION_PILL, DUE_PILL, action, due, priority, todayLocal, type Insight } from '@/lib/smart';
 import { exportPullPlan } from '@/lib/export';
+import { canRelease, releaseFor, releaseLines } from '@/lib/release';
 
 /** Opens from a Smart Insights card: the full finding, its totals and the lines behind it. */
-export default function InsightDrawer({ insight, rows, week, canEdit, onEdit, onShowInTable, onClose }: {
+export default function InsightDrawer({ insight, rows, week, canEdit, onEdit, onShowInTable, onClose, onReleased }: {
   insight: Insight; rows: Line[]; week: string; canEdit: boolean;
-  onEdit: (l: Line) => void; onShowInTable: () => void; onClose: () => void;
+  onEdit: (l: Line) => void; onShowInTable: () => void; onClose: () => void; onReleased?: (msg: string) => void;
 }) {
   const [q, setQ] = useState('');
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
+  const releasable = useMemo(() => rows.filter(canRelease), [rows]);
+  const relQty = releasable.reduce((t, l) => { const r = releaseFor(l); return t + r.qi + r.block; }, 0);
+  const release = async () => {
+    setBusy(true); setErr('');
+    try { const r = await releaseLines(week, releasable); onReleased?.(`Released ${fmt(r.qty, 2)} QI / Block to UR on ${fmt(r.lines)} line${r.lines === 1 ? '' : 's'} — they are now Ready to pull`); onClose(); }
+    catch (e) { setErr(e instanceof Error ? e.message : 'Release failed.'); } finally { setBusy(false); }
+  };
   const today = todayLocal();
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
@@ -50,10 +59,16 @@ export default function InsightDrawer({ insight, rows, week, canEdit, onEdit, on
 
         <div className="drawer-tools">
           <input type="search" placeholder="Search these lines…" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search these lines" />
+          {canEdit && releasable.length > 0 && (
+            <button type="button" className="btn ok-btn" disabled={busy} onClick={release} title="QI first, then Block, only what each line is short of">
+              {busy ? 'Releasing…' : `Release to UR · ${fmt(releasable.length)} line${releasable.length === 1 ? '' : 's'} · ${fmt(relQty, 2)}`}
+            </button>
+          )}
           <button type="button" className="btn" onClick={onShowInTable}>Show in main table</button>
           <button type="button" className="btn primary" disabled={!rows.length} onClick={() => exportPullPlan(sorted, `MAS_${insight.id}_${week.replace('-', '_')}`)}>Export</button>
         </div>
 
+        {err && <div className="notice bad" style={{ margin: '0 16px' }}>{err}</div>}
         <div className="drawer-table">
           <table className="ledger">
             <thead>

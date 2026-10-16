@@ -13,10 +13,15 @@ export interface Line {
   updated_by: string | null; updated_at: string | null;
   /** from the dispatch upload: QTY dispatched against this line, plan QTY left, UR left after the dispatch */
   dispatched?: number; balance?: number; ur_left?: number;
+  /** QI / Block released to UR by hand (until the next ZMMBE) */
+  released?: number;
+  /** dispatch item whose left-over QTY was assigned to this line */
+  assigned_from?: string;
 }
 
-export interface DispatchItem { item: string; dispatched: number; allocated: number; over: number; planQty: number; lines: number; complete: number; pallets: number }
-export interface DispatchSummary { total: number; items: DispatchItem[]; unmatched: DispatchItem[] }
+export interface DispatchItem { item: string; dispatched: number; allocated: number; over: number; assigned?: number; planQty: number; lines: number; complete: number; pallets: number }
+export interface DispatchAssign { id: number; week: string; item: string; line: string; qty: number; by_user?: string; at?: string; applied?: number }
+export interface DispatchSummary { total: number; items: DispatchItem[]; unmatched: DispatchItem[]; leftover?: DispatchItem[]; assigns?: DispatchAssign[]; planLines?: number; elsewhere?: Record<string, string[]> }
 
 /** QTY still to send (plan QTY − dispatched). */
 export const need = (l: Line) => (l.balance ?? l.qty);

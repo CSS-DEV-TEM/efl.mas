@@ -182,7 +182,7 @@ export function insights(rows: Line[], uploads: Upload[], today = todayLocal(), 
 
   // data health
   const up = new Map(uploads.map((u) => [u.src, u]));
-  const missing = ['zmmbe', 'kfc', 'pfc', 'plant', 'trr'].filter((s) => !up.has(s));
+  const missing = ['zmmbe', 'kfc', 'pfc', 'plant'].filter((s) => !up.has(s));
   if (rows.length && missing.length) out.push({ id: 'missing', tone: 'warn', count: missing.length, label: 'Reports missing', title: `${missing.length} report${missing.length > 1 ? 's' : ''} not uploaded yet`, detail: `Missing: ${missing.map((s) => ({ zmmbe: 'ZMMBE', kfc: 'ZMMBE KFC', pfc: 'ZMMBE PFC', plant: 'PLANT', trr: 'TRR' } as Record<string, string>)[s]).join(', ')}. Figures that use them show 0.` });
   const z = up.get('zmmbe');
   if (z && Date.now() - Date.parse(z.uploaded_at) > 12 * 3600 * 1000) out.push({ id: 'stale', tone: 'warn', count: `${Math.round((Date.now() - Date.parse(z.uploaded_at)) / 3600000)}h`, label: 'Stock data age', title: 'Stock data is more than 12 hours old', detail: `ZMMBE was uploaded ${Math.round((Date.now() - Date.parse(z.uploaded_at)) / 3600000)} h ago. Upload a fresh export for today's picture.` });

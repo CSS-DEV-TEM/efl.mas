@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import { fmtQty, type Line } from '@/lib/calc';
 import { ACTION_HELP, action } from '@/lib/smart';
+import { canRelease, releaseFor, releaseLines, undoRelease } from '@/lib/release';
 
 /**
  * Edit one plan line (QTY, date, plant, remarks + tracking fields), add a new one, or delete it.
@@ -37,7 +38,7 @@ export default function EditLine({ line, week, onClose, onSaved }: {
       if (adding) {
         await api('/api/plan', { method: 'POST', body: { week, so: f.so, li: f.li, item: f.item, date: f.date || null, qty: f.qty, plant: f.plant, remarks: f.remarks } });
         if (f.status || f.comment || f.vehicle) {
-          await api('/api/status', { method: 'PATCH', body: { key: `${f.so.trim().replace(/^0+/, '')}|${f.li.trim().replace(/^0+(?=\d)/, '')}|${f.item.trim().replace(/^0+/, '')}`, week, status: f.status || null, comment: f.comment || null, vehicle: f.vehicle || null } });
+          await api('/api/status', { method: 'PATCH', body: { key: `${f.so.trim().toUpperCase().replace(/^0+/, '')}|${f.li.trim().replace(/^0+(?=\d)/, '')}|${f.item.trim().replace(/^0+/, '')}`, week, status: f.status || null, comment: f.comment || null, vehicle: f.vehicle || null } });
         }
         onSaved(`Added ${f.so} / ${f.li}`);
       } else {
@@ -52,6 +53,16 @@ export default function EditLine({ line, week, onClose, onSaved }: {
       }
       onClose();
     } catch (e) { setErr(e instanceof Error ? e.message : 'Could not save.'); } finally { setBusy(false); }
+  }
+
+  async function release(undo = false) {
+    if (!line) return;
+    setBusy(true); setErr('');
+    try {
+      if (undo) { await undoRelease(line.week, line.key); onSaved(`Release undone for ${line.so} / ${line.li}`); }
+      else { const r = await releaseLines(line.week, [line]); onSaved(`Released ${fmtQty(r.qty)} QI / Block to UR for ${line.so} / ${line.li}`); }
+      onClose();
+    } catch (e) { setErr(e instanceof Error ? e.message : 'Could not release.'); } finally { setBusy(false); }
   }
 
   async function del() {
@@ -72,6 +83,13 @@ export default function EditLine({ line, week, onClose, onSaved }: {
           <button type="button" className="btn sm" onClick={onClose} aria-label="Close">✕</button>
         </div>
 
+        {!adding && (canRelease(line) || (line.released ?? 0) > 0) && (
+          <div className="rel-box">
+            {(line.released ?? 0) > 0
+              ? <><span><b>{fmtQty(line.released ?? 0)}</b> QI / Block released to UR (counts until the next ZMMBE upload).</span><button type="button" className="btn sm" disabled={busy} onClick={() => release(true)}>Undo release</button></>
+              : <><span>UR is short by {fmtQty(releaseFor(line).qi + releaseFor(line).block)}. QI {fmtQty(line.qi)} · Block {fmtQty(line.block)} can cover it.</span><button type="button" className="btn sm ok-btn" disabled={busy} onClick={() => release()}>Release QI / Block → UR</button></>}
+          </div>
+        )}
         <fieldset className="mgrid">
           <legend>Plan line</legend>
           <label>SO<input ref={adding ? first : undefined} value={f.so} onChange={set('so')} readOnly={!adding} required inputMode="numeric" /></label>

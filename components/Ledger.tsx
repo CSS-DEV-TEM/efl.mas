@@ -22,7 +22,7 @@ const COLS: Col[] = [
   { id: 'qty', label: 'QTY', n: true, get: (l) => l.qty, render: (l) => q(l.qty) },
   { id: 'dispatched', label: 'Dispatched', grp: 'Dispatch', n: true, get: (l) => l.dispatched ?? 0, render: (l) => (l.dispatched ? <span className="disp-q">{q(l.dispatched)}{isDispatched(l) && <span className="tick" title="Fully dispatched — complete">✓</span>}</span> : '–') },
   { id: 'balance', label: 'Balance', grp: 'Dispatch', n: true, get: (l) => need(l), render: (l) => (l.dispatched ? <b className={need(l) > 0 ? '' : 'pos'}>{need(l) > 0 ? q(need(l)) : '0'}</b> : q(need(l))) },
-  { id: 'ur', label: 'UR', grp: 'Full', n: true, get: (l) => l.ur, render: (l) => q(l.ur) },
+  { id: 'ur', label: 'UR', grp: 'Full', n: true, get: (l) => l.ur, render: (l) => (l.released ? <span title={`Includes ${q(l.released)} QI / Block released to UR`}>{q(l.ur)}<span className="rel-tag">+rel</span></span> : q(l.ur)) },
   { id: 'ur_left', label: 'UR left', grp: 'Full', n: true, full: true, get: (l) => avail(l), render: (l) => q(avail(l)) },
   { id: 'qi', label: 'QI', grp: 'Full', n: true, get: (l) => l.qi, render: (l) => q(l.qi) },
   { id: 'block', label: 'Block', grp: 'Full', n: true, get: (l) => l.block, render: (l) => q(l.block) },

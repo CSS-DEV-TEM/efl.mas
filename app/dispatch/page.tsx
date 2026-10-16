@@ -6,6 +6,7 @@ import { api } from '@/lib/api';
 import { ago, fmt, fmtDate, fmtQty, isDispatched, need, avail, type DispatchSummary, type Line, type WeekInfo } from '@/lib/calc';
 import { colLetter, readWorkbook, type Grid } from '@/lib/mapping';
 import { takePendingDispatch } from '@/lib/handoff';
+import AssignDispatch from '@/components/AssignDispatch';
 
 export default function Page() {
   return <Shell><Dispatch /></Shell>;
@@ -101,10 +102,13 @@ function Dispatch() {
     try {
       const w = weekRef.current;
       const p = await api<PullPlan>('/api/pullplan' + (w ? '?week=' + encodeURIComponent(w) : ''));
+      // a slower answer for a week no longer picked must not overwrite the current one
+      if (weekRef.current && p.week !== weekRef.current) return;
       setPlan(p);
-      if (!w && p.week) setWeek(p.week);
+      if (!w && p.week) setWeek((cur) => cur ?? p.week);
       if (p.week) {
         const d = await api<{ rows: DispRow[]; history: { at: string; username: string; detail: string }[] }>('/api/dispatch?week=' + encodeURIComponent(p.week));
+        if (weekRef.current && weekRef.current !== p.week) return;
         setSaved(d.rows); setHistory(d.history);
       }
       setErr('');
@@ -173,7 +177,7 @@ function Dispatch() {
   const d = plan?.dispatch;
   const lines = useMemo(() => {
     const items = new Set((d?.items || []).map((i) => i.item));
-    return (plan?.rows || []).filter((l) => items.has(String(l.item))).sort((a, b) => String(a.item).localeCompare(String(b.item)) || String(a.date ?? '').localeCompare(String(b.date ?? '')) || a.row_no - b.row_no);
+    return (plan?.rows || []).filter((l) => items.has(String(l.item)) || (l.dispatched ?? 0) > 0).sort((a, b) => String(a.item).localeCompare(String(b.item)) || String(a.date ?? '').localeCompare(String(b.date ?? '')) || a.row_no - b.row_no);
   }, [plan?.rows, d]);
   const header = map && map.header >= 0 ? grid[map.header] || [] : [];
   const width = Math.max(0, ...grid.slice(0, 40).map((r) => r?.length || 0));
@@ -304,17 +308,30 @@ function Dispatch() {
             {canEdit && saved.length > 0 && <button className="btn sm danger" onClick={clearWeek}>Clear week</button>}
           </div>
         </div>
+        {!!d?.items.length && d.unmatched.length > 0 && (
+          <div className="notice warn">
+            {d.unmatched.length === d.items.length ? <b>None of the dispatched items are in the {week} plan.</b> : <b>{d.unmatched.length} dispatched item{d.unmatched.length === 1 ? ' is' : 's are'} not in the {week} plan.</b>}{' '}
+            The {week} plan has {fmt(d.planLines ?? plan?.rows.length ?? 0)} line{(d.planLines ?? 0) === 1 ? '' : 's'}.
+            {d.unmatched.some((i) => d.elsewhere?.[i.item]?.length)
+              ? ' Some are in another week\'s plan — use the button next to the item if the dispatch belongs to that week.'
+              : ''}
+            {' If those items are on lines whose SO starts with a letter (E101690468…), upload the plan again on the Uploads page — an older Worker skipped those lines. The dispatch stays saved and is taken off as soon as the lines are there.'}
+          </div>
+        )}
         {!d?.items.length ? <p className="muted">No dispatch uploaded for this week yet.</p> : (
           <div className="table-wrap">
             {show === 'items' && (
               <table className="mini">
                 <thead><tr><th>Item</th><th className="n">Pallets</th><th className="n">Dispatched</th><th className="n">Plan QTY</th><th className="n">Balance</th><th className="n">Over plan</th><th className="n">Lines complete</th><th>State</th></tr></thead>
                 <tbody>{d.items.map((i) => {
-                  const bal = Math.max(0, i.planQty - i.allocated);
+                  const ils = (plan?.rows || []).filter((l) => String(l.item) === i.item);
+                  const bal = ils.reduce((t, l) => t + need(l), 0); const done = ils.filter(isDispatched).length;
                   return (
                     <tr key={i.item}><td><b>{i.item}</b></td><td className="n">{fmt(i.pallets)}</td><td className="n">{fmtQty(i.dispatched)}</td><td className="n">{i.lines ? fmtQty(i.planQty) : '–'}</td>
-                      <td className="n">{i.lines ? fmtQty(bal) : '–'}</td><td className={`n ${i.over > 0 && i.lines ? 'neg' : ''}`}>{i.lines ? fmtQty(i.over) : '–'}</td><td className="n">{i.lines ? `${i.complete} / ${i.lines}` : '–'}</td>
-                      <td>{!i.lines ? <span className="pill warn">Not in plan</span> : bal <= 1e-9 ? <span className="pill ok">Complete</span> : <span className="pill accent">Part dispatched</span>}</td></tr>
+                      <td className="n">{i.lines ? fmtQty(bal) : '–'}</td><td className={`n ${i.over > 0 && i.lines ? 'neg' : ''}`}>{i.lines ? fmtQty(i.over) : '–'}</td><td className="n">{i.lines ? `${done} / ${i.lines}` : '–'}</td>
+                      <td>{!i.lines && i.over <= 1e-9 ? <span className="pill ok">Assigned by hand</span> : !i.lines ? (d.elsewhere?.[i.item]?.length
+                        ? <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}><span className="pill warn">In {d.elsewhere[i.item].map((w) => `Week ${Number(w.slice(-2))}`).join(', ')} plan</span><button className="btn sm" onClick={() => setWeek(d.elsewhere![i.item][0])}>Go to Week {Number(d.elsewhere[i.item][0].slice(-2))}</button></span>
+                        : <span className="pill warn">Not in any plan</span>) : bal <= 1e-9 ? <span className="pill ok">Complete</span> : <span className="pill accent">Part dispatched</span>}</td></tr>
                   );
                 })}</tbody>
               </table>
@@ -339,6 +356,8 @@ function Dispatch() {
           </div>
         )}
       </section>
+
+      {week && d && <AssignDispatch week={week} leftover={d.leftover || []} assigns={d.assigns || []} rows={plan?.rows || []} canEdit={canEdit} onDone={(m) => { toast(m); load(); }} />}
 
       {history.length > 0 && (
         <section className="card">

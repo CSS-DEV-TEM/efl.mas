@@ -3,7 +3,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import Shell, { useShell } from '@/components/Shell';
 import Ledger, { STATUS_OPTIONS } from '@/components/Ledger';
-import { ProgressByDate, QtyByDate, COV_COLOR } from '@/components/Charts';
+import { COV_COLOR } from '@/components/Charts';
+import PlantSummary from '@/components/PlantSummary';
+import type { PlantInfo } from '@/lib/summary';
 import { api } from '@/lib/api';
 import { COVERAGES, type DispatchSummary, ago, compact, coverage, fmt, fmtDate, isDone, totals, type Coverage, type Line, type Upload, type WeekInfo } from '@/lib/calc';
 import { exportPullPlan } from '@/lib/export';
@@ -17,7 +19,7 @@ export default function Page() {
   return <Shell allowGuest><Dashboard /></Shell>;
 }
 
-interface PullPlan { week: string | null; prevWeek?: string | null; weeks: WeekInfo[]; rows: Line[]; dispatch?: DispatchSummary; uploads: Upload[]; counts: { src: string; n: number }[]; generatedAt: string }
+interface PullPlan { week: string | null; prevWeek?: string | null; weeks: WeekInfo[]; rows: Line[]; dispatch?: DispatchSummary; plants?: PlantInfo[]; releases?: { key: string; qi: number; block: number; by_user: string; at: string; active: boolean }[]; uploads: Upload[]; counts: { src: string; n: number }[]; generatedAt: string }
 
 /** "2026-W42" → "Week 42" */
 const weekLabel = (w: string | null | undefined) => (w ? `Week ${Number(w.slice(-2))}` : '');
@@ -45,6 +47,10 @@ function Dashboard() {
   const [view, setView] = useState<View>({ kind: 'all' });
   const [openInsight, setOpenInsight] = useState<Insight | null>(null);
   const [editing, setEditing] = useState<Line | 'new' | null>(null);
+  // Summary (plant summary + insights) or Plan details (the line table); remembered in the URL hash
+  const [tab, setTabState] = useState<'summary' | 'details'>('summary');
+  useEffect(() => { if (location.hash === '#details') setTabState('details'); }, []);
+  const setTab = useCallback((t: 'summary' | 'details') => { setTabState(t); try { history.replaceState(null, '', t === 'details' ? '#details' : location.pathname); } catch { /* ignore */ } }, []);
   const searchRef = useRef<HTMLInputElement>(null);
   const tableRef = useRef<HTMLElement>(null);
   const today = todayLocal();
@@ -115,7 +121,7 @@ function Dashboard() {
     for (const [k, v] of views) c[k] = scoped.filter((r) => matchView(r, v, today)).length;
     return c;
   }, [scoped, today]);
-  const openView = (v: View) => { setView(v); setTimeout(() => tableRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50); };
+  const openView = (v: View) => { setView(v); setTab('details'); setTimeout(() => tableRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 80); };
   const viewKey = view.kind === 'action' ? view.value : view.kind;
   // week-over-week: compare this week with the previous one (only when no filter narrows the view)
   const thisW = data?.weeks.find((w) => w.week === data.week);
@@ -176,7 +182,15 @@ function Dashboard() {
         </nav>
       )}
 
-      <div className="fresh" aria-label="Report freshness">
+      {data && rows.length > 0 && (
+        <div className="tabs" role="tablist" aria-label="Dashboard view">
+          <button role="tab" aria-selected={tab === 'summary'} className={tab === 'summary' ? 'on' : ''} onClick={() => setTab('summary')}>Summary</button>
+          <button role="tab" aria-selected={tab === 'details'} className={tab === 'details' ? 'on' : ''} onClick={() => setTab('details')}>Plan details <span className="n">{fmt(tableRows.length)}</span></button>
+          {!guest && <Link href="/dispatch/" className="tabs-link" style={{ marginLeft: 'auto', alignSelf: 'center', fontSize: 13 }}>Dispatch →</Link>}
+        </div>
+      )}
+
+      {tab === 'summary' && <div className="fresh" aria-label="Report freshness">
         {SRC_ORDER.map((s) => {
           const u = up.get(s);
           const stale = u && Date.now() - new Date(u.uploaded_at).getTime() > 12 * 3600 * 1000;
@@ -186,9 +200,15 @@ function Dashboard() {
             </span>
           );
         })}
-      </div>
+      </div>}
 
-      {data && rows.length > 0 && (
+      {tab === 'summary' && data?.week && rows.length > 0 && (
+        <PlantSummary rows={rows} plants={data.plants || []} week={data.week} canEdit={canEdit}
+          onPlant={(c) => { setPlant(rows.some((r) => (r.plant || '').toUpperCase() === c) ? (rows.find((r) => (r.plant || '').toUpperCase() === c)!.plant || '') : ''); setView({ kind: 'all' }); setTab('details'); }}
+          onSaved={(m) => { toast(m); load(); }} />
+      )}
+
+      {tab === 'summary' && data && rows.length > 0 && (
         <section className="ins-wrap" aria-labelledby="ins-title">
           <div className="ins-head">
             <span className="ins-spark" aria-hidden="true">
@@ -217,12 +237,12 @@ function Dashboard() {
       {data && rows.length === 0 ? (
         <div className="card empty">
           <strong>No weekly plan yet</strong>
-          <span>Upload the weekly plan and the ZMMBE, KFC, PFC, PLANT and TRR reports to start tracking.</span>
+          <span>Upload the weekly plan and the ZMMBE, KFC, PFC and PLANT reports to start tracking.</span>
           {canEdit && <Link className="btn primary" href="/upload/">Go to uploads</Link>}
         </div>
       ) : (
         <>
-          <section className="kpis" aria-label="Key figures">
+          {tab === 'summary' && <section className="kpis" aria-label="Key figures">
             <div className="kpi"><span className="k">Plan lines</span><span className={`v ${!data ? 'skel' : ''}`}><CountUp value={t.lines} format={(n) => fmt(n)} /></span>
               <span className="s">{fmt(t.done)} done · {fmt(t.open)} open</span>
               {unfiltered && prevW && thisW && <span className="s">vs {weekLabel(prevW.week)}: {fmt(prevW.lines)} {delta(thisW.lines, prevW.lines)}</span>}
@@ -240,8 +260,10 @@ function Dashboard() {
             <div className="kpi"><span className="k">Stock coverage</span><span className="v"><CountUp value={t.lines ? (t.cov.Covered / t.lines) * 100 : 0} format={(n) => Math.round(n) + '%'} /></span>
               <span className="s">lines with UR ≥ QTY</span>
               <div className="meter">{COVERAGES.map((c) => <span key={c} title={`${c}: ${t.cov[c]}`} style={{ width: `${t.lines ? (t.cov[c] / t.lines) * 100 : 0}%`, background: COV_COLOR[c] }} />)}</div></div>
-          </section>
+          </section>}
 
+
+          {tab === 'details' && <>
           <div className="filters" role="group" aria-label="Filters">
             <select aria-label="Date" value={date || ''} onChange={(e) => setDate(e.target.value || null)}>
               <option value="">All dates</option>
@@ -265,19 +287,6 @@ function Dashboard() {
             </div>
             <input ref={searchRef} type="search" placeholder="Search SO, item, TN, vehicle…  ( / )" value={search} onChange={(e) => setSearch(e.target.value)} aria-label="Search" />
             {filtersOn && <button className="btn sm" onClick={() => { setDate(null); setPlant(''); setRemark(''); setCov(''); setSearch(''); }}>Clear filters</button>}
-          </div>
-
-          <div className="grid2">
-            <section className="card">
-              <h2>Required QTY by date</h2>
-              <p className="sub">Split by Full UR coverage. Click a date to filter.</p>
-              <QtyByDate rows={scoped} picked={date} onPick={setDate} />
-            </section>
-            <section className="card">
-              <h2>Progress by date</h2>
-              <p className="sub">Lines marked Done in the Status column.</p>
-              <ProgressByDate rows={scoped} />
-            </section>
           </div>
 
           <div className="main-full">
@@ -311,6 +320,7 @@ function Dashboard() {
             </section>
 
           </div>
+          </>}
         </>
       )}
       {openInsight?.view && data?.week && (
@@ -318,6 +328,7 @@ function Dashboard() {
           rows={scoped.filter((r) => matchView(r, openInsight.view!, today))}
           onEdit={(l) => setEditing(l)}
           onShowInTable={() => { const v = openInsight.view!; setOpenInsight(null); openView(v); }}
+          onReleased={(m) => { toast(m); load(); }}
           onClose={() => setOpenInsight(null)} />
       )}
       {editing && data?.week && (
