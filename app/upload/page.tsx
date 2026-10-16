@@ -9,7 +9,7 @@ import { ago, fmt, fmtDate, type Upload, type WeekInfo } from '@/lib/calc';
 import { TEMPLATES, downloadTemplate } from '@/lib/templates';
 import { todayLocal, weekDays, weekIdOf, weekOptions } from '@/lib/smart';
 import {
-  FIELDS, SRC_INFO, SRC_ORDER, applyMapping, colLetter, detectMapping, guessSrc, readWorkbook, usableCount,
+  FIELDS, SRC_INFO, SRC_ORDER, applyMapping, colLetter, detectMapping, guessSrc, guessSrcFromGrid, isHelpSheet, readWorkbook, usableCount,
   type Grid, type Mapping, type Src,
 } from '@/lib/mapping';
 
@@ -69,9 +69,12 @@ function Uploads() {
         const sheets = readWorkbook(await f.arrayBuffer());
         // a dispatch / pick file (Display Item Number + Actual Qty) belongs on the Dispatch page
         if (sheets.some((s) => isDispatchGrid(s.grid)) && !sheets.some((s) => guessSrc(s.name))) { disp.push(f); continue; }
-        for (const s of sheets) {
-          if (!s.grid.length) continue;
-          const src = guessSrc(s.name) ?? (sheets.length === 1 ? guessSrc(f.name) : null) ?? '';
+        const dataSheets = sheets.filter((s) => s.grid.length && !isHelpSheet(s.name));
+        for (const s of dataSheets) {
+          // sheet name first ("ZMMBE KFC"), then the file name ("ZMMBE_PFC.xlsx" with a "Data" sheet), then the headers
+          const byName = guessSrc(s.name);
+          const byFile = dataSheets.filter((x) => !guessSrc(x.name)).length === 1 ? guessSrc(f.name.replace(/\.\w+$/, '').replace(/\(\d+\)/g, '')) : null;
+          const src = byName ?? byFile ?? guessSrcFromGrid(s.grid) ?? '';
           next.push({ id: f.name + '::' + s.name + '::' + Math.random(), file: f.name, sheet: s.name, grid: s.grid, src, map: src ? detectMapping(src, s.grid) : null, state: 'ready' });
         }
       } catch {

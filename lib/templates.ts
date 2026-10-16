@@ -45,6 +45,9 @@ export const TEMPLATES: Record<Src, Template> = {
   },
 };
 
+/** Data sheet names the upload screen recognises on their own. */
+const SHEET_NAME: Record<Src, string> = { plan: 'Plan', zmmbe: 'ZMMBE', kfc: 'ZMMBE KFC', pfc: 'ZMMBE PFC', plant: 'PLANT', trr: 'TRR' };
+
 export function downloadTemplate(src: Src) {
   const t = TEMPLATES[src];
   const ws = XLSX.utils.aoa_to_sheet([t.headers, ...t.rows]);
@@ -57,7 +60,7 @@ export function downloadTemplate(src: Src) {
   ]);
   help['!cols'] = [{ wch: 100 }];
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Data');
+  XLSX.utils.book_append_sheet(wb, ws, SHEET_NAME[src]);
   XLSX.utils.book_append_sheet(wb, help, 'How to use');
   XLSX.writeFile(wb, t.file);
 }

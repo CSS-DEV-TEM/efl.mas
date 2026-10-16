@@ -96,6 +96,21 @@ export function guessSrc(sheetName: string): Src | null {
 
 export type Grid = unknown[][];
 
+/** Instruction sheets in the sample formats ("How to use") are never data. */
+export const isHelpSheet = (name: string) => /how\s*to\s*use|instruction|read\s*me|notes?$/i.test(name.trim());
+
+/** Last resort when neither the sheet nor the file name says what it is: look at the header row. */
+export function guessSrcFromGrid(grid: Grid): Src | null {
+  for (let r = 0; r < Math.min(12, grid.length); r++) {
+    const row = (grid[r] || []).map((v) => String(v ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim());
+    const has = (...a: string[]) => a.some((x) => row.includes(x));
+    if (has('tn', 'tn number', 'tn no', 'transfer note') && has('so', 'sales order')) return 'trr';
+    if (has('item code') && has('qty', 'quantity') && has('so', 'sales order')) return 'plan';
+    if (has('unrestricted', 'ur', 'unrestricted stock') && has('material')) return 'zmmbe';
+  }
+  return null;
+}
+
 export function colLetter(i: number): string {
   let s = '';
   for (let n = i + 1; n > 0; n = Math.floor((n - 1) / 26)) s = String.fromCharCode(65 + ((n - 1) % 26)) + s;
