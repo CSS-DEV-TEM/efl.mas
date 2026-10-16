@@ -1,12 +1,12 @@
 import * as XLSX from 'xlsx';
 import { coverage, isDone, shortBy, type Line } from './calc';
-import { action, due, priority, todayLocal } from './smart';
+import { ACTIONS, action, due, priority, todayLocal } from './smart';
 
 /** Downloads the calculated weekly plan as an .xlsx, with the smart columns first. */
 export function exportPullPlan(rows: Line[], name = 'MAS_Weekly_Plan') {
   const today = todayLocal();
   const data = rows.map((l) => ({
-    Week: l.week, Priority: priority(l, today), 'Next action': action(l), Due: due(l, today),
+    Week: l.week, Priority: priority(l, today), 'Next action': action(l), Due: due(l, today), 'Carried over': l.carried ? 'Yes' : '',
     SO: Number(l.so) || l.so, LI: Number(l.li) || l.li, 'Item Code': Number(l.item) || l.item, Date: l.date, QTY: l.qty,
     Plant: l.plant, Remarks: l.remarks, Comment: l.comment, 'QI note': l.qi_note, Status: l.status, Vehicle: l.vehicle,
     'UR (Full)': l.ur, 'QI (Full)': l.qi, 'Block (Full)': l.block, Assigned: l.assigned, Variance: l.variance,
@@ -18,7 +18,22 @@ export function exportPullPlan(rows: Line[], name = 'MAS_Weekly_Plan') {
   const ws = XLSX.utils.json_to_sheet(data);
   ws['!cols'] = Object.keys(data[0] || { SO: 1 }).map((k) => ({ wch: Math.max(8, Math.min(22, k.length + 2)) }));
   ws['!autofilter'] = { ref: ws['!ref'] || 'A1' };
+  // Summary sheet: totals, by next action, by date
+  const n = (f: (l: Line) => boolean) => rows.filter(f).length;
+  const q = (f: (l: Line) => boolean) => Math.round(rows.filter(f).reduce((s, l) => s + l.qty, 0) * 1000) / 1000;
+  const dates = Array.from(new Set(rows.map((l) => l.date || ''))).sort();
+  const summary: (string | number)[][] = [
+    ['MAS Weekly Plan Tracker — summary'], ['Week', rows[0]?.week || ''], ['Exported', new Date().toLocaleString('en-GB', { timeZone: 'Asia/Colombo' })], ['Lines in this export', rows.length], [],
+    ['Next action', 'Lines', 'QTY'], ...ACTIONS.map((a) => [a, n((l) => action(l) === a), q((l) => action(l) === a)]), [],
+    ['Date', 'Lines', 'Done', 'Open', 'QTY', 'Short vs UR'],
+    ...dates.map((d) => [d || 'No date', n((l) => (l.date || '') === d), n((l) => (l.date || '') === d && isDone(l)), n((l) => (l.date || '') === d && !isDone(l)), q((l) => (l.date || '') === d),
+      Math.round(rows.filter((l) => (l.date || '') === d && !isDone(l)).reduce((s, l) => s + shortBy(l), 0) * 1000) / 1000]),
+    [], ['Carried over from last week (open)', n((l) => !!l.carried && !isDone(l))],
+  ];
+  const sum = XLSX.utils.aoa_to_sheet(summary);
+  sum['!cols'] = [{ wch: 34 }, { wch: 14 }, { wch: 10 }, { wch: 10 }, { wch: 14 }, { wch: 14 }];
   const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, sum, 'Summary');
   XLSX.utils.book_append_sheet(wb, ws, 'Weekly Plan');
   const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
   XLSX.writeFile(wb, `${name}_${stamp}.xlsx`);

@@ -4,7 +4,7 @@ import Shell, { useShell } from '@/components/Shell';
 import { api } from '@/lib/api';
 import { ago, fmt, fmtDate, type Upload, type WeekInfo } from '@/lib/calc';
 import { TEMPLATES, downloadTemplate } from '@/lib/templates';
-import { isoWeek } from '@/lib/smart';
+import { todayLocal, weekDays, weekIdOf, weekOptions } from '@/lib/smart';
 import {
   FIELDS, SRC_INFO, SRC_ORDER, applyMapping, colLetter, detectMapping, guessSrc, readWorkbook, usableCount,
   type Grid, type Mapping, type Src,
@@ -18,6 +18,8 @@ interface SheetJob {
   id: string; file: string; sheet: string; grid: Grid;
   src: Src | ''; map: Mapping | null;
   state: 'ready' | 'sending' | 'done' | 'error'; msg?: string;
+  /** plan only: '' = auto from dates, or a week id like 2026-W43 */
+  week?: string;
 }
 
 function Uploads() {
@@ -28,6 +30,7 @@ function Uploads() {
   const [uploads, setUploads] = useState<Upload[]>([]);
   const [counts, setCounts] = useState<Record<string, number>>({});
   const [weeks, setWeeks] = useState<WeekInfo[]>([]);
+  const [history, setHistory] = useState<{ at: string; username: string; detail: string }[]>([]);
   const input = useRef<HTMLInputElement>(null);
   const canEdit = user.role !== 'viewer';
 
@@ -36,6 +39,7 @@ function Uploads() {
       const p = await api<{ uploads: Upload[]; counts: { src: string; n: number }[]; weeks: WeekInfo[] }>('/api/pullplan');
       setUploads(p.uploads);
       setWeeks(p.weeks || []);
+      api<{ activity: { at: string; username: string; detail: string }[] }>('/api/activity?action=upload').then((a) => setHistory(a.activity.slice(0, 12))).catch(() => {});
       setCounts(Object.fromEntries(p.counts.map((c) => [c.src, c.n])));
     } catch { /* shown on dashboard */ }
   }, []);
@@ -68,7 +72,7 @@ function Uploads() {
     setJob(j.id, { state: 'sending', msg: undefined });
     try {
       const rows = applyMapping(j.src, j.grid, j.map);
-      const r = await api<{ accepted: number; skipped: number; weeks?: string[] }>('/api/upload', { method: 'POST', body: { src: j.src, fileName: j.file, sheetName: j.sheet, rows } });
+      const r = await api<{ accepted: number; skipped: number; weeks?: string[] }>('/api/upload', { method: 'POST', body: { src: j.src, fileName: j.file, sheetName: j.sheet, rows, ...(j.src === 'plan' && j.week ? { week: j.week, forceWeek: true } : {}) } });
       const wk = r.weeks?.length ? ` to ${r.weeks.map((w) => 'Week ' + Number(w.slice(-2))).join(', ')}` : '';
       loadStatus();
       setJob(j.id, { state: 'done', msg: `${fmt(r.accepted)} rows saved${wk}${r.skipped ? ` · ${fmt(r.skipped)} rows without SO/LI/Material skipped` : ''}. Every open dashboard has updated.` });
@@ -156,6 +160,18 @@ function Uploads() {
         </section>
       )}
 
+      {history.length > 0 && (
+        <section className="card" aria-labelledby="hist-title">
+          <h2 id="hist-title">Recent uploads</h2>
+          <p className="sub">Last {history.length} uploads, newest first.</p>
+          <div className="wk-list">
+            {history.map((h, i) => (
+              <div key={i} className="wk-row"><span>{h.detail}</span><span className="num muted">{h.username} · {ago(h.at)}</span></div>
+            ))}
+          </div>
+        </section>
+      )}
+
       {!canEdit ? <div className="notice info">Your account can view the dashboard. Ask an admin for editor access to upload.</div> : (
         <>
           <div
@@ -198,17 +214,38 @@ function toIsoDate(v: unknown): string | null {
 }
 /** The weeks a plan sheet covers, with line counts and date range. */
 function planWeeks(rows: Record<string, unknown>[]) {
-  const m = new Map<number, { n: number; min: string; max: string }>();
+  const m = new Map<string, { n: number; min: string; max: string }>();
   for (const r of rows) {
     const d = toIsoDate(r.date);
     if (!d) continue;
-    const w = isoWeek(d);
+    const w = weekIdOf(d);
     const o = m.get(w) || { n: 0, min: d, max: d };
     o.n++; if (d < o.min) o.min = d; if (d > o.max) o.max = d;
     m.set(w, o);
   }
-  return Array.from(m.entries()).sort(([a], [b]) => a - b);
+  return Array.from(m.entries()).sort(([a], [b]) => a.localeCompare(b));
 }
+
+/** Problems worth knowing before a plan goes in. */
+function planChecks(rows: Record<string, unknown>[], fixedWeek: string) {
+  const out: string[] = [];
+  const usable = rows.filter((r) => /^\d/.test(String(r.so ?? '').trim()) && String(r.li ?? '').trim() && String(r.item ?? '').trim());
+  const noDate = usable.filter((r) => !toIsoDate(r.date)).length;
+  const badQty = usable.filter((r) => !(Number(String(r.qty ?? '').replace(/,/g, '')) > 0)).length;
+  const seen = new Map<string, number>();
+  for (const r of usable) { const k = `${r.so}|${r.li}|${r.item}`; seen.set(k, (seen.get(k) || 0) + 1); }
+  const dups = Array.from(seen.values()).filter((n) => n > 1).length;
+  if (badQty) out.push(`${fmt(badQty)} line${badQty > 1 ? 's have' : ' has'} QTY 0 or blank`);
+  if (noDate) out.push(`${fmt(noDate)} line${noDate > 1 ? 's have' : ' has'} no readable date${fixedWeek ? '' : ' (they go to the current week)'}`);
+  if (dups) out.push(`${fmt(dups)} SO / LI / Item combination${dups > 1 ? 's appear' : ' appears'} more than once`);
+  if (fixedWeek) {
+    const [mon, sun] = weekDays(fixedWeek);
+    const outside = usable.filter((r) => { const d = toIsoDate(r.date); return d && (d < mon || d > sun); }).length;
+    if (outside) out.push(`${fmt(outside)} line${outside > 1 ? 's are' : ' is'} dated outside ${fixedWeek} (${fmtDate(mon)} – ${fmtDate(sun)}) but will be saved to it`);
+  }
+  return out;
+}
+const wkLabel = (id: string) => { const [m, su] = weekDays(id); return `Week ${Number(id.slice(-2))} · ${fmtDate(m)} – ${fmtDate(su)}${id.slice(0, 4) !== todayLocal().slice(0, 4) ? ' ' + id.slice(0, 4) : ''}`; };
 
 /** Preview formatting: Excel date serials as dates, long floats rounded. */
 function show(v: unknown, id: string) {
@@ -228,6 +265,7 @@ function SheetCard({ job, onChange, onSend, onRemove }: { job: SheetJob; onChang
   const rows = useMemo(() => (job.src && job.map ? applyMapping(job.src, job.grid, job.map) : []), [job.src, job.map, job.grid]);
   const usable = job.src ? usableCount(job.src, rows) : 0;
   const wks = useMemo(() => (job.src === 'plan' ? planWeeks(rows) : []), [job.src, rows]);
+  const checks = useMemo(() => (job.src === 'plan' ? planChecks(rows, job.week || '') : []), [job.src, rows, job.week]);
   const missing = fields.filter((f) => f.required && (job.map?.cols[f.id] ?? -1) < 0);
   const how = job.map?.how === 'header' ? `header row ${(job.map.headerRow ?? 0) + 1}` : job.map?.how === 'keyed' ? 'your workbook layout (key in column A)' : 'SAP layout without key column';
 
@@ -252,11 +290,22 @@ function SheetCard({ job, onChange, onSend, onRemove }: { job: SheetJob; onChang
       </div>
 
       {job.msg && <div className={`notice ${job.state === 'error' ? 'bad' : 'ok'}`}>{job.msg}</div>}
-      {wks.length > 0 && job.state !== 'done' && (
-        <div className="notice info">
-          This plan covers {wks.map(([w, o]) => `Week ${w} (${fmtDate(o.min)} – ${fmtDate(o.max)}, ${fmt(o.n)} lines)`).join(' and ')}.
-          Uploading replaces {wks.length > 1 ? 'those weeks' : 'that week'} only; other weeks stay.
+      {job.src === 'plan' && job.state !== 'done' && (
+        <div className="week-pick">
+          <label htmlFor={`wk-${job.id}`}>Save this plan to</label>
+          <select id={`wk-${job.id}`} value={job.week || ''} onChange={(e) => onChange({ week: e.target.value, state: 'ready', msg: undefined })}>
+            <option value="">Auto: week from each line's date{wks.length ? ` (${wks.map(([w]) => 'Week ' + Number(w.slice(-2))).join(', ')})` : ''}</option>
+            {weekOptions(wks[0]?.[0] || weekIdOf(todayLocal())).map((w) => <option key={w} value={w}>{wkLabel(w)}</option>)}
+          </select>
+          <span className="muted">
+            {job.week
+              ? `All ${fmt(usable)} lines go to Week ${Number(job.week.slice(-2))}. Only that week is replaced.`
+              : wks.length ? `Lines go to ${wks.map(([w, o]) => `Week ${Number(w.slice(-2))} (${fmt(o.n)})`).join(', ')} by date. Only ${wks.length > 1 ? 'those weeks are' : 'that week is'} replaced.` : 'No dates found: lines go to the current week.'}
+          </span>
         </div>
+      )}
+      {job.src === 'plan' && job.state !== 'done' && checks.length > 0 && (
+        <div className="notice warn"><b>Check before uploading:</b> {checks.join(' · ')}.</div>
       )}
       {missing.length > 0 && <div className="notice bad">Pick a column for {missing.map((f) => f.label).join(', ')}.</div>}
 

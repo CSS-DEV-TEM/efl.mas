@@ -376,3 +376,13 @@ table.ledger { border-collapse: separate; border-spacing: 0; width: 100%; font-s
 .main-full { display: grid; gap: 14px; }
 .login-guest { justify-self: center; font-size: 13px; color: var(--accent); text-decoration: none; font-weight: 500; }
 .login-guest:hover { text-decoration: underline; }
+
+.notice.warn { background: var(--warn-soft); color: var(--warn); }
+.week-pick { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 10px 12px; border-radius: 6px; background: var(--accent-soft); }
+.week-pick label { font-weight: 600; font-size: 13px; color: var(--ink); }
+.week-pick select { border: 1px solid var(--accent); background: var(--panel); border-radius: 6px; padding: 6px 10px; font-weight: 500; color: var(--ink); max-width: 100%; }
+.week-pick .muted { font-size: 12.5px; flex: 1 1 260px; }
+.carry { display: inline-block; margin-left: 6px; font-size: 10.5px; font-weight: 600; padding: 0 6px; border-radius: 999px; color: var(--warn); background: var(--warn-soft); vertical-align: 1px; }
+.delta { font-size: 11.5px; font-weight: 600; margin-left: 4px; }
+.delta.up { color: var(--bad); } .delta.down { color: var(--ok); } .delta.flat { color: var(--ink-3); }
+.delta.good-up.up { color: var(--ok); } .delta.good-up.down { color: var(--bad); }

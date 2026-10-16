@@ -57,6 +57,7 @@ export function priority(l: Line, today = todayLocal()): number {
   const actScore: Record<Action, number> = { 'No stock': 30, 'Follow up TN': 22, 'Partial pull': 20, 'Release QI / Block': 18, 'Ready to pull': 12, Done: 0 };
   let s = dueScore[due(l, today)] + actScore[a];
   if (isPriority(l)) s += 15;
+  if (l.carried) s += 10; // already slipped once
   if (l.qty >= 500) s += 6; else if (l.qty >= 100) s += 3;
   return Math.min(100, s);
 }
@@ -68,6 +69,29 @@ export function isoWeek(date: string): number {
   d.setUTCDate(d.getUTCDate() - day + 3);
   const firstThu = new Date(Date.UTC(d.getUTCFullYear(), 0, 4));
   return 1 + Math.round(((d.getTime() - firstThu.getTime()) / 86400000 - 3 + ((firstThu.getUTCDay() + 6) % 7)) / 7);
+}
+
+/** ISO week id of a yyyy-mm-dd date, e.g. "2026-W43" (same rule as the server). */
+export function weekIdOf(date: string): string {
+  const d = new Date(date + 'T00:00:00Z');
+  const day = (d.getUTCDay() + 6) % 7;
+  d.setUTCDate(d.getUTCDate() - day + 3);
+  return `${d.getUTCFullYear()}-W${String(isoWeek(date)).padStart(2, '0')}`;
+}
+/** Monday and Sunday (yyyy-mm-dd) of an ISO week id. */
+export function weekDays(id: string): [string, string] {
+  const [y, w] = [Number(id.slice(0, 4)), Number(id.slice(-2))];
+  const jan4 = new Date(Date.UTC(y, 0, 4));
+  const mon = new Date(jan4.getTime() - ((jan4.getUTCDay() + 6) % 7) * 86400000 + (w - 1) * 7 * 86400000);
+  const sun = new Date(mon.getTime() + 6 * 86400000);
+  return [mon.toISOString().slice(0, 10), sun.toISOString().slice(0, 10)];
+}
+/** Week ids around a centre week, for pickers. */
+export function weekOptions(centre: string, before = 6, after = 8): string[] {
+  const [mon] = weekDays(centre);
+  const out: string[] = [];
+  for (let i = -before; i <= after; i++) out.push(weekIdOf(new Date(Date.parse(mon + 'T00:00:00Z') + i * 7 * 86400000).toISOString().slice(0, 10)));
+  return out;
 }
 
 /** The plan's week: the ISO week most of its lines fall in. */
@@ -84,7 +108,8 @@ export type View =
   | { kind: 'action'; value: Action }
   | { kind: 'due'; value: Due }
   | { kind: 'urgent' }
-  | { kind: 'priority' };
+  | { kind: 'priority' }
+  | { kind: 'carried' };
 
 export function matchView(l: Line, v: View, today: string): boolean {
   switch (v.kind) {
@@ -93,6 +118,7 @@ export function matchView(l: Line, v: View, today: string): boolean {
     case 'due': return due(l, today) === v.value && action(l) !== 'Done';
     case 'urgent': { const d = due(l, today); return action(l) !== 'Done' && action(l) !== 'Ready to pull' && (d === 'Overdue' || d === 'Today'); }
     case 'priority': return action(l) !== 'Done' && isPriority(l);
+    case 'carried': return action(l) !== 'Done' && !!l.carried;
   }
 }
 
@@ -120,6 +146,9 @@ export function insights(rows: Line[], uploads: Upload[], today = todayLocal()):
 
   const qi = open.filter((l) => action(l) === 'Release QI / Block');
   if (qi.length) out.push({ id: 'qi', tone: 'info', title: `${L(qi.length)} can be covered by releasing QI / Block`, detail: `${n0(qi.reduce((s, l) => s + Math.min(l.qi + l.block, shortBy(l)), 0))} QTY waiting in QI or blocked stock.`, view: { kind: 'action', value: 'Release QI / Block' } });
+
+  const carried = open.filter((l) => l.carried);
+  if (carried.length) out.push({ id: 'carried', tone: 'warn', title: `${L(carried.length)} carried over from last week`, detail: `They were in the previous week's plan and not marked Done. ${n0(carried.reduce((s, l) => s + shortBy(l), 0))} QTY still short.`, view: { kind: 'carried' } });
 
   const pr = open.filter((l) => isPriority(l) && action(l) !== 'Ready to pull');
   if (pr.length) out.push({ id: 'prio', tone: 'warn', title: `${n0(pr.length)} priority line${pr.length === 1 ? '' : 's'} (1st priority / last pallet) still short`, detail: 'Flagged in the plan Remarks.', view: { kind: 'priority' } });

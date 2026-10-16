@@ -15,7 +15,7 @@ export default function Page() {
   return <Shell allowGuest><Dashboard /></Shell>;
 }
 
-interface PullPlan { week: string | null; weeks: WeekInfo[]; rows: Line[]; uploads: Upload[]; counts: { src: string; n: number }[]; generatedAt: string }
+interface PullPlan { week: string | null; prevWeek?: string | null; weeks: WeekInfo[]; rows: Line[]; uploads: Upload[]; counts: { src: string; n: number }[]; generatedAt: string }
 
 /** "2026-W42" → "Week 42" */
 const weekLabel = (w: string | null | undefined) => (w ? `Week ${Number(w.slice(-2))}` : '');
@@ -106,13 +106,23 @@ function Dashboard() {
   const tips = useMemo(() => insights(scoped, data?.uploads || [], today), [scoped, data?.uploads, today]);
   const viewCounts = useMemo(() => {
     const c: Record<string, number> = {};
-    const views: [string, View][] = [['urgent', { kind: 'urgent' }], ['priority', { kind: 'priority' }],
+    const views: [string, View][] = [['urgent', { kind: 'urgent' }], ['priority', { kind: 'priority' }], ['carried', { kind: 'carried' }],
       ...(['Ready to pull', 'Release QI / Block', 'Partial pull', 'Follow up TN', 'No stock'] as Action[]).map((a) => [a, { kind: 'action', value: a }] as [string, View])];
     for (const [k, v] of views) c[k] = scoped.filter((r) => matchView(r, v, today)).length;
     return c;
   }, [scoped, today]);
   const openView = (v: View) => { setView(v); setTimeout(() => tableRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50); };
   const viewKey = view.kind === 'action' ? view.value : view.kind;
+  // week-over-week: compare this week with the previous one (only when no filter narrows the view)
+  const thisW = data?.weeks.find((w) => w.week === data.week);
+  const prevW = data?.weeks.find((w) => w.week === data?.prevWeek);
+  const unfiltered = !date && !plant && !remark;
+  const delta = (now: number, before: number, goodUp = false, pct = false) => {
+    const d = pct ? (before ? (now - before) / before : 0) : now - before;
+    const cls = Math.abs(d) < 1e-9 ? 'flat' : d > 0 ? 'up' : 'down';
+    const txt = pct ? `${d > 0 ? '+' : ''}${Math.round(d * 100)}%` : `${d > 0 ? '+' : ''}${fmt(d)}`;
+    return <span className={`delta ${goodUp ? 'good-up' : ''} ${cls}`}>{cls === 'flat' ? '=' : txt}</span>;
+  };
 
   const save = useCallback(async (key: string, field: 'status' | 'comment' | 'vehicle', value: string) => {
     setData((d) => d && { ...d, rows: d.rows.map((r) => (r.key === key ? { ...r, [field]: value || null, updated_by: user.username } : r)) });
@@ -210,8 +220,9 @@ function Dashboard() {
           <section className="kpis" aria-label="Key figures">
             <div className="kpi"><span className="k">Plan lines</span><span className={`v ${!data ? 'skel' : ''}`}><CountUp value={t.lines} format={(n) => fmt(n)} /></span>
               <span className="s">{fmt(t.done)} done · {fmt(t.open)} open</span>
+              {unfiltered && prevW && thisW && <span className="s">vs {weekLabel(prevW.week)}: {fmt(prevW.lines)} {delta(thisW.lines, prevW.lines)}</span>}
               <div className="meter"><span style={{ width: `${t.lines ? (t.done / t.lines) * 100 : 0}%`, background: 'var(--ok)' }} /></div></div>
-            <div className="kpi"><span className="k">Required QTY</span><span className="v"><CountUp value={t.qty} format={compact} /></span><span className="s">Variance (QTY − Assigned) {compact(t.variance)}</span></div>
+            <div className="kpi"><span className="k">Required QTY</span><span className="v"><CountUp value={t.qty} format={compact} /></span><span className="s">Variance (QTY − Assigned) {compact(t.variance)}</span>{unfiltered && prevW && thisW && <span className="s">vs {weekLabel(prevW.week)}: {compact(prevW.qty)} {delta(thisW.qty, prevW.qty, false, true)}</span>}</div>
             <div className="kpi"><span className="k">Full UR stock</span><span className="v"><CountUp value={t.ur} format={compact} /></span><span className="s">QI {compact(t.qi)} · Block {compact(t.block)}</span></div>
             <div className="kpi"><span className="k">KFC / PFC UR</span><span className="v"><CountUp value={t.kfc_ur} format={compact} /></span><span className="s">PFC {compact(t.pfc_ur)}</span></div>
             <div className="kpi"><span className="k">At plant (PLANT)</span><span className="v"><CountUp value={t.plant_qty} format={compact} /></span><span className="s">TN QTY {compact(t.tn_qty)}</span></div>
@@ -272,12 +283,12 @@ function Dashboard() {
                 </div>
               </div>
               <div className="views" role="group" aria-label="Smart views">
-                {([['all', 'All lines', { kind: 'all' }], ['urgent', 'Urgent', { kind: 'urgent' }], ['priority', 'Priority', { kind: 'priority' }],
+                {([['all', 'All lines', { kind: 'all' }], ['urgent', 'Urgent', { kind: 'urgent' }], ['priority', 'Priority', { kind: 'priority' }], ['carried', 'Carried over', { kind: 'carried' }],
                   ['Ready to pull', 'Ready to pull', { kind: 'action', value: 'Ready to pull' }], ['Release QI / Block', 'Release QI / Block', { kind: 'action', value: 'Release QI / Block' }],
                   ['Partial pull', 'Partial pull', { kind: 'action', value: 'Partial pull' }], ['Follow up TN', 'Follow up TN', { kind: 'action', value: 'Follow up TN' }],
                   ['No stock', 'No stock', { kind: 'action', value: 'No stock' }]] as [string, string, View][]).map(([k, label, v]) => (
                   <button key={k} type="button" className={`view-chip ${viewKey === k ? 'on' : ''} v-${k.replace(/[^a-z]/gi, '').toLowerCase()}`} onClick={() => setView(v)}
-                    title={k in ACTION_HELP ? ACTION_HELP[k as Action] : k === 'urgent' ? 'Due today or overdue and not covered by UR' : k === 'priority' ? '1st priority / last pallet lines still open' : 'Uses the Open / Done filter'}>
+                    title={k in ACTION_HELP ? ACTION_HELP[k as Action] : k === 'urgent' ? 'Due today or overdue and not covered by UR' : k === 'priority' ? '1st priority / last pallet lines still open' : k === 'carried' ? 'In last week\'s plan too and not Done there' : 'Uses the Open / Done filter'}>
                     {label}{k !== 'all' && <span className="n">{fmt(viewCounts[k] ?? 0)}</span>}
                   </button>
                 ))}

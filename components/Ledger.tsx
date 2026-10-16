@@ -12,7 +12,7 @@ type Col = { id: string; label: string; grp?: string; n?: boolean; full?: boolea
 const q = (v: number) => fmtQty(v);
 
 const COLS: Col[] = [
-  { id: 'so', label: 'SO', get: (l) => l.so },
+  { id: 'so', label: 'SO', get: (l) => l.so, render: (l) => <>{l.so}{l.carried ? <span className="carry" title="Also in last week's plan and not Done there">↻ carried</span> : null}</> },
   { id: 'li', label: 'LI', n: true, get: (l) => Number(l.li) || 0 },
   { id: 'item', label: 'Item code', get: (l) => l.item },
   { id: 'date', label: 'Date', get: (l) => l.date || '', render: (l) => fmtDate(l.date) },
