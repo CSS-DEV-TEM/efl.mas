@@ -1,5 +1,5 @@
 import * as XLSX from 'xlsx';
-import { coverage, isDone, shortBy, type Line } from './calc';
+import { avail, coverage, isDone, need, shortBy, type Line } from './calc';
 import { ACTIONS, action, due, priority, todayLocal } from './smart';
 
 /** Downloads the calculated weekly plan as an .xlsx, with the smart columns first. */
@@ -7,12 +7,12 @@ export function exportPullPlan(rows: Line[], name = 'MAS_Weekly_Plan') {
   const today = todayLocal();
   const data = rows.map((l) => ({
     Week: l.week, Priority: priority(l, today), 'Next action': action(l), Due: due(l, today), 'Carried over': l.carried ? 'Yes' : '',
-    SO: Number(l.so) || l.so, LI: Number(l.li) || l.li, 'Item Code': Number(l.item) || l.item, Date: l.date, QTY: l.qty,
+    SO: Number(l.so) || l.so, LI: Number(l.li) || l.li, 'Item Code': Number(l.item) || l.item, Date: l.date, QTY: l.qty, Dispatched: l.dispatched ?? 0, Balance: need(l),
     Plant: l.plant, Remarks: l.remarks, Comment: l.comment, 'QI note': l.qi_note, Status: l.status, Vehicle: l.vehicle,
-    'UR (Full)': l.ur, 'QI (Full)': l.qi, 'Block (Full)': l.block, Assigned: l.assigned, Variance: l.variance,
+    'UR (Full)': l.ur, 'UR left': avail(l), 'QI (Full)': l.qi, 'Block (Full)': l.block, Assigned: l.assigned, Variance: l.variance,
     'KFC UR': l.kfc_ur, 'KFC QI': l.kfc_qi, 'KFC Block': l.kfc_block, 'PFC UR': l.pfc_ur, 'PFC QI': l.pfc_qi, 'PFC Block': l.pfc_block,
     'At plant (PLANT)': l.plant_qty, 'Stock plant': l.stock_plant, 'St Location': l.stock_sloc,
-    'TN QTY': l.tn_qty, 'TN number': l.tn_number, Coverage: coverage(l), 'Short vs UR': shortBy(l), Done: isDone(l) ? 'Yes' : 'No',
+    'TN QTY': l.tn_qty, 'TN number': l.tn_number, Coverage: coverage(l), 'Short (Balance − UR left)': shortBy(l), Done: isDone(l) ? 'Yes' : 'No',
     'Updated by': l.updated_by, 'Updated at': l.updated_at,
   }));
   const ws = XLSX.utils.json_to_sheet(data);

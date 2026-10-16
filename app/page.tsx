@@ -5,7 +5,7 @@ import Shell, { useShell } from '@/components/Shell';
 import Ledger, { STATUS_OPTIONS } from '@/components/Ledger';
 import { ProgressByDate, QtyByDate, COV_COLOR } from '@/components/Charts';
 import { api } from '@/lib/api';
-import { COVERAGES, ago, compact, coverage, fmt, fmtDate, isDone, totals, type Coverage, type Line, type Upload, type WeekInfo } from '@/lib/calc';
+import { COVERAGES, type DispatchSummary, ago, compact, coverage, fmt, fmtDate, isDone, totals, type Coverage, type Line, type Upload, type WeekInfo } from '@/lib/calc';
 import { exportPullPlan } from '@/lib/export';
 import { CountUp } from '@/components/Brand';
 import InsightDrawer from '@/components/InsightDrawer';
@@ -17,7 +17,7 @@ export default function Page() {
   return <Shell allowGuest><Dashboard /></Shell>;
 }
 
-interface PullPlan { week: string | null; prevWeek?: string | null; weeks: WeekInfo[]; rows: Line[]; uploads: Upload[]; counts: { src: string; n: number }[]; generatedAt: string }
+interface PullPlan { week: string | null; prevWeek?: string | null; weeks: WeekInfo[]; rows: Line[]; dispatch?: DispatchSummary; uploads: Upload[]; counts: { src: string; n: number }[]; generatedAt: string }
 
 /** "2026-W42" → "Week 42" */
 const weekLabel = (w: string | null | undefined) => (w ? `Week ${Number(w.slice(-2))}` : '');
@@ -107,10 +107,10 @@ function Dashboard() {
       (!s || [r.so, r.li, r.item, r.status, r.comment, r.vehicle, r.remarks, r.tn_number, r.stock_plant].join(' ').toLowerCase().includes(s)));
   }, [scoped, state, cov, search, view, today]);
   const t = useMemo(() => totals(scoped), [scoped]);
-  const tips = useMemo(() => insights(scoped, data?.uploads || [], today), [scoped, data?.uploads, today]);
+  const tips = useMemo(() => insights(scoped, data?.uploads || [], today, data?.dispatch), [scoped, data?.uploads, today, data?.dispatch]);
   const viewCounts = useMemo(() => {
     const c: Record<string, number> = {};
-    const views: [string, View][] = [['urgent', { kind: 'urgent' }], ['priority', { kind: 'priority' }], ['carried', { kind: 'carried' }],
+    const views: [string, View][] = [['partdisp', { kind: 'partdisp' }], ['Dispatched', { kind: 'action', value: 'Dispatched' }], ['urgent', { kind: 'urgent' }], ['priority', { kind: 'priority' }], ['carried', { kind: 'carried' }],
       ...(['Ready to pull', 'Release QI / Block', 'Partial pull', 'Follow up TN', 'No stock'] as Action[]).map((a) => [a, { kind: 'action', value: a }] as [string, View])];
     for (const [k, v] of views) c[k] = scoped.filter((r) => matchView(r, v, today)).length;
     return c;
@@ -231,7 +231,12 @@ function Dashboard() {
             <div className="kpi"><span className="k">Full UR stock</span><span className="v"><CountUp value={t.ur} format={compact} /></span><span className="s">QI {compact(t.qi)} · Block {compact(t.block)}</span></div>
             <div className="kpi"><span className="k">KFC / PFC UR</span><span className="v"><CountUp value={t.kfc_ur} format={compact} /></span><span className="s">PFC {compact(t.pfc_ur)}</span></div>
             <div className="kpi"><span className="k">At plant (PLANT)</span><span className="v"><CountUp value={t.plant_qty} format={compact} /></span><span className="s">TN QTY {compact(t.tn_qty)}</span></div>
-            <div className={`kpi ${t.shortLines ? 'bad' : 'ok'}`}><span className="k">Open & short of UR</span><span className="v"><CountUp value={t.shortLines} format={(n) => fmt(n)} /></span><span className="s">{compact(t.short)} QTY not covered</span></div>
+            {!!data?.dispatch?.items.length && (
+              <div className="kpi ok"><span className="k">Dispatched</span><span className="v"><CountUp value={t.dispatched} format={compact} /></span>
+                <span className="s">{fmt(t.dispatchedLines)} line{t.dispatchedLines === 1 ? '' : 's'} complete · balance {compact(t.balance)}</span>
+                <div className="meter"><span style={{ width: `${t.qty ? Math.min(100, (t.dispatched / t.qty) * 100) : 0}%`, background: 'var(--ok)' }} /></div></div>
+            )}
+            <div className={`kpi ${t.shortLines ? 'bad' : 'ok'}`}><span className="k">Open & short of UR</span><span className="v"><CountUp value={t.shortLines} format={(n) => fmt(n)} /></span><span className="s">{compact(t.short)} balance QTY not covered</span></div>
             <div className="kpi"><span className="k">Stock coverage</span><span className="v"><CountUp value={t.lines ? (t.cov.Covered / t.lines) * 100 : 0} format={(n) => Math.round(n) + '%'} /></span>
               <span className="s">lines with UR ≥ QTY</span>
               <div className="meter">{COVERAGES.map((c) => <span key={c} title={`${c}: ${t.cov[c]}`} style={{ width: `${t.lines ? (t.cov[c] / t.lines) * 100 : 0}%`, background: COV_COLOR[c] }} />)}</div></div>
@@ -292,9 +297,10 @@ function Dashboard() {
                 {([['all', 'All lines', { kind: 'all' }], ['urgent', 'Urgent', { kind: 'urgent' }], ['priority', 'Priority', { kind: 'priority' }], ['carried', 'Carried over', { kind: 'carried' }],
                   ['Ready to pull', 'Ready to pull', { kind: 'action', value: 'Ready to pull' }], ['Release QI / Block', 'Release QI / Block', { kind: 'action', value: 'Release QI / Block' }],
                   ['Partial pull', 'Partial pull', { kind: 'action', value: 'Partial pull' }], ['Follow up TN', 'Follow up TN', { kind: 'action', value: 'Follow up TN' }],
-                  ['No stock', 'No stock', { kind: 'action', value: 'No stock' }]] as [string, string, View][]).map(([k, label, v]) => (
+                  ['No stock', 'No stock', { kind: 'action', value: 'No stock' }],
+                  ...((data?.dispatch?.items.length ? [['partdisp', 'Part dispatched', { kind: 'partdisp' }], ['Dispatched', 'Dispatched ✓', { kind: 'action', value: 'Dispatched' }]] : []) as [string, string, View][])] as [string, string, View][]).map(([k, label, v]) => (
                   <button key={k} type="button" className={`view-chip ${viewKey === k ? 'on' : ''} v-${k.replace(/[^a-z]/gi, '').toLowerCase()}`} onClick={() => setView(v)}
-                    title={k in ACTION_HELP ? ACTION_HELP[k as Action] : k === 'urgent' ? 'Due today or overdue and not covered by UR' : k === 'priority' ? '1st priority / last pallet lines still open' : k === 'carried' ? 'In last week\'s plan too and not Done there' : 'Uses the Open / Done filter'}>
+                    title={k in ACTION_HELP ? ACTION_HELP[k as Action] : k === 'urgent' ? 'Due today or overdue and not covered by UR' : k === 'priority' ? '1st priority / last pallet lines still open' : k === 'carried' ? 'In last week\'s plan too and not Done there' : k === 'partdisp' ? 'Some QTY dispatched, balance still to send' : 'Uses the Open / Done filter'}>
                     {label}{k !== 'all' && <span className="n">{fmt(viewCounts[k] ?? 0)}</span>}
                   </button>
                 ))}

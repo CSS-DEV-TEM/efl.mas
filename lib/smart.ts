@@ -2,12 +2,12 @@
  * Smart layer: turns each plan line into a next action, a due status and a priority score,
  * and works out the insights shown at the top of the dashboard.
  */
-import { isDone, shortBy, type Line, type Upload } from './calc';
+import { avail, isDispatched, isDone, need, shortBy, type DispatchSummary, type Line, type Upload } from './calc';
 
-export type Action = 'Done' | 'Ready to pull' | 'Release QI / Block' | 'Partial pull' | 'Follow up TN' | 'No stock';
-export const ACTIONS: Action[] = ['Ready to pull', 'Release QI / Block', 'Partial pull', 'Follow up TN', 'No stock', 'Done'];
+export type Action = 'Dispatched' | 'Done' | 'Ready to pull' | 'Release QI / Block' | 'Partial pull' | 'Follow up TN' | 'No stock';
+export const ACTIONS: Action[] = ['Ready to pull', 'Release QI / Block', 'Partial pull', 'Follow up TN', 'No stock', 'Dispatched', 'Done'];
 export const ACTION_PILL: Record<Action, string> = {
-  'Ready to pull': 'ok', 'Release QI / Block': 'info', 'Partial pull': 'warn', 'Follow up TN': 'accent', 'No stock': 'bad', Done: 'mute',
+  'Ready to pull': 'ok', 'Release QI / Block': 'info', 'Partial pull': 'warn', 'Follow up TN': 'accent', 'No stock': 'bad', Dispatched: 'ok', Done: 'mute',
 };
 export const ACTION_HELP: Record<Action, string> = {
   'Ready to pull': 'Full UR stock covers the QTY',
@@ -15,15 +15,18 @@ export const ACTION_HELP: Record<Action, string> = {
   'Partial pull': 'Some UR stock, not enough for the QTY',
   'Follow up TN': 'No stock in ZMMBE, but a transfer note exists',
   'No stock': 'Nothing in ZMMBE and no TN',
+  Dispatched: 'The whole QTY went out on a dispatch — complete',
   Done: 'Marked Done',
 };
 
 /** The next thing to do for a line. */
 export function action(l: Line): Action {
+  if (isDispatched(l)) return 'Dispatched';
   if (isDone(l)) return 'Done';
-  if (l.qty > 0 && l.ur >= l.qty - 1e-9) return 'Ready to pull';
-  if (l.qi + l.block > 0 && l.ur + l.qi + l.block >= l.qty - 1e-9) return 'Release QI / Block';
-  if (l.ur > 0) return 'Partial pull';
+  const n = need(l), u = avail(l);
+  if (n > 0 && u >= n - 1e-9) return 'Ready to pull';
+  if (l.qi + l.block > 0 && u + l.qi + l.block >= n - 1e-9) return 'Release QI / Block';
+  if (u > 0) return 'Partial pull';
   if (l.tn_qty > 0 || l.tn_number) return 'Follow up TN';
   return 'No stock';
 }
@@ -52,9 +55,9 @@ const isPriority = (l: Line) => /1\s*st|priority|urgent|last\s*pallet/i.test(l.r
 /** 0–100. Higher = needs attention first. Done lines score 0. */
 export function priority(l: Line, today = todayLocal()): number {
   const a = action(l);
-  if (a === 'Done') return 0;
+  if (a === 'Done' || a === 'Dispatched') return 0;
   const dueScore: Record<Due, number> = { Overdue: 45, Today: 38, Tomorrow: 26, 'This week': 14, Later: 6, 'No date': 10 };
-  const actScore: Record<Action, number> = { 'No stock': 30, 'Follow up TN': 22, 'Partial pull': 20, 'Release QI / Block': 18, 'Ready to pull': 12, Done: 0 };
+  const actScore: Record<Action, number> = { Dispatched: 0, 'No stock': 30, 'Follow up TN': 22, 'Partial pull': 20, 'Release QI / Block': 18, 'Ready to pull': 12, Done: 0 };
   let s = dueScore[due(l, today)] + actScore[a];
   if (isPriority(l)) s += 15;
   if (l.carried) s += 10; // already slipped once
@@ -110,7 +113,8 @@ export type View =
   | { kind: 'urgent' }
   | { kind: 'priority' }
   | { kind: 'carried' }
-  | { kind: 'dup' };
+  | { kind: 'dup' }
+  | { kind: 'partdisp' };
 
 export function matchView(l: Line, v: View, today: string): boolean {
   switch (v.kind) {
@@ -121,6 +125,7 @@ export function matchView(l: Line, v: View, today: string): boolean {
     case 'priority': return action(l) !== 'Done' && isPriority(l);
     case 'carried': return action(l) !== 'Done' && !!l.carried;
     case 'dup': return l.dup > 1;
+    case 'partdisp': return (l.dispatched ?? 0) > 0 && !isDispatched(l);
   }
 }
 
@@ -142,8 +147,17 @@ const L = (n: number) => `${n0(n)} line${n === 1 ? '' : 's'}`;
 const are = (n: number) => (n === 1 ? 'is' : 'are');
 
 /** Plain-language findings, most urgent first. Each can open the matching lines. */
-export function insights(rows: Line[], uploads: Upload[], today = todayLocal()): Insight[] {
+export function insights(rows: Line[], uploads: Upload[], today = todayLocal(), dispatch?: DispatchSummary | null): Insight[] {
   const out: Insight[] = [];
+  if (dispatch && dispatch.items.length) {
+    const full = rows.filter(isDispatched);
+    if (full.length) out.push({ id: 'disp', tone: 'ok', count: full.length, label: 'Dispatched — complete', title: `${L(full.length)} fully dispatched`, detail: `${n0(full.reduce((s, l) => s + l.qty, 0))} QTY went out. These lines count as complete.`, view: { kind: 'action', value: 'Dispatched' } });
+    const part = rows.filter((l) => (l.dispatched ?? 0) > 0 && !isDispatched(l));
+    if (part.length) out.push({ id: 'partdisp', tone: 'accent', count: part.length, label: 'Part dispatched', title: `${L(part.length)} part dispatched`, detail: `${n0(part.reduce((s, l) => s + need(l), 0))} QTY balance still to send.`, view: { kind: 'partdisp' } });
+    if (dispatch.unmatched.length) out.push({ id: 'dispnomatch', tone: 'warn', count: dispatch.unmatched.length, label: 'Dispatch not in plan', title: `${dispatch.unmatched.length} dispatched item${dispatch.unmatched.length === 1 ? ' is' : 's are'} not in this week's plan`, detail: `${dispatch.unmatched.slice(0, 6).map((i) => i.item).join(', ')}${dispatch.unmatched.length > 6 ? '…' : ''} — ${n0(dispatch.unmatched.reduce((s, i) => s + i.dispatched, 0))} QTY. Check the Item Code or the week.` });
+    const over = dispatch.items.filter((i) => i.lines > 0 && i.over > 0);
+    if (over.length) out.push({ id: 'dispover', tone: 'warn', count: over.length, label: 'Dispatched over plan', title: `${over.length} item${over.length === 1 ? '' : 's'} dispatched more than planned`, detail: over.slice(0, 5).map((i) => `${i.item} +${i.over.toLocaleString('en-US', { maximumFractionDigits: 3 })}`).join(', ') });
+  }
   const open = rows.filter((l) => !isDone(l));
   const urgent = open.filter((l) => { const d = due(l, today); return (d === 'Overdue' || d === 'Today') && action(l) !== 'Ready to pull'; });
   if (urgent.length) out.push({ id: 'urgent', tone: 'bad', count: urgent.length, label: 'Due / overdue & short', title: `${L(urgent.length)} due today or overdue ${are(urgent.length)} short of stock`, detail: `${n0(urgent.reduce((s, l) => s + shortBy(l), 0))} QTY still to find. Start here.`, view: { kind: 'urgent' } });

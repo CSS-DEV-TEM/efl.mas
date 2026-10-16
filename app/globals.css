@@ -451,3 +451,20 @@ table.ledger { border-collapse: separate; border-spacing: 0; width: 100%; font-s
 .page.anim > .drawer-back, .page.anim > .modal-back { animation: fadein .18s ease-out both; animation-delay: 0s; }
 .insight.mini .ic { flex: none; }
 .insight.mini .il { min-width: 0; }
+
+/* dispatch */
+.disp-q { display: inline-flex; align-items: center; gap: 4px; }
+.disp-q .tick { color: var(--ok); font-weight: 700; }
+td b.pos { color: var(--ok); }
+.view-chip.v-dispatched.on, .view-chip.v-partdisp.on { border-color: var(--ok); }
+.disp-opts { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; margin-top: 12px; align-items: end; }
+.disp-opts label { display: grid; gap: 3px; font-size: 12px; color: var(--ink-3); font-weight: 600; }
+.disp-opts select { border: 1px solid var(--line-strong); background: var(--panel); border-radius: 6px; padding: 7px 8px; font-size: 13px; color: var(--ink); }
+.disp-opts label.chk { display: flex; gap: 6px; align-items: center; font-weight: 500; color: var(--ink-2); padding-bottom: 8px; }
+table.mini { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+table.mini th { position: sticky; top: 0; background: var(--panel-2, var(--panel)); text-align: left; font-weight: 600; color: var(--ink-3); padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+table.mini td { padding: 5px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+table.mini .n { text-align: right; font-variant-numeric: tabular-nums; }
+table.mini td.neg { color: var(--bad); }
+.disp-pre { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; font-size: 12.5px; }
+.maprow select { min-width: 0; width: 100%; }

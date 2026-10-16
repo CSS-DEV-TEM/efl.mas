@@ -11,7 +11,19 @@ export interface Line {
   carried?: number;
   status: string | null; comment: string | null; vehicle: string | null; qi_note: string | null;
   updated_by: string | null; updated_at: string | null;
+  /** from the dispatch upload: QTY dispatched against this line, plan QTY left, UR left after the dispatch */
+  dispatched?: number; balance?: number; ur_left?: number;
 }
+
+export interface DispatchItem { item: string; dispatched: number; allocated: number; over: number; planQty: number; lines: number; complete: number; pallets: number }
+export interface DispatchSummary { total: number; items: DispatchItem[]; unmatched: DispatchItem[] }
+
+/** QTY still to send (plan QTY − dispatched). */
+export const need = (l: Line) => (l.balance ?? l.qty);
+/** UR stock still available after the dispatch (UR − dispatched). */
+export const avail = (l: Line) => (l.ur_left ?? l.ur);
+/** Every QTY of the line has gone out on a dispatch. */
+export const isDispatched = (l: Line) => (l.dispatched ?? 0) > 0 && need(l) <= 1e-9;
 
 export interface WeekInfo { week: string; lines: number; start: string | null; end: string | null; qty: number; done: number }
 
@@ -22,24 +34,24 @@ export const COVERAGES: Coverage[] = ['Covered', 'Partial', 'QI / Block only', '
 
 /** Covered: Full UR ≥ QTY. Partial: some UR. QI / Block only: no UR but QI or blocked stock. No stock: nothing in ZMMBE. */
 export function coverage(l: Line): Coverage {
-  if (l.ur >= l.qty - 1e-9 && l.qty > 0) return 'Covered';
-  if (l.ur > 0) return 'Partial';
+  if (isDispatched(l) || (avail(l) >= need(l) - 1e-9 && l.qty > 0)) return 'Covered';
+  if (avail(l) > 0) return 'Partial';
   if (l.qi + l.block > 0) return 'QI / Block only';
   return 'No stock';
 }
-export const isDone = (l: Line) => /\bdone\b/i.test(l.status || '');
-/** QTY not yet covered by Full UR stock. */
-export const shortBy = (l: Line) => Math.max(0, l.qty - l.ur);
+export const isDone = (l: Line) => /\bdone\b/i.test(l.status || '') || isDispatched(l);
+/** QTY still to send that the UR left does not cover. */
+export const shortBy = (l: Line) => Math.max(0, need(l) - avail(l));
 
 export interface Totals {
   lines: number; done: number; open: number; qty: number; ur: number; qi: number; block: number; assigned: number;
-  variance: number; kfc_ur: number; pfc_ur: number; plant_qty: number; tn_qty: number; short: number; shortLines: number;
+  variance: number; dispatched: number; balance: number; dispatchedLines: number; kfc_ur: number; pfc_ur: number; plant_qty: number; tn_qty: number; short: number; shortLines: number;
   cov: Record<Coverage, number>; covQty: Record<Coverage, number>;
 }
 
 export function totals(rows: Line[]): Totals {
   const t: Totals = {
-    lines: rows.length, done: 0, open: 0, qty: 0, ur: 0, qi: 0, block: 0, assigned: 0, variance: 0, kfc_ur: 0, pfc_ur: 0,
+    lines: rows.length, done: 0, open: 0, qty: 0, dispatched: 0, balance: 0, dispatchedLines: 0, ur: 0, qi: 0, block: 0, assigned: 0, variance: 0, kfc_ur: 0, pfc_ur: 0,
     plant_qty: 0, tn_qty: 0, short: 0, shortLines: 0,
     cov: { Covered: 0, Partial: 0, 'QI / Block only': 0, 'No stock': 0 },
     covQty: { Covered: 0, Partial: 0, 'QI / Block only': 0, 'No stock': 0 },
@@ -50,6 +62,7 @@ export function totals(rows: Line[]): Totals {
     const d = isDone(l);
     if (d) t.done++; else t.open++;
     t.qty += l.qty; t.variance += l.variance;
+    t.dispatched += l.dispatched ?? 0; t.balance += need(l); if (isDispatched(l)) t.dispatchedLines++;
     const c = coverage(l);
     t.cov[c]++; t.covQty[c] += l.qty;
     if (!d && shortBy(l) > 0) { t.short += shortBy(l); t.shortLines++; }

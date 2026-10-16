@@ -21,7 +21,7 @@ export const useShell = () => {
   return c;
 };
 
-const SRC_NAME: Record<string, string> = { plan: 'Weekly plan', zmmbe: 'ZMMBE', kfc: 'ZMMBE KFC', pfc: 'ZMMBE PFC', plant: 'PLANT report', trr: 'TRR' };
+const SRC_NAME: Record<string, string> = { plan: 'Weekly plan', zmmbe: 'ZMMBE', kfc: 'ZMMBE KFC', pfc: 'ZMMBE PFC', plant: 'PLANT report', trr: 'TRR', dispatch: 'a dispatch' };
 
 /** `allowGuest`: the page can be viewed without signing in (read-only). */
 export default function Shell({ children, admin, allowGuest }: { children: React.ReactNode; admin?: boolean; allowGuest?: boolean }) {
@@ -68,6 +68,7 @@ export default function Shell({ children, admin, allowGuest }: { children: React
   const nav = guest ? [{ href: '/', label: 'Dashboard' }] : [
     { href: '/', label: 'Dashboard' },
     { href: '/upload/', label: 'Uploads' },
+    { href: '/dispatch/', label: 'Dispatch' },
     ...(user.role === 'admin' ? [{ href: '/users/', label: 'Users' }] : []),
   ];
   const liveText = state === 'live' ? 'Live' : state === 'connecting' ? 'Connecting…' : 'Auto-refresh every 20 s';

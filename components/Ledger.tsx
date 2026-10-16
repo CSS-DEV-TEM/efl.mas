@@ -1,6 +1,6 @@
 'use client';
 import { memo, useEffect, useMemo, useState } from 'react';
-import { coverage, fmtDate, fmtQty, isDone, shortBy, type Line } from '@/lib/calc';
+import { avail, coverage, fmtDate, fmtQty, isDispatched, isDone, need, shortBy, type Line } from '@/lib/calc';
 import { ACTION_HELP, ACTION_PILL, DUE_PILL, action, due, priority, todayLocal } from '@/lib/smart';
 
 const TODAY = todayLocal();
@@ -20,7 +20,10 @@ const COLS: Col[] = [
   { id: 'action', label: 'Next action', grp: 'Smart', get: (l) => action(l), render: (l) => { const a = action(l); return <span className={`pill ${ACTION_PILL[a]}`} title={ACTION_HELP[a]}>{a}</span>; } },
   { id: 'priority', label: 'Priority', grp: 'Smart', n: true, get: (l) => priority(l, TODAY), render: (l) => { const p = priority(l, TODAY); return <span className="prio" title={`Priority ${p} / 100`}><span className="trk"><i style={{ width: `${p}%`, background: p >= 70 ? 'var(--bad)' : p >= 45 ? 'var(--warn)' : 'var(--ok)' }} /></span><b>{p}</b></span>; } },
   { id: 'qty', label: 'QTY', n: true, get: (l) => l.qty, render: (l) => q(l.qty) },
+  { id: 'dispatched', label: 'Dispatched', grp: 'Dispatch', n: true, get: (l) => l.dispatched ?? 0, render: (l) => (l.dispatched ? <span className="disp-q">{q(l.dispatched)}{isDispatched(l) && <span className="tick" title="Fully dispatched — complete">✓</span>}</span> : '–') },
+  { id: 'balance', label: 'Balance', grp: 'Dispatch', n: true, get: (l) => need(l), render: (l) => (l.dispatched ? <b className={need(l) > 0 ? '' : 'pos'}>{need(l) > 0 ? q(need(l)) : '0'}</b> : q(need(l))) },
   { id: 'ur', label: 'UR', grp: 'Full', n: true, get: (l) => l.ur, render: (l) => q(l.ur) },
+  { id: 'ur_left', label: 'UR left', grp: 'Full', n: true, full: true, get: (l) => avail(l), render: (l) => q(avail(l)) },
   { id: 'qi', label: 'QI', grp: 'Full', n: true, get: (l) => l.qi, render: (l) => q(l.qi) },
   { id: 'block', label: 'Block', grp: 'Full', n: true, get: (l) => l.block, render: (l) => q(l.block) },
   { id: 'assigned', label: 'Assigned', n: true, full: true, get: (l) => l.assigned, render: (l) => q(l.assigned) },
@@ -32,7 +35,7 @@ const COLS: Col[] = [
   { id: 'pfc_qi', label: 'QI', grp: 'PFC', n: true, full: true, get: (l) => l.pfc_qi, render: (l) => q(l.pfc_qi) },
   { id: 'pfc_block', label: 'Block', grp: 'PFC', n: true, full: true, get: (l) => l.pfc_block, render: (l) => q(l.pfc_block) },
   { id: 'plant_qty', label: 'At plant', grp: 'PLANT', n: true, get: (l) => l.plant_qty, render: (l) => q(l.plant_qty) },
-  { id: 'short', label: 'Short', grp: 'QTY − UR', n: true, get: (l) => shortBy(l), render: (l) => q(shortBy(l)) },
+  { id: 'short', label: 'Short', grp: 'Balance − UR', n: true, get: (l) => shortBy(l), render: (l) => q(shortBy(l)) },
   { id: 'coverage', label: 'Coverage', full: true, get: (l) => coverage(l), render: (l) => <span className={`pill ${COV_PILL[coverage(l)]}`}>{coverage(l)}</span> },
   { id: 'stock_plant', label: 'Plant', grp: 'Stock at', full: true, get: (l) => l.stock_plant || '' },
   { id: 'stock_sloc', label: 'St Loc', grp: 'Stock at', full: true, get: (l) => l.stock_sloc || '' },
