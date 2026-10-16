@@ -80,8 +80,10 @@ export function totals(rows: Line[]): Totals {
 }
 
 export const fmt = (n: number, d = 0) => (Number.isFinite(n) ? n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }) : '–');
-export const fmtQty = (n: number) => (Math.abs(n) < 0.0005 ? '–' : fmt(n, Math.abs(n) >= 100 ? 0 : 2));
-export const compact = (n: number) => (Math.abs(n) >= 10000 ? new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(n) : fmt(n));
+/** QTY always with 2 decimals. */
+export const fmtQty = (n: number) => (Math.abs(n) < 0.0005 ? '–' : fmt(n, 2));
+/** KPI figures: full number with 2 decimals. */
+export const compact = (n: number) => fmt(n, 2);
 export function fmtDate(d: string | null) {
   if (!d) return '–';
   const m = d.match(/^(\d{4})-(\d{2})-(\d{2})$/);

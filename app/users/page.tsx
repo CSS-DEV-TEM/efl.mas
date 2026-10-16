@@ -50,7 +50,7 @@ function Users() {
       <div className="page-head">
         <div>
           <h1>Users</h1>
-          <p>Add people who can sign in. Give plant users their plant: their plan uploads are tagged with it and "Replace my plant" only touches their lines. Entering an existing username with a new password resets that password.</p>
+          <p>Add people who can sign in. Entering an existing username with a new password resets that password.</p>
         </div>
       </div>
 
@@ -65,7 +65,6 @@ function Users() {
               <option value="editor">Editor</option><option value="viewer">Viewer</option><option value="admin">Admin</option>
             </select>
           </label>
-          <label htmlFor="npl">Plant (optional)<input id="npl" value={form.plant} onChange={(e) => setForm({ ...form, plant: e.target.value.toUpperCase() })} placeholder="e.g. C051" /></label>
           <button className="btn primary" type="submit" disabled={busy}>Save user</button>
         </form>
         <p className="sub" style={{ marginTop: 10 }}>{ROLE_HELP[form.role]}.</p>
@@ -75,7 +74,7 @@ function Users() {
       <section className="card table-card">
         <div className="table-wrap" style={{ maxHeight: 'none' }}>
           <table className="ledger">
-            <thead><tr><th><button tabIndex={-1}>Username</button></th><th><button tabIndex={-1}>Role</button></th><th><button tabIndex={-1}>Plant</button></th><th><button tabIndex={-1}>Added</button></th><th /></tr></thead>
+            <thead><tr><th><button tabIndex={-1}>Username</button></th><th><button tabIndex={-1}>Role</button></th><th><button tabIndex={-1}>Added</button></th><th /></tr></thead>
             <tbody>
               {list.map((u) => (
                 <tr key={u.username}>
@@ -86,8 +85,6 @@ function Users() {
                       <option value="admin">admin</option><option value="editor">editor</option><option value="viewer">viewer</option>
                     </select>
                   </td>
-                  <td><input className="edit" defaultValue={u.plant || ''} placeholder="—" aria-label={`Plant for ${u.username}`}
-                    onBlur={(e) => { const v = e.target.value.trim().toUpperCase(); if (v !== (u.plant || '')) setRole(u.username, u.role, v || null); }} /></td>
                   <td className="muted">{ago(u.created_at)}</td>
                   <td style={{ textAlign: 'right' }}>{u.username !== user.username && <button className="btn sm danger" onClick={() => remove(u.username)}>Remove</button>}</td>
                 </tr>

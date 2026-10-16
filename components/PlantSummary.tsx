@@ -3,24 +3,34 @@ import { useMemo, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { api } from '@/lib/api';
 import { fmt, type Line } from '@/lib/calc';
-import { SOLI_PER_HOUR, fmtTime, plantSummary, type Bucket, type PlantInfo, type PlantRow } from '@/lib/summary';
+import { SOLI_PER_HOUR, plantSummary, timeMinutes, type Bucket, type PlantInfo, type PlantRow } from '@/lib/summary';
 
 const q = (n: number) => (Math.abs(n) < 0.0005 ? '' : fmt(n, 2));
 const c = (n: number) => (n ? fmt(n) : '');
 
 /** Plant-wise summary in the layout of the daily pull summary sheet. Click a plant to see its lines. */
-export default function PlantSummary({ rows, plants, week, canEdit, onPlant, onSaved }: {
-  rows: Line[]; plants: PlantInfo[]; week: string; canEdit: boolean; onPlant: (code: string) => void; onSaved: (msg: string) => void;
+export default function PlantSummary({ rows, plants, received = [], week, canEdit, onPlant, onSaved }: {
+  rows: Line[]; plants: PlantInfo[]; received?: { code: string; received: string | null }[]; week: string; canEdit: boolean; onPlant: (code: string) => void; onSaved: (msg: string) => void;
 }) {
-  const s = useMemo(() => plantSummary(rows, plants), [rows, plants]);
+  const s = useMemo(() => plantSummary(rows, plants, received), [rows, plants, received]);
+  const saveTarget = async (code: string, v: string) => {
+    const p = plants.find((x) => x.code.toUpperCase() === code) || { code, name: '', responsible: '', target: '', sort: 0 };
+    await api('/api/plants', { method: 'POST', body: { plants: [{ ...p, target: v }] } });
+    onSaved(`Target time for ${p.name || code} saved`);
+  };
+  const saveReceived = async (code: string, v: string) => {
+    await api('/api/plants/received', { method: 'POST', body: { week, code, received: v } });
+    onSaved(v ? `Received time for ${code} saved` : `Received time for ${code} back to the upload time`);
+  };
   const [setup, setSetup] = useState(false);
   const pair = (b: Bucket, strong = false) => (<><td className={`n ${strong ? 'strong' : ''}`}>{q(b.qty)}</td><td className="n soli">{c(b.soli)}</td></>);
   const row = (r: PlantRow, isTotal = false) => (
     <tr key={r.code} className={isTotal ? 'total' : ''} onClick={isTotal ? undefined : () => onPlant(r.code)} title={isTotal ? '' : `Show ${r.name} lines`}>
       <td>{isTotal ? '' : r.responsible}</td>
       <td className="pname">{r.name}{!isTotal && r.name !== r.code && <small>{r.code}</small>}</td>
-      <td>{isTotal ? '' : r.target}</td>
-      <td className={r.late === true ? 'late' : r.late === false ? 'ontime' : ''}>{isTotal ? '' : fmtTime(r.received)}</td>
+      <td onClick={(e) => e.stopPropagation()}>{isTotal ? '' : <TimeCell value={r.target} canEdit={canEdit} placeholder="10:00 AM" title="Target time — click to change" onSave={(v) => saveTarget(r.code, v)} weekly />}</td>
+      <td onClick={(e) => e.stopPropagation()} className={r.late === true ? 'late' : r.late === false ? 'ontime' : ''}>{isTotal ? '' : <TimeCell value={r.receivedText} canEdit={canEdit} placeholder="9:48 AM" manual={r.receivedManual}
+        title={r.receivedManual ? 'Typed on the dashboard — click to change, clear it to use the upload time' : r.received ? 'Plan upload time — click to type the real received time' : 'Click to type the received time'} onSave={(v) => saveReceived(r.code, v)} />}</td>
       {pair(r.plan)}{pair(r.ur, true)}
       <td className="n">{r.wh ? fmt(r.wh, 2) : isTotal ? '' : '–'}</td>
       {pair(r.qi)}{pair(r.block)}{pair(r.nih)}{pair(r.adhoc)}{pair(r.sameDay)}{pair(r.released)}{pair(r.dispatched)}
@@ -30,7 +40,7 @@ export default function PlantSummary({ rows, plants, week, canEdit, onPlant, onS
   );
   const exportXlsx = () => {
     const head = ['Responsible', 'PLANT', 'Target time', 'Received time', 'Plan Qty', 'SOLI', 'UR', 'SOLI', 'W/H', 'QI', 'SOLI', 'BLOCK', 'SOLI', 'NIH', 'SOLI', 'Adhoc', 'SOLI', 'Same day', 'SOLI', 'Released to UR', 'SOLI', 'Dispatched', 'SOLI', 'Total qty', 'Pending', 'SOLI'];
-    const line = (r: PlantRow) => [r.responsible, r.name, r.target, fmtTime(r.received), r.plan.qty, r.plan.soli, r.ur.qty, r.ur.soli, Math.round(r.wh * 100) / 100, r.qi.qty, r.qi.soli, r.block.qty, r.block.soli, r.nih.qty, r.nih.soli, r.adhoc.qty, r.adhoc.soli, r.sameDay.qty, r.sameDay.soli, r.released.qty, r.released.soli, r.dispatched.qty, r.dispatched.soli, r.total, r.pending.qty, r.pending.soli]
+    const line = (r: PlantRow) => [r.responsible, r.name, r.target, r.receivedText, r.plan.qty, r.plan.soli, r.ur.qty, r.ur.soli, Math.round(r.wh * 100) / 100, r.qi.qty, r.qi.soli, r.block.qty, r.block.soli, r.nih.qty, r.nih.soli, r.adhoc.qty, r.adhoc.soli, r.sameDay.qty, r.sameDay.soli, r.released.qty, r.released.soli, r.dispatched.qty, r.dispatched.soli, r.total, r.pending.qty, r.pending.soli]
       .map((v) => (typeof v === 'number' ? Math.round(v * 1000) / 1000 : v));
     const ws = XLSX.utils.aoa_to_sheet([head, ...s.rows.map(line), line(s.total)]);
     ws['!cols'] = head.map((h, i) => ({ wch: i < 4 ? 14 : Math.max(7, h.length + 2) }));
@@ -64,6 +74,7 @@ export default function PlantSummary({ rows, plants, week, canEdit, onPlant, onS
           <tfoot>{row(s.total, true)}</tfoot>
         </table>
       </div>
+      <datalist id="target-opts"><option value="9:00 AM" /><option value="10:00 AM" /><option value="1:00 PM" /><option value="Weekly" /></datalist>
       {setup && <PlantSetup rows={rows} plants={plants} onClose={() => setSetup(false)} onSaved={(m) => { setSetup(false); onSaved(m); }} />}
     </section>
   );
@@ -100,11 +111,38 @@ function PlantSetup({ rows, plants, onClose, onSaved }: { rows: Line[]; plants: 
             </div>
           ))}
         </div>
-        <datalist id="target-opts"><option value="9:00 AM" /><option value="10:00 AM" /><option value="1:00 PM" /><option value="Weekly" /></datalist>
         <button type="button" className="btn sm" style={{ justifySelf: 'start' }} onClick={() => setList((l) => [...l, { code: '', name: '', responsible: '', target: '', sort: l.length + 1 }])}>+ Add plant</button>
         {err && <div className="notice bad">{err}</div>}
         <div className="modal-foot"><span /><button type="button" className="btn" onClick={onClose}>Cancel</button><button className="btn primary" disabled={busy}>{busy ? 'Saving…' : 'Save'}</button></div>
       </form>
     </div>
   );
+}
+
+/** A time cell in the summary: click to type (e.g. 9:48 AM), Enter or leaving the box saves, Esc cancels. */
+function TimeCell({ value, canEdit, placeholder, title, onSave, weekly, manual }: { value: string; canEdit: boolean; placeholder: string; title: string; onSave: (v: string) => Promise<void>; weekly?: boolean; manual?: boolean }) {
+  const [edit, setEdit] = useState(false);
+  const [v, setV] = useState(value);
+  const [busy, setBusy] = useState(false);
+  const [bad, setBad] = useState(false);
+  if (!canEdit) return <>{value}</>;
+  if (!edit) return <button type="button" className={`tcell ${manual ? 'manual' : ''}`} title={title} onClick={() => { setV(value); setBad(false); setEdit(true); }}>{value || <span className="ph">+ add</span>}</button>;
+  const done = async () => {
+    const t = v.trim();
+    if (t === value) { setEdit(false); return; }
+    if (t && timeMinutes(t) === null && !(weekly && /^weekly$/i.test(t))) { setBad(true); return; }
+    setBusy(true);
+    try { await onSave(normTime(t)); setEdit(false); } catch { setBad(true); } finally { setBusy(false); }
+  };
+  return <input className={`tcell-in ${bad ? 'bad' : ''}`} autoFocus value={v} disabled={busy} placeholder={placeholder} list={weekly ? 'target-opts' : undefined}
+    title={bad ? 'Use a time like 9:48 AM or 13:00' + (weekly ? ', or Weekly' : '') : ''}
+    onChange={(e) => { setV(e.target.value); setBad(false); }} onBlur={done}
+    onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'Escape') setEdit(false); }} />;
+}
+/** "948am" style is not accepted; "9:48 am", "09.48", "21:30" → "9:48 AM" / "9:30 PM". */
+function normTime(t: string) {
+  const m = timeMinutes(t);
+  if (m === null) return t.replace(/^weekly$/i, 'Weekly');
+  const h = Math.floor(m / 60), mi = m % 60;
+  return `${((h + 11) % 12) + 1}:${String(mi).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`;
 }

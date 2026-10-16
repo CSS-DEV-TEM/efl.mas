@@ -19,7 +19,7 @@ export default function Page() {
   return <Shell allowGuest><Dashboard /></Shell>;
 }
 
-interface PullPlan { week: string | null; prevWeek?: string | null; weeks: WeekInfo[]; rows: Line[]; dispatch?: DispatchSummary; plants?: PlantInfo[]; releases?: { key: string; qi: number; block: number; by_user: string; at: string; active: boolean }[]; uploads: Upload[]; counts: { src: string; n: number }[]; generatedAt: string }
+interface PullPlan { week: string | null; prevWeek?: string | null; weeks: WeekInfo[]; rows: Line[]; dispatch?: DispatchSummary; plants?: PlantInfo[]; received?: { code: string; received: string | null }[]; releases?: { key: string; qi: number; block: number; by_user: string; at: string; active: boolean }[]; uploads: Upload[]; counts: { src: string; n: number }[]; generatedAt: string }
 
 /** "2026-W42" → "Week 42" */
 const weekLabel = (w: string | null | undefined) => (w ? `Week ${Number(w.slice(-2))}` : '');
@@ -152,7 +152,7 @@ function Dashboard() {
         <div>
           <h1>{data?.week ? <>{weekLabel(data.week)} <span className="h1-sub">plan tracking</span></> : 'Weekly plan tracking'}</h1>
           <p>
-            {data ? <>Calculated {ago(data.generatedAt)} from the latest uploads. {t.open > 0 ? <><b>{fmt(t.shortLines)}</b> open lines need <b>{fmt(t.short, 0)}</b> more than the Full UR stock holds.</> : 'All lines in view are done.'}</> : 'Loading…'}
+            {data ? <>Calculated {ago(data.generatedAt)} from the latest uploads. {t.open > 0 ? <><b>{fmt(t.shortLines)}</b> open lines need <b>{fmt(t.short, 2)}</b> more than the Full UR stock holds.</> : 'All lines in view are done.'}</> : 'Loading…'}
           </p>
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -203,7 +203,7 @@ function Dashboard() {
       </div>}
 
       {tab === 'summary' && data?.week && rows.length > 0 && (
-        <PlantSummary rows={rows} plants={data.plants || []} week={data.week} canEdit={canEdit}
+        <PlantSummary rows={rows} plants={data.plants || []} received={data.received || []} week={data.week} canEdit={canEdit}
           onPlant={(c) => { setPlant(rows.some((r) => (r.plant || '').toUpperCase() === c) ? (rows.find((r) => (r.plant || '').toUpperCase() === c)!.plant || '') : ''); setView({ kind: 'all' }); setTab('details'); }}
           onSaved={(m) => { toast(m); load(); }} />
       )}

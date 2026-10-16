@@ -12,7 +12,9 @@ export const SOLI_PER_HOUR = 12;
 
 export interface Bucket { qty: number; soli: number }
 export interface PlantRow {
-  code: string; name: string; responsible: string; target: string; received: string | null; late: boolean | null;
+  code: string; name: string; responsible: string; target: string; received: string | null;
+  /** received time shown: typed on the dashboard, or the plan upload time */
+  receivedText: string; receivedManual: boolean; late: boolean | null;
   plan: Bucket; ur: Bucket; wh: number; qi: Bucket; block: Bucket; nih: Bucket; adhoc: Bucket; sameDay: Bucket;
   released: Bucket; dispatched: Bucket; total: number; pending: Bucket;
 }
@@ -38,7 +40,8 @@ export const fmtTime = (iso: string | null) => {
   return `${((h + 11) % 12) + 1}:${String(m).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`;
 };
 
-export function plantSummary(rows: Line[], plants: PlantInfo[]): { rows: PlantRow[]; total: PlantRow } {
+export function plantSummary(rows: Line[], plants: PlantInfo[], received: { code: string; received: string | null }[] = []): { rows: PlantRow[]; total: PlantRow } {
+  const rec = new Map(received.map((r) => [r.code.toUpperCase(), r.received || '']));
   const info = new Map(plants.map((p) => [p.code.toUpperCase(), p]));
   const by = new Map<string, Line[]>();
   for (const l of rows) {
@@ -52,7 +55,7 @@ export function plantSummary(rows: Line[], plants: PlantInfo[]): { rows: PlantRo
   const make = (code: string, ls: Line[]): PlantRow => {
     const p = info.get(code);
     const r: PlantRow = {
-      code, name: p?.name || code, responsible: p?.responsible || '', target: p?.target || '', received: null, late: null,
+      code, name: p?.name || code, responsible: p?.responsible || '', target: p?.target || '', received: null, receivedText: '', receivedManual: false, late: null,
       plan: b0(), ur: b0(), wh: 0, qi: b0(), block: b0(), nih: b0(), adhoc: b0(), sameDay: b0(), released: b0(), dispatched: b0(), total: 0, pending: b0(),
     };
     const relKeys = new Set<string>();
@@ -72,8 +75,11 @@ export function plantSummary(rows: Line[], plants: PlantInfo[]): { rows: PlantRo
     }
     r.wh = r.ur.soli / SOLI_PER_HOUR;
     r.total = r.ur.qty + r.adhoc.qty;
-    const tm = timeMinutes(r.target);
-    if (tm !== null && r.received) { const d = colombo(r.received); r.late = d.getUTCHours() * 60 + d.getUTCMinutes() > tm; }
+    const typed = rec.get(code);
+    r.receivedManual = !!typed;
+    r.receivedText = typed || fmtTime(r.received);
+    const tm = timeMinutes(r.target), rm = timeMinutes(r.receivedText);
+    if (tm !== null && rm !== null) r.late = rm > tm;
     return r;
   };
   const out = Array.from(by.entries()).map(([c, ls]) => make(c, ls))

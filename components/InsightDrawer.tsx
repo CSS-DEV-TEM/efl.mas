@@ -51,9 +51,9 @@ export default function InsightDrawer({ insight, rows, week, canEdit, onEdit, on
 
         <div className="drawer-stats">
           <div><span>Lines</span><b>{fmt(rows.length)}</b></div>
-          <div><span>QTY</span><b>{fmt(qty, 0)}</b></div>
-          <div><span>Full UR</span><b>{fmt(ur, 0)}</b></div>
-          <div><span>Short vs UR</span><b className={short > 0 ? 'neg' : ''}>{fmt(short, 0)}</b></div>
+          <div><span>QTY</span><b>{fmt(qty, 2)}</b></div>
+          <div><span>Full UR</span><b>{fmt(ur, 2)}</b></div>
+          <div><span>Short vs UR</span><b className={short > 0 ? 'neg' : ''}>{fmt(short, 2)}</b></div>
           <div><span>Dates</span><b>{dates.length ? `${fmtDate(dates[0] || null)}${dates.length > 1 ? ' – ' + fmtDate(dates[dates.length - 1] || null) : ''}` : '–'}</b></div>
         </div>
 

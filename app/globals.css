@@ -515,3 +515,11 @@ table.mini td.neg { color: var(--bad); }
 .as-search { border: 1px solid var(--line-strong); background: var(--panel); border-radius: 6px; padding: 7px 10px; font-size: 13px; color: var(--ink); }
 table.mini tr.picked td { background: var(--accent-soft); }
 .psum tfoot td.strong { color: #fff; }
+.tcell { all: unset; cursor: pointer; display: block; min-width: 70px; padding: 2px 4px; border-radius: 4px; text-align: center; }
+.tcell:hover { outline: 1px dashed currentColor; }
+.tcell:focus-visible { outline: 2px solid var(--accent); }
+.tcell.manual::after { content: " ✎"; font-size: 10px; opacity: .8; }
+.tcell .ph { color: var(--ink-3); font-size: 11.5px; }
+.tcell-in { width: 92px; border: 1px solid var(--accent); border-radius: 4px; padding: 3px 6px; font: inherit; background: var(--panel); color: var(--ink); }
+.tcell-in.bad { border-color: var(--bad); box-shadow: 0 0 0 2px color-mix(in srgb, var(--bad) 30%, transparent); }
+.pos-c { color: var(--ok); }

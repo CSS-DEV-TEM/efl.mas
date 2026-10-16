@@ -14,6 +14,7 @@ export default function AssignDispatch({ week, leftover, assigns, rows, canEdit,
     try { await api(`/api/dispatch/assign/${a.id}`, { method: 'DELETE' }); onDone('Assignment removed'); } catch (e) { alert(e instanceof Error ? e.message : 'Failed'); }
   };
   if (!leftover.length && !assigns.length) return null;
+  const label = (item: string) => (item === '#UR' ? <span className="pill ok">UR left</span> : item);
   return (
     <section className="card" aria-labelledby="lo-title">
       <h2 id="lo-title">Not matched to the plan {leftover.length > 0 && <span className="pill warn" style={{ marginLeft: 6 }}>{leftover.length}</span>}</h2>
@@ -35,9 +36,9 @@ export default function AssignDispatch({ week, leftover, assigns, rows, canEdit,
           <h3 style={{ margin: '14px 0 6px', fontSize: 14 }}>Assigned by hand</h3>
           <div className="table-wrap" style={{ maxHeight: 'none' }}>
             <table className="mini">
-              <thead><tr><th>Dispatch item</th><th>→ Plan line</th><th>Date</th><th className="n">QTY</th><th className="n">Applied</th><th>By</th><th /></tr></thead>
+              <thead><tr><th>From</th><th>→ Plan line</th><th>Date</th><th className="n">QTY</th><th className="n">Applied</th><th>By</th><th /></tr></thead>
               <tbody>{assigns.map((a) => { const l = byLine.get(a.line); return (
-                <tr key={a.id}><td>{a.item}</td><td>{l ? `${l.so} / ${l.li} / ${l.item}` : <span className="muted">line no longer in plan</span>}</td><td>{l ? fmtDate(l.date) : ''}</td>
+                <tr key={a.id}><td>{label(a.item)}</td><td>{l ? `${l.so} / ${l.li} / ${l.item}` : <span className="muted">line no longer in plan</span>}</td><td>{l ? fmtDate(l.date) : ''}</td>
                   <td className="n">{fmtQty(a.qty)}</td><td className={`n ${(a.applied ?? 0) + 1e-9 < a.qty ? 'neg' : ''}`} title="Less than asked when the line had less balance or the item had less left over">{fmtQty(a.applied ?? 0)}</td>
                   <td className="muted">{a.by_user}</td><td>{canEdit && <button className="btn sm" onClick={() => remove(a)}>Remove</button>}</td></tr>
               ); })}</tbody>

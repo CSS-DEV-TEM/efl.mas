@@ -7,6 +7,7 @@ import { ago, fmt, fmtDate, fmtQty, isDispatched, need, avail, type DispatchSumm
 import { colLetter, readWorkbook, type Grid } from '@/lib/mapping';
 import { takePendingDispatch } from '@/lib/handoff';
 import AssignDispatch from '@/components/AssignDispatch';
+import UrToDispatch from '@/components/UrToDispatch';
 
 export default function Page() {
   return <Shell><Dispatch /></Shell>;
@@ -206,7 +207,7 @@ function Dispatch() {
         <div className="kpi"><span className="k">Dispatched QTY</span><span className="v">{fmt(d?.total || 0, 2)}</span><span className="s">{fmt(saved.length)} pallet line{saved.length === 1 ? '' : 's'} · {fmt(d?.items.length || 0)} items</span></div>
         <div className="kpi ok"><span className="k">Plan lines complete</span><span className="v">{fmt(fullLines)}</span><span className="s">of {fmt(plan?.rows.length || 0)} in this week</span>
           <div className="meter"><span style={{ width: `${plan?.rows.length ? (fullLines / plan.rows.length) * 100 : 0}%`, background: 'var(--ok)' }} /></div></div>
-        <div className="kpi"><span className="k">Plan balance</span><span className="v">{fmt((plan?.rows || []).reduce((s, l) => s + need(l), 0), 0)}</span><span className="s">of {fmt(totalPlan, 0)} plan QTY</span></div>
+        <div className="kpi"><span className="k">Plan balance</span><span className="v">{fmt((plan?.rows || []).reduce((s, l) => s + need(l), 0), 2)}</span><span className="s">of {fmt(totalPlan, 2)} plan QTY</span></div>
         <div className={`kpi ${d?.unmatched.length ? 'bad' : ''}`}><span className="k">Items not in plan</span><span className="v">{fmt(d?.unmatched.length || 0)}</span><span className="s">{d?.unmatched.length ? fmt(d.unmatched.reduce((s, i) => s + i.dispatched, 0), 2) + ' QTY unmatched' : 'every dispatched item matched'}</span></div>
       </section>
 
@@ -356,6 +357,8 @@ function Dispatch() {
           </div>
         )}
       </section>
+
+      {week && plan && <UrToDispatch week={week} rows={plan.rows} canEdit={canEdit} onDone={(m) => { toast(m); load(); }} />}
 
       {week && d && <AssignDispatch week={week} leftover={d.leftover || []} assigns={d.assigns || []} rows={plan?.rows || []} canEdit={canEdit} onDone={(m) => { toast(m); load(); }} />}
 
