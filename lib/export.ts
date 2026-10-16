@@ -6,7 +6,7 @@ import { action, due, priority, todayLocal } from './smart';
 export function exportPullPlan(rows: Line[], name = 'MAS_Weekly_Plan') {
   const today = todayLocal();
   const data = rows.map((l) => ({
-    Priority: priority(l, today), 'Next action': action(l), Due: due(l, today),
+    Week: l.week, Priority: priority(l, today), 'Next action': action(l), Due: due(l, today),
     SO: Number(l.so) || l.so, LI: Number(l.li) || l.li, 'Item Code': Number(l.item) || l.item, Date: l.date, QTY: l.qty,
     Plant: l.plant, Remarks: l.remarks, Comment: l.comment, 'QI note': l.qi_note, Status: l.status, Vehicle: l.vehicle,
     'UR (Full)': l.ur, 'QI (Full)': l.qi, 'Block (Full)': l.block, Assigned: l.assigned, Variance: l.variance,

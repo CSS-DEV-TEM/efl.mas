@@ -5,17 +5,21 @@ import Shell, { useShell } from '@/components/Shell';
 import Ledger, { STATUS_OPTIONS } from '@/components/Ledger';
 import { ProgressByDate, QtyByDate, COV_COLOR } from '@/components/Charts';
 import { api } from '@/lib/api';
-import { COVERAGES, ago, compact, coverage, fmt, fmtDate, isDone, totals, type Coverage, type Line, type Upload } from '@/lib/calc';
+import { COVERAGES, ago, compact, coverage, fmt, fmtDate, isDone, totals, type Coverage, type Line, type Upload, type WeekInfo } from '@/lib/calc';
 import { exportPullPlan } from '@/lib/export';
 import { CountUp } from '@/components/Brand';
 import { SRC_INFO, SRC_ORDER } from '@/lib/mapping';
-import { ACTION_HELP, insights, matchView, planWeek, todayLocal, type Action, type View } from '@/lib/smart';
+import { ACTION_HELP, insights, matchView, todayLocal, type Action, type View } from '@/lib/smart';
 
 export default function Page() {
   return <Shell><Dashboard /></Shell>;
 }
 
-interface PullPlan { rows: Line[]; uploads: Upload[]; counts: { src: string; n: number }[]; generatedAt: string }
+interface PullPlan { week: string | null; weeks: WeekInfo[]; rows: Line[]; uploads: Upload[]; counts: { src: string; n: number }[]; generatedAt: string }
+
+/** "2026-W42" → "Week 42" */
+const weekLabel = (w: string | null | undefined) => (w ? `Week ${Number(w.slice(-2))}` : '');
+const weekRange = (w: WeekInfo | undefined) => (w?.start ? `${fmtDate(w.start)} – ${fmtDate(w.end)}` : '');
 interface Activity { at: string; username: string; action: string; detail: string }
 
 function Dashboard() {
@@ -25,6 +29,10 @@ function Dashboard() {
   const [activity, setActivity] = useState<Activity[]>([]);
   const [flash, setFlash] = useState<Set<string>>(new Set());
   const [, tick] = useState(0);
+  // null = follow the most recent week; a value = the week someone picked
+  const [pickedWeek, setPickedWeek] = useState<string | null>(null);
+  const weekRef = useRef<string | null>(null);
+  weekRef.current = pickedWeek;
 
   // filters
   const [date, setDate] = useState<string | null>(null);
@@ -52,11 +60,13 @@ function Dashboard() {
 
   const load = useCallback(async () => {
     try {
-      const [p, a] = await Promise.all([api<PullPlan>('/api/pullplan'), api<{ activity: Activity[] }>('/api/activity')]);
+      const w = weekRef.current;
+      const [p, a] = await Promise.all([api<PullPlan>('/api/pullplan' + (w ? '?week=' + encodeURIComponent(w) : '')), api<{ activity: Activity[] }>('/api/activity')]);
+      if (w && p.week !== w) setPickedWeek(null); // that week was deleted: back to the latest
       setData(p); setActivity(a.activity); setErr('');
     } catch (e) { setErr(e instanceof Error ? e.message : 'Could not load data.'); }
   }, []);
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); }, [load, pickedWeek]);
   // when the realtime connection is down (or not set up on the Worker), refresh every 20 s instead
   useEffect(() => {
     if (live === 'live') return;
@@ -72,7 +82,7 @@ function Dashboard() {
     if (m.type === 'data') { clearTimeout(reloadTimer.current); reloadTimer.current = setTimeout(load, 400); }
     if (m.type === 'status') {
       const line = m.line as Partial<Line> & { key: string };
-      setData((d) => d && { ...d, rows: d.rows.map((r) => (r.key === line.key ? { ...r, ...line } : r)) });
+      setData((d) => d && { ...d, rows: d.rows.map((r) => (r.key === line.key && (!line.week || r.week === line.week) ? { ...r, ...line } : r)) });
       setActivity((a) => [{ at: String(m.at), username: String(m.by), action: 'edit', detail: `${line.key.replace(/\|/g, ' / ')}: ${line.status ?? ''} ${line.comment ?? ''}`.trim() }, ...a].slice(0, 60));
       setFlash((f) => new Set(f).add(line.key));
       setTimeout(() => setFlash((f) => { const n = new Set(f); n.delete(line.key); return n; }), 2300);
@@ -96,7 +106,6 @@ function Dashboard() {
       (!s || [r.so, r.li, r.item, r.status, r.comment, r.vehicle, r.remarks, r.tn_number, r.stock_plant].join(' ').toLowerCase().includes(s)));
   }, [scoped, state, cov, search, view, today]);
   const t = useMemo(() => totals(scoped), [scoped]);
-  const week = useMemo(() => planWeek(rows), [rows]);
   const tips = useMemo(() => insights(scoped, data?.uploads || [], today), [scoped, data?.uploads, today]);
   const viewCounts = useMemo(() => {
     const c: Record<string, number> = {};
@@ -110,9 +119,9 @@ function Dashboard() {
 
   const save = useCallback(async (key: string, field: 'status' | 'comment' | 'vehicle', value: string) => {
     setData((d) => d && { ...d, rows: d.rows.map((r) => (r.key === key ? { ...r, [field]: value || null, updated_by: user.username } : r)) });
-    try { await api('/api/status', { method: 'PATCH', body: { key, [field]: value || null } }); }
+    try { await api('/api/status', { method: 'PATCH', body: { key, week: data?.week, [field]: value || null } }); }
     catch (e) { toast(e instanceof Error ? e.message : 'Save failed.'); load(); throw e; }
-  }, [user.username, toast, load]);
+  }, [user.username, toast, load, data?.week]);
 
   const up = new Map((data?.uploads || []).map((u) => [u.src, u]));
   const canEdit = user.role !== 'viewer';
@@ -124,16 +133,37 @@ function Dashboard() {
     <main className="page anim">
       <div className="page-head">
         <div>
-          <h1>{week ? <>Week {week} <span className="h1-sub">plan tracking</span></> : 'Weekly plan tracking'}</h1>
+          <h1>{data?.week ? <>{weekLabel(data.week)} <span className="h1-sub">plan tracking</span></> : 'Weekly plan tracking'}</h1>
           <p>
             {data ? <>Calculated {ago(data.generatedAt)} from the latest uploads. {t.open > 0 ? <><b>{fmt(t.shortLines)}</b> open lines need <b>{fmt(t.short, 0)}</b> more than the Full UR stock holds.</> : 'All lines in view are done.'}</> : 'Loading…'}
           </p>
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           {canEdit && <Link className="btn" href="/upload/">Upload reports</Link>}
-          <button className="btn primary" disabled={!tableRows.length} onClick={() => exportPullPlan(tableRows)}>Export Excel ({fmt(tableRows.length)})</button>
+          <button className="btn primary" disabled={!tableRows.length} onClick={() => exportPullPlan(tableRows, `MAS_Weekly_Plan_${(data?.week || '').replace('-', '_')}`)}>Export Excel ({fmt(tableRows.length)})</button>
         </div>
       </div>
+
+      {data && data.weeks.length > 0 && (
+        <nav className="weeks" aria-label="Weeks">
+          <span className="weeks-label">Week</span>
+          {data.weeks.map((w, i) => {
+            const on = w.week === data.week;
+            const pct = w.lines ? w.done / w.lines : 0;
+            return (
+              <button key={w.week} type="button" className={`week-chip ${on ? 'on' : ''}`} aria-pressed={on}
+                onClick={() => { setPickedWeek(i === 0 ? null : w.week); setView({ kind: 'all' }); setDate(null); }}
+                title={`${w.week} · ${weekRange(w)} · ${fmt(w.lines)} lines · ${fmt(w.done)} done`}>
+                <b>{weekLabel(w.week)}</b>{i === 0 && <span className="latest">Latest</span>}
+                <span className="wr">{weekRange(w)}</span>
+                <span className="wbar"><i style={{ width: `${pct * 100}%` }} /></span>
+                <span className="wn">{Math.round(pct * 100)}% done</span>
+              </button>
+            );
+          })}
+          {pickedWeek && <button type="button" className="btn sm" onClick={() => setPickedWeek(null)}>Back to latest week</button>}
+        </nav>
+      )}
 
       <div className="fresh" aria-label="Report freshness">
         {SRC_ORDER.map((s) => {

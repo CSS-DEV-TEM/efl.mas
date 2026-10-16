@@ -2,7 +2,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Shell, { useShell } from '@/components/Shell';
 import { api } from '@/lib/api';
-import { ago, fmt, type Upload } from '@/lib/calc';
+import { ago, fmt, fmtDate, type Upload, type WeekInfo } from '@/lib/calc';
+import { TEMPLATES, downloadTemplate } from '@/lib/templates';
+import { isoWeek } from '@/lib/smart';
 import {
   FIELDS, SRC_INFO, SRC_ORDER, applyMapping, colLetter, detectMapping, guessSrc, readWorkbook, usableCount,
   type Grid, type Mapping, type Src,
@@ -25,13 +27,15 @@ function Uploads() {
   const [reading, setReading] = useState(false);
   const [uploads, setUploads] = useState<Upload[]>([]);
   const [counts, setCounts] = useState<Record<string, number>>({});
+  const [weeks, setWeeks] = useState<WeekInfo[]>([]);
   const input = useRef<HTMLInputElement>(null);
   const canEdit = user.role !== 'viewer';
 
   const loadStatus = useCallback(async () => {
     try {
-      const p = await api<{ uploads: Upload[]; counts: { src: string; n: number }[] }>('/api/pullplan');
+      const p = await api<{ uploads: Upload[]; counts: { src: string; n: number }[]; weeks: WeekInfo[] }>('/api/pullplan');
       setUploads(p.uploads);
+      setWeeks(p.weeks || []);
       setCounts(Object.fromEntries(p.counts.map((c) => [c.src, c.n])));
     } catch { /* shown on dashboard */ }
   }, []);
@@ -64,8 +68,10 @@ function Uploads() {
     setJob(j.id, { state: 'sending', msg: undefined });
     try {
       const rows = applyMapping(j.src, j.grid, j.map);
-      const r = await api<{ accepted: number; skipped: number }>('/api/upload', { method: 'POST', body: { src: j.src, fileName: j.file, sheetName: j.sheet, rows } });
-      setJob(j.id, { state: 'done', msg: `${fmt(r.accepted)} rows saved${r.skipped ? ` · ${fmt(r.skipped)} rows without SO/LI/Material skipped` : ''}. Every open dashboard has updated.` });
+      const r = await api<{ accepted: number; skipped: number; weeks?: string[] }>('/api/upload', { method: 'POST', body: { src: j.src, fileName: j.file, sheetName: j.sheet, rows } });
+      const wk = r.weeks?.length ? ` to ${r.weeks.map((w) => 'Week ' + Number(w.slice(-2))).join(', ')}` : '';
+      loadStatus();
+      setJob(j.id, { state: 'done', msg: `${fmt(r.accepted)} rows saved${wk}${r.skipped ? ` · ${fmt(r.skipped)} rows without SO/LI/Material skipped` : ''}. Every open dashboard has updated.` });
     } catch (e) {
       setJob(j.id, { state: 'error', msg: e instanceof Error ? e.message : 'Upload failed.' });
     }
@@ -74,6 +80,12 @@ function Uploads() {
     // plan first so the stock reports land on the new lines
     const order = [...jobs].filter((j) => j.src && j.state !== 'done').sort((a, b) => SRC_ORDER.indexOf(a.src as Src) - SRC_ORDER.indexOf(b.src as Src));
     for (const j of order) await send(j);
+  }
+
+  async function deleteWeek(w: string) {
+    if (!window.confirm(`Delete the plan for ${w}? Stock reports and other weeks stay.`)) return;
+    try { await api('/api/data/plan?week=' + encodeURIComponent(w), { method: 'DELETE' }); toast(`${w} deleted`); loadStatus(); }
+    catch (e) { toast(e instanceof Error ? e.message : 'Could not delete.'); }
   }
 
   async function clear(src: Src) {
@@ -113,6 +125,37 @@ function Uploads() {
         })}
       </section>
 
+      <section className="card" aria-labelledby="tpl-title">
+        <h2 id="tpl-title">Sample formats</h2>
+        <p className="sub">Download a format, paste your data under the headers and upload it here. Each file has a "How to use" sheet.</p>
+        <div className="tpl-grid">
+          {SRC_ORDER.map((s) => (
+            <button key={s} type="button" className="tpl" onClick={() => downloadTemplate(s)}>
+              <span className="tpl-ico" aria-hidden="true">XLSX</span>
+              <span className="tpl-txt"><b>{TEMPLATES[s].title}</b><span>{TEMPLATES[s].file}</span></span>
+              <span className="tpl-dl" aria-hidden="true">↓</span>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      {weeks.length > 0 && (
+        <section className="card" aria-labelledby="wk-title">
+          <h2 id="wk-title">Weekly plans in the system</h2>
+          <p className="sub">Uploading a plan replaces only the week(s) in that file. Older weeks stay for history.</p>
+          <div className="wk-list">
+            {weeks.map((w, i) => (
+              <div key={w.week} className="wk-row">
+                <b>Week {Number(w.week.slice(-2))}</b>{i === 0 && <span className="pill accent">Latest</span>}
+                <span className="muted">{w.week} · {w.start ? `${fmtDate(w.start)} – ${fmtDate(w.end)}` : 'no dates'}</span>
+                <span className="num">{fmt(w.lines)} lines · {fmt(w.done)} done</span>
+                {user.role === 'admin' && <button className="btn sm danger" onClick={() => deleteWeek(w.week)}>Delete week</button>}
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
       {!canEdit ? <div className="notice info">Your account can view the dashboard. Ask an admin for editor access to upload.</div> : (
         <>
           <div
@@ -125,7 +168,7 @@ function Uploads() {
             onDrop={(e) => { e.preventDefault(); setOver(false); if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files); }}
           >
             <strong>{reading ? 'Reading…' : 'Drop Excel files here, or click to choose'}</strong>
-            <span className="muted">One workbook with all sheets (Pull Plan, ZMMBE, ZMMBE KFC, ZMMBE PFC, PLANT, TRR) or separate files. .xlsx, .xls, .csv</span>
+            <span className="muted">One workbook with all sheets (Weekly plan, ZMMBE, ZMMBE KFC, ZMMBE PFC, PLANT, TRR) or separate files. .xlsx, .xls, .csv</span>
             <input ref={input} type="file" hidden multiple accept=".xlsx,.xlsm,.xls,.csv" onChange={(e) => { if (e.target.files?.length) addFiles(e.target.files); e.target.value = ''; }} />
           </div>
 
@@ -142,6 +185,29 @@ function Uploads() {
       )}
     </main>
   );
+}
+
+/** Excel serial / ISO / dd.mm.yyyy → yyyy-mm-dd (or null). */
+function toIsoDate(v: unknown): string | null {
+  if (typeof v === 'number' && v > 20000 && v < 80000) return new Date(Math.round((v - 25569) * 86400000)).toISOString().slice(0, 10);
+  const s = String(v ?? '').trim();
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  m = s.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$/);
+  return m ? `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}` : null;
+}
+/** The weeks a plan sheet covers, with line counts and date range. */
+function planWeeks(rows: Record<string, unknown>[]) {
+  const m = new Map<number, { n: number; min: string; max: string }>();
+  for (const r of rows) {
+    const d = toIsoDate(r.date);
+    if (!d) continue;
+    const w = isoWeek(d);
+    const o = m.get(w) || { n: 0, min: d, max: d };
+    o.n++; if (d < o.min) o.min = d; if (d > o.max) o.max = d;
+    m.set(w, o);
+  }
+  return Array.from(m.entries()).sort(([a], [b]) => a - b);
 }
 
 /** Preview formatting: Excel date serials as dates, long floats rounded. */
@@ -161,6 +227,7 @@ function SheetCard({ job, onChange, onSend, onRemove }: { job: SheetJob; onChang
   const colName = (c: number) => `${colLetter(c)}${header && header[c] ? ' · ' + String(header[c]).slice(0, 18) : ''}`;
   const rows = useMemo(() => (job.src && job.map ? applyMapping(job.src, job.grid, job.map) : []), [job.src, job.map, job.grid]);
   const usable = job.src ? usableCount(job.src, rows) : 0;
+  const wks = useMemo(() => (job.src === 'plan' ? planWeeks(rows) : []), [job.src, rows]);
   const missing = fields.filter((f) => f.required && (job.map?.cols[f.id] ?? -1) < 0);
   const how = job.map?.how === 'header' ? `header row ${(job.map.headerRow ?? 0) + 1}` : job.map?.how === 'keyed' ? 'your workbook layout (key in column A)' : 'SAP layout without key column';
 
@@ -185,6 +252,12 @@ function SheetCard({ job, onChange, onSend, onRemove }: { job: SheetJob; onChang
       </div>
 
       {job.msg && <div className={`notice ${job.state === 'error' ? 'bad' : 'ok'}`}>{job.msg}</div>}
+      {wks.length > 0 && job.state !== 'done' && (
+        <div className="notice info">
+          This plan covers {wks.map(([w, o]) => `Week ${w} (${fmtDate(o.min)} – ${fmtDate(o.max)}, ${fmt(o.n)} lines)`).join(' and ')}.
+          Uploading replaces {wks.length > 1 ? 'those weeks' : 'that week'} only; other weeks stay.
+        </div>
+      )}
       {missing.length > 0 && <div className="notice bad">Pick a column for {missing.map((f) => f.label).join(', ')}.</div>}
 
       {job.src && job.map && (

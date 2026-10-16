@@ -105,28 +105,30 @@ export interface Insight {
 }
 
 const n0 = (x: number) => x.toLocaleString('en-US', { maximumFractionDigits: 0 });
+const L = (n: number) => `${n0(n)} line${n === 1 ? '' : 's'}`;
+const are = (n: number) => (n === 1 ? 'is' : 'are');
 
 /** Plain-language findings, most urgent first. Each can open the matching lines. */
 export function insights(rows: Line[], uploads: Upload[], today = todayLocal()): Insight[] {
   const out: Insight[] = [];
   const open = rows.filter((l) => !isDone(l));
   const urgent = open.filter((l) => { const d = due(l, today); return (d === 'Overdue' || d === 'Today') && action(l) !== 'Ready to pull'; });
-  if (urgent.length) out.push({ id: 'urgent', tone: 'bad', title: `${n0(urgent.length)} lines due today or overdue are short of stock`, detail: `${n0(urgent.reduce((s, l) => s + shortBy(l), 0))} QTY still to find. Start here.`, view: { kind: 'urgent' } });
+  if (urgent.length) out.push({ id: 'urgent', tone: 'bad', title: `${L(urgent.length)} due today or overdue ${are(urgent.length)} short of stock`, detail: `${n0(urgent.reduce((s, l) => s + shortBy(l), 0))} QTY still to find. Start here.`, view: { kind: 'urgent' } });
 
   const ready = open.filter((l) => action(l) === 'Ready to pull');
-  if (ready.length) out.push({ id: 'ready', tone: 'ok', title: `${n0(ready.length)} lines are ready to pull`, detail: `Full UR stock covers ${n0(ready.reduce((s, l) => s + l.qty, 0))} QTY. Mark them Done when loaded.`, view: { kind: 'action', value: 'Ready to pull' } });
+  if (ready.length) out.push({ id: 'ready', tone: 'ok', title: `${L(ready.length)} ${are(ready.length)} ready to pull`, detail: `Full UR stock covers ${n0(ready.reduce((s, l) => s + l.qty, 0))} QTY. Mark them Done when loaded.`, view: { kind: 'action', value: 'Ready to pull' } });
 
   const qi = open.filter((l) => action(l) === 'Release QI / Block');
-  if (qi.length) out.push({ id: 'qi', tone: 'info', title: `${n0(qi.length)} lines can be covered by releasing QI / Block`, detail: `${n0(qi.reduce((s, l) => s + Math.min(l.qi + l.block, shortBy(l)), 0))} QTY waiting in QI or blocked stock.`, view: { kind: 'action', value: 'Release QI / Block' } });
+  if (qi.length) out.push({ id: 'qi', tone: 'info', title: `${L(qi.length)} can be covered by releasing QI / Block`, detail: `${n0(qi.reduce((s, l) => s + Math.min(l.qi + l.block, shortBy(l)), 0))} QTY waiting in QI or blocked stock.`, view: { kind: 'action', value: 'Release QI / Block' } });
 
   const pr = open.filter((l) => isPriority(l) && action(l) !== 'Ready to pull');
-  if (pr.length) out.push({ id: 'prio', tone: 'warn', title: `${n0(pr.length)} priority lines (1st priority / last pallet) still short`, detail: 'Flagged in the plan Remarks.', view: { kind: 'priority' } });
+  if (pr.length) out.push({ id: 'prio', tone: 'warn', title: `${n0(pr.length)} priority line${pr.length === 1 ? '' : 's'} (1st priority / last pallet) still short`, detail: 'Flagged in the plan Remarks.', view: { kind: 'priority' } });
 
   const none = open.filter((l) => action(l) === 'No stock');
-  if (none.length) out.push({ id: 'none', tone: 'bad', title: `${n0(none.length)} open lines have no stock and no TN`, detail: `${n0(none.reduce((s, l) => s + l.qty, 0))} QTY. Escalate or raise a TN.`, view: { kind: 'action', value: 'No stock' } });
+  if (none.length) out.push({ id: 'none', tone: 'bad', title: `${n0(none.length)} open line${none.length === 1 ? ' has' : 's have'} no stock and no TN`, detail: `${n0(none.reduce((s, l) => s + l.qty, 0))} QTY. Escalate or raise a TN.`, view: { kind: 'action', value: 'No stock' } });
 
   const tn = open.filter((l) => action(l) === 'Follow up TN');
-  if (tn.length) out.push({ id: 'tn', tone: 'accent', title: `${n0(tn.length)} lines are waiting on a transfer note`, detail: 'No stock in ZMMBE yet, but a TN exists in TRR.', view: { kind: 'action', value: 'Follow up TN' } });
+  if (tn.length) out.push({ id: 'tn', tone: 'accent', title: `${L(tn.length)} ${are(tn.length)} waiting on a transfer note`, detail: 'No stock in ZMMBE yet, but a TN exists in TRR.', view: { kind: 'action', value: 'Follow up TN' } });
 
   // data health
   const up = new Map(uploads.map((u) => [u.src, u]));
