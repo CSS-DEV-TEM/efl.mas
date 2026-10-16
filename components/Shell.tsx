@@ -8,6 +8,7 @@ import { Credit, Logo } from '@/components/Brand';
 
 interface Ctx {
   user: User;
+  guest: boolean;
   live: LiveState;
   online: string[];
   subscribe: (fn: (m: LiveMessage) => void) => () => void;
@@ -22,19 +23,22 @@ export const useShell = () => {
 
 const SRC_NAME: Record<string, string> = { plan: 'Weekly plan', zmmbe: 'ZMMBE', kfc: 'ZMMBE KFC', pfc: 'ZMMBE PFC', plant: 'PLANT report', trr: 'TRR' };
 
-export default function Shell({ children, admin }: { children: React.ReactNode; admin?: boolean }) {
+/** `allowGuest`: the page can be viewed without signing in (read-only). */
+export default function Shell({ children, admin, allowGuest }: { children: React.ReactNode; admin?: boolean; allowGuest?: boolean }) {
   const router = useRouter();
   const path = usePathname();
   const [user, setUser] = useState<User | null>(null);
+  const [guest, setGuest] = useState(false);
   const [toasts, setToasts] = useState<{ id: number; text: string }[]>([]);
   const subs = useRef(new Set<(m: LiveMessage) => void>());
 
   useEffect(() => {
     const s = getSession();
+    if (!s && allowGuest) { setGuest(true); setUser({ username: 'Guest', role: 'viewer' }); return; }
     if (!s) { router.replace('/login/'); return; }
     if (admin && s.user.role !== 'admin') { router.replace('/'); return; }
     setUser(s.user);
-  }, [router, admin]);
+  }, [router, admin, allowGuest]);
 
   const toast = useCallback((text: string) => {
     const id = Date.now() + Math.random();
@@ -61,7 +65,7 @@ export default function Shell({ children, admin }: { children: React.ReactNode; 
 
   if (!user) return null;
 
-  const nav = [
+  const nav = guest ? [{ href: '/', label: 'Dashboard' }] : [
     { href: '/', label: 'Dashboard' },
     { href: '/upload/', label: 'Uploads' },
     ...(user.role === 'admin' ? [{ href: '/users/', label: 'Users' }] : []),
@@ -69,7 +73,7 @@ export default function Shell({ children, admin }: { children: React.ReactNode; 
   const liveText = state === 'live' ? 'Live' : state === 'connecting' ? 'Connecting…' : 'Auto-refresh every 20 s';
 
   return (
-    <ShellCtx.Provider value={{ user, live: state, online, subscribe, toast }}>
+    <ShellCtx.Provider value={{ user, guest, live: state, online, subscribe, toast }}>
       <header className="bar">
         <div className="bar-in">
           <Link href="/" className="brand"><Logo size={30} /><span className="brand-text">MAS Weekly Plan <small>Tracker</small></span></Link>
@@ -83,8 +87,14 @@ export default function Shell({ children, admin }: { children: React.ReactNode; 
             <span className={`live ${state === 'live' ? 'on' : state === 'offline' ? 'off' : ''}`} title={online.length ? 'Online: ' + online.join(', ') : ''}>
               <i />{liveText}{state === 'live' && online.length > 0 ? ` · ${online.length} online` : ''}
             </span>
-            <span className="who">{user.username}<span className="role">{user.role}</span></span>
-            <button className="btn sm" onClick={() => { clearSession(); router.replace('/login/'); }}>Sign out</button>
+            {guest ? (
+              <Link className="btn sm primary" href="/login/">Sign in to upload / edit</Link>
+            ) : (
+              <>
+                <span className="who">{user.username}<span className="role">{user.role}</span></span>
+                <button className="btn sm" onClick={() => { clearSession(); setGuest(true); setUser({ username: 'Guest', role: 'viewer' }); if (!allowGuest) router.replace('/'); }}>Sign out</button>
+              </>
+            )}
           </div>
         </div>
       </header>

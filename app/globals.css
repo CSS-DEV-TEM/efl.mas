@@ -372,3 +372,7 @@ table.ledger { border-collapse: separate; border-spacing: 0; width: 100%; font-s
 .wk-list { display: grid; }
 .wk-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 8px 0; border-top: 1px solid var(--line); font-size: 13px; }
 .wk-row .num { margin-left: auto; color: var(--ink-2); }
+
+.main-full { display: grid; gap: 14px; }
+.login-guest { justify-self: center; font-size: 13px; color: var(--accent); text-decoration: none; font-weight: 500; }
+.login-guest:hover { text-decoration: underline; }

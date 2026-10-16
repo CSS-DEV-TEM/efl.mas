@@ -40,6 +40,7 @@ export default function LoginPage() {
           {err && <div className="notice bad" role="alert">{err}</div>}
           <button className="btn primary login-btn" type="submit" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
         </div>
+        <a className="login-guest" href="/">View the dashboard without signing in →</a>
         <div className="login-credit"><Credit /></div>
       </form>
     </main>

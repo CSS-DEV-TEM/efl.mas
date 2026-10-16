@@ -37,14 +37,13 @@ export async function api<T = unknown>(path: string, opts: { method?: string; bo
   const data = await res.json().catch(() => ({}));
   if (res.status === 401 && path !== '/api/auth/login') {
     clearSession();
-    if (typeof window !== 'undefined' && !location.pathname.startsWith('/login')) location.href = '/login';
+    if (typeof window !== 'undefined' && location.pathname !== '/' && !location.pathname.startsWith('/login')) location.href = '/login/';
   }
   if (!res.ok) throw new ApiError(res.status, (data as { error?: string }).error || `Request failed (${res.status}).`);
   return data as T;
 }
 
-export function liveUrl(): string | null {
+export function liveUrl(): string {
   const s = getSession();
-  if (!s) return null;
-  return API_URL.replace(/^http/, 'ws') + '/api/live?token=' + encodeURIComponent(s.token);
+  return API_URL.replace(/^http/, 'ws') + '/api/live' + (s ? '?token=' + encodeURIComponent(s.token) : '');
 }

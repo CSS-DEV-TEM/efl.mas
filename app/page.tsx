@@ -12,7 +12,7 @@ import { SRC_INFO, SRC_ORDER } from '@/lib/mapping';
 import { ACTION_HELP, insights, matchView, todayLocal, type Action, type View } from '@/lib/smart';
 
 export default function Page() {
-  return <Shell><Dashboard /></Shell>;
+  return <Shell allowGuest><Dashboard /></Shell>;
 }
 
 interface PullPlan { week: string | null; weeks: WeekInfo[]; rows: Line[]; uploads: Upload[]; counts: { src: string; n: number }[]; generatedAt: string }
@@ -20,13 +20,11 @@ interface PullPlan { week: string | null; weeks: WeekInfo[]; rows: Line[]; uploa
 /** "2026-W42" → "Week 42" */
 const weekLabel = (w: string | null | undefined) => (w ? `Week ${Number(w.slice(-2))}` : '');
 const weekRange = (w: WeekInfo | undefined) => (w?.start ? `${fmtDate(w.start)} – ${fmtDate(w.end)}` : '');
-interface Activity { at: string; username: string; action: string; detail: string }
 
 function Dashboard() {
-  const { user, subscribe, online, toast, live } = useShell();
+  const { user, guest, subscribe, toast, live } = useShell();
   const [data, setData] = useState<PullPlan | null>(null);
   const [err, setErr] = useState('');
-  const [activity, setActivity] = useState<Activity[]>([]);
   const [flash, setFlash] = useState<Set<string>>(new Set());
   const [, tick] = useState(0);
   // null = follow the most recent week; a value = the week someone picked
@@ -61,9 +59,9 @@ function Dashboard() {
   const load = useCallback(async () => {
     try {
       const w = weekRef.current;
-      const [p, a] = await Promise.all([api<PullPlan>('/api/pullplan' + (w ? '?week=' + encodeURIComponent(w) : '')), api<{ activity: Activity[] }>('/api/activity')]);
+      const p = await api<PullPlan>('/api/pullplan' + (w ? '?week=' + encodeURIComponent(w) : ''));
       if (w && p.week !== w) setPickedWeek(null); // that week was deleted: back to the latest
-      setData(p); setActivity(a.activity); setErr('');
+      setData(p); setErr('');
     } catch (e) { setErr(e instanceof Error ? e.message : 'Could not load data.'); }
   }, []);
   useEffect(() => { load(); }, [load, pickedWeek]);
@@ -83,7 +81,6 @@ function Dashboard() {
     if (m.type === 'status') {
       const line = m.line as Partial<Line> & { key: string };
       setData((d) => d && { ...d, rows: d.rows.map((r) => (r.key === line.key && (!line.week || r.week === line.week) ? { ...r, ...line } : r)) });
-      setActivity((a) => [{ at: String(m.at), username: String(m.by), action: 'edit', detail: `${line.key.replace(/\|/g, ' / ')}: ${line.status ?? ''} ${line.comment ?? ''}`.trim() }, ...a].slice(0, 60));
       setFlash((f) => new Set(f).add(line.key));
       setTimeout(() => setFlash((f) => { const n = new Set(f); n.delete(line.key); return n; }), 2300);
     }
@@ -124,7 +121,7 @@ function Dashboard() {
   }, [user.username, toast, load, data?.week]);
 
   const up = new Map((data?.uploads || []).map((u) => [u.src, u]));
-  const canEdit = user.role !== 'viewer';
+  const canEdit = !guest && user.role !== 'viewer';
   const filtersOn = !!(date || plant || remark || cov || search);
 
   if (err && !data) return <main className="page"><div className="notice bad">{err}</div></main>;
@@ -262,12 +259,12 @@ function Dashboard() {
             </section>
           </div>
 
-          <div className="main-split">
+          <div className="main-full">
             <section className="card table-card" ref={tableRef}>
               <div className="table-head">
                 <div>
                   <h2>Plan lines</h2>
-                  <p className="sub" style={{ margin: 0 }}>{fmt(tableRows.length)} lines{canEdit ? ' · click Status, Comment or Vehicle to edit — everyone sees it instantly' : ''}</p>
+                  <p className="sub" style={{ margin: 0 }}>{fmt(tableRows.length)} lines{canEdit ? ' · click Status, Comment or Vehicle to edit — everyone sees it instantly' : guest ? ' · view only — sign in to edit' : ''}</p>
                 </div>
                 <div className="seg" role="group" aria-label="Columns">
                   <button className={!full ? 'on' : ''} onClick={() => setFull(false)}>Key columns</button>
@@ -290,20 +287,6 @@ function Dashboard() {
               <datalist id="vehicle-options">{vehicles.map((s) => <option key={s} value={s} />)}</datalist>
             </section>
 
-            <aside className="card">
-              <h2>Live activity</h2>
-              <p className="sub">Who is online and what changed.</p>
-              <div className="online">{live === 'live' ? online.map((u) => <span key={u}>{u}</span>) : <span className="muted" style={{ background: 'none', padding: 0 }}>Realtime off · auto-refresh every 20 s</span>}</div>
-              <div className="feed">
-                {activity.length === 0 && <div className="muted">Nothing yet.</div>}
-                {activity.map((a, i) => (
-                  <div key={i}>
-                    <div>{a.detail}</div>
-                    <div className="meta">{a.username} · {ago(a.at)}</div>
-                  </div>
-                ))}
-              </div>
-            </aside>
           </div>
         </>
       )}
