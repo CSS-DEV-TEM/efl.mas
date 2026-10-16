@@ -1,6 +1,6 @@
 'use client';
 import { useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { COVERAGES, coverage, fmt, fmtDate, isDone, type Coverage, type Line } from '@/lib/calc';
+import { COVERAGES, coverage, fmt, fmtDate, isDone, shortBy, type Coverage, type Line } from '@/lib/calc';
 
 export const COV_COLOR: Record<Coverage, string> = {
   Covered: 'var(--ok)', Partial: 'var(--warn)', 'QI / Block only': 'var(--info)', 'No stock': 'var(--bad)',
@@ -109,7 +109,7 @@ export function ProgressByDate({ rows }: { rows: Line[] }) {
       const d = l.date || 'No date';
       if (!m.has(d)) m.set(d, { done: 0, open: 0, short: 0 });
       const o = m.get(d)!;
-      if (isDone(l)) o.done++; else { o.open++; if (l.ur < l.qty) o.short++; }
+      if (isDone(l)) o.done++; else { o.open++; if (shortBy(l) > 0) o.short++; }
     }
     return Array.from(m.entries()).sort(([a], [b]) => a.localeCompare(b));
   }, [rows]);

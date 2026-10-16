@@ -164,7 +164,7 @@ function Dashboard() {
             return (
               <button key={w.week} type="button" className={`week-chip ${on ? 'on' : ''}`} aria-pressed={on}
                 onClick={() => { setPickedWeek(i === 0 ? null : w.week); setView({ kind: 'all' }); setDate(null); }}
-                title={`${w.week} · ${weekRange(w)} · ${fmt(w.lines)} lines · ${fmt(w.done)} done`}>
+                title={`${w.week} · ${weekRange(w)} · ${fmt(w.lines)} lines · ${fmt(w.done)} done${w.dispatched ? ` · ${fmt(w.dispatched, 2)} dispatched` : ""}`}>
                 <b>{weekLabel(w.week)}</b>{i === 0 && <span className="latest">Latest</span>}
                 <span className="wr">{weekRange(w)}</span>
                 <span className="wbar"><i style={{ width: `${pct * 100}%` }} /></span>

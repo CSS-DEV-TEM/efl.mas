@@ -115,7 +115,7 @@ const Row = memo(function Row({ l, cols, canEdit, flash, onSave, onEdit }: { l: 
   const done = isDone(l);
   return (
     <tr className={`${done ? 'done' : ''} ${flash ? 'flash' : ''}`}>
-      <td className="first"><EditCell value={l.status} field="status" k={l.key} canEdit={canEdit} onSave={onSave} list="status-options" /></td>
+      <td className="first">{isDispatched(l) && !l.status ? <span className="pill ok" title={`Dispatched ${fmtQty(l.dispatched ?? 0)} — complete from the dispatch upload`}>Dispatched ✓</span> : <EditCell value={l.status} field="status" k={l.key} canEdit={canEdit} onSave={onSave} list="status-options" />}</td>
       {cols.map((c) => {
         const v = c.get(l);
         const zero = c.n && typeof v === 'number' && Math.abs(v) < 0.0005;

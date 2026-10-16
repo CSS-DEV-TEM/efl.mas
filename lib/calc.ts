@@ -25,7 +25,7 @@ export const avail = (l: Line) => (l.ur_left ?? l.ur);
 /** Every QTY of the line has gone out on a dispatch. */
 export const isDispatched = (l: Line) => (l.dispatched ?? 0) > 0 && need(l) <= 1e-9;
 
-export interface WeekInfo { week: string; lines: number; start: string | null; end: string | null; qty: number; done: number }
+export interface WeekInfo { week: string; lines: number; start: string | null; end: string | null; qty: number; done: number; dispatched?: number }
 
 export interface Upload { src: string; file_name: string | null; sheet_name: string | null; row_count: number; uploaded_by: string; uploaded_at: string }
 
