@@ -17,8 +17,8 @@ export default function AssignDispatch({ week, leftover, assigns, rows, canEdit,
   const label = (item: string) => (item === '#UR' ? <span className="pill ok">UR left</span> : item);
   return (
     <section className="card" aria-labelledby="lo-title">
-      <h2 id="lo-title">Not matched to the plan {leftover.length > 0 && <span className="pill warn" style={{ marginLeft: 6 }}>{leftover.length}</span>}</h2>
-      <p className="sub">Dispatch QTY that no plan line took: the item is not in the {week} plan, or more went out than planned. Assign it to a plan line — it is taken off that line&apos;s QTY and UR, and the line completes when nothing is left.</p>
+      <h2 id="lo-title">Not in the plan {leftover.length > 0 && <span className="pill warn" style={{ marginLeft: 6 }}>{leftover.length}</span>}</h2>
+      <p className="sub">Dispatched items that are not in the {week} plan at all. Assign them to a plan line — it is taken off that line&apos;s QTY and UR, and the line completes when nothing is left.</p>
       {leftover.length > 0 && (
         <div className="table-wrap" style={{ maxHeight: 'none' }}>
           <table className="mini">

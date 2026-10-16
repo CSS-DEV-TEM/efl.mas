@@ -505,10 +505,18 @@ table.mini td.neg { color: var(--bad); }
 @media (min-width: 700px) { .ps-grid { grid-template-columns: 1fr 1.4fr 1.2fr 1fr 70px 34px; } .ps-grid > span { display: block; font-weight: 600; } .ps-row { grid-column: 1 / -1; } }
 @media (max-width: 699px) { .ps-row { grid-template-columns: 1fr 1fr; } }
 
-/* narrower Smart Insights */
-.ins-wrap { max-width: 1100px; }
-.insights { grid-template-columns: repeat(auto-fill, minmax(170px, 210px)); }
-.insight.mini { padding: 9px 11px; }
+/* Smart Insights: full width, cards share the row evenly */
+.insights { grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr)); }
+.insight.mini { padding: 9px 12px; }
+
+/* compact KPI strip under the week chips */
+.kpis.compact { grid-template-columns: repeat(auto-fit, minmax(min(100%, 138px), 1fr)); gap: 8px; }
+.kpis.compact .kpi { padding: 8px 11px 9px; gap: 1px; }
+.kpis.compact .kpi .k { font-size: 10.5px; letter-spacing: .04em; }
+.kpis.compact .kpi .v { font-size: 19px; }
+.kpis.compact .kpi .s { font-size: 11px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kpis.compact .kpi .s + .s { display: none; }
+.kpis.compact .meter { height: 4px; margin-top: 4px; }
 .btn.ok-btn { background: var(--ok); border-color: var(--ok); color: #fff; } .btn.ok-btn:hover:not(:disabled) { filter: brightness(1.08); }
 .rel-box { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; padding: 9px 12px; border-radius: 8px; background: color-mix(in srgb, var(--ok) 12%, transparent); font-size: 13px; }
 .rel-tag { margin-left: 4px; font-size: 10px; font-weight: 700; color: var(--ok); }
@@ -523,3 +531,4 @@ table.mini tr.picked td { background: var(--accent-soft); }
 .tcell-in { width: 92px; border: 1px solid var(--accent); border-radius: 4px; padding: 3px 6px; font: inherit; background: var(--panel); color: var(--ink); }
 .tcell-in.bad { border-color: var(--bad); box-shadow: 0 0 0 2px color-mix(in srgb, var(--bad) 30%, transparent); }
 .pos-c { color: var(--ok); }
+.psum td, .psum th { padding-left: 6px; padding-right: 6px; }

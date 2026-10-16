@@ -7,7 +7,7 @@ import { ago, fmt, fmtDate, fmtQty, isDispatched, need, avail, type DispatchSumm
 import { colLetter, readWorkbook, type Grid } from '@/lib/mapping';
 import { takePendingDispatch } from '@/lib/handoff';
 import AssignDispatch from '@/components/AssignDispatch';
-import UrToDispatch from '@/components/UrToDispatch';
+import OverPlan from '@/components/OverPlan';
 
 export default function Page() {
   return <Shell><Dispatch /></Shell>;
@@ -358,9 +358,9 @@ function Dispatch() {
         )}
       </section>
 
-      {week && plan && <UrToDispatch week={week} rows={plan.rows} canEdit={canEdit} onDone={(m) => { toast(m); load(); }} />}
+      {week && plan && d && <OverPlan week={week} items={d.items} rows={plan.rows} canEdit={canEdit} onDone={(m) => { toast(m); load(); }} />}
 
-      {week && d && <AssignDispatch week={week} leftover={d.leftover || []} assigns={d.assigns || []} rows={plan?.rows || []} canEdit={canEdit} onDone={(m) => { toast(m); load(); }} />}
+      {week && d && <AssignDispatch week={week} leftover={(d.leftover || []).filter((i) => !i.lines)} assigns={d.assigns || []} rows={plan?.rows || []} canEdit={canEdit} onDone={(m) => { toast(m); load(); }} />}
 
       {history.length > 0 && (
         <section className="card">

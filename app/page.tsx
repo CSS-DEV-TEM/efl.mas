@@ -182,6 +182,52 @@ function Dashboard() {
         </nav>
       )}
 
+      {data && rows.length > 0 && <section className="kpis compact" aria-label="Key figures">
+        <div className="kpi"><span className="k">Plan lines</span><span className={`v ${!data ? 'skel' : ''}`}><CountUp value={t.lines} format={(n) => fmt(n)} /></span>
+          <span className="s">{fmt(t.done)} done · {fmt(t.open)} open</span>
+          {unfiltered && prevW && thisW && <span className="s">vs {weekLabel(prevW.week)}: {fmt(prevW.lines)} {delta(thisW.lines, prevW.lines)}</span>}
+          <div className="meter"><span style={{ width: `${t.lines ? (t.done / t.lines) * 100 : 0}%`, background: 'var(--ok)' }} /></div></div>
+        <div className="kpi"><span className="k">Required QTY</span><span className="v"><CountUp value={t.qty} format={compact} /></span><span className="s" title="QTY − Assigned">Variance {compact(t.variance)}</span>{unfiltered && prevW && thisW && <span className="s">vs {weekLabel(prevW.week)}: {compact(prevW.qty)} {delta(thisW.qty, prevW.qty, false, true)}</span>}</div>
+        <div className="kpi"><span className="k">Full UR stock</span><span className="v"><CountUp value={t.ur} format={compact} /></span><span className="s">QI {compact(t.qi)} · Block {compact(t.block)}</span></div>
+        <div className="kpi"><span className="k">KFC / PFC UR</span><span className="v"><CountUp value={t.kfc_ur} format={compact} /></span><span className="s">PFC {compact(t.pfc_ur)}</span></div>
+        <div className="kpi"><span className="k">At plant (PLANT)</span><span className="v"><CountUp value={t.plant_qty} format={compact} /></span><span className="s">TN QTY {compact(t.tn_qty)}</span></div>
+        {(
+          <div className="kpi ok"><span className="k">Dispatched</span><span className="v"><CountUp value={t.dispatched} format={compact} /></span>
+            <span className="s" title={`Balance ${compact(t.balance)}`}>{fmt(t.dispatchedLines)} line{t.dispatchedLines === 1 ? '' : 's'} complete</span>
+            <div className="meter"><span style={{ width: `${t.qty ? Math.min(100, (t.dispatched / t.qty) * 100) : 0}%`, background: 'var(--ok)' }} /></div></div>
+        )}
+        <div className={`kpi ${t.shortLines ? 'bad' : 'ok'}`}><span className="k">Open & short of UR</span><span className="v"><CountUp value={t.shortLines} format={(n) => fmt(n)} /></span><span className="s">{compact(t.short)} QTY not covered</span></div>
+        <div className="kpi"><span className="k">Stock coverage</span><span className="v"><CountUp value={t.lines ? (t.cov.Covered / t.lines) * 100 : 0} format={(n) => Math.round(n) + '%'} /></span>
+          <span className="s">lines with UR ≥ QTY</span>
+          <div className="meter">{COVERAGES.map((c) => <span key={c} title={`${c}: ${t.cov[c]}`} style={{ width: `${t.lines ? (t.cov[c] / t.lines) * 100 : 0}%`, background: COV_COLOR[c] }} />)}</div></div>
+      </section>}
+
+      {data && rows.length > 0 && (
+        <section className="ins-wrap" aria-labelledby="ins-title">
+          <div className="ins-head">
+            <span className="ins-spark" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="22" height="22"><path d="M12 2l2.2 6.3L20.5 10l-6.3 2.2L12 18.5l-2.2-6.3L3.5 10l6.3-1.7z" fill="currentColor" /><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9z" fill="currentColor" opacity=".7" /></svg>
+            </span>
+            <div className="ins-titles">
+              <h2 id="ins-title">Smart Insights <span className="ins-badge">Auto-generated</span></h2>
+              <p>Analysed {fmt(scoped.length)} plan lines against {(data?.uploads || []).filter((u) => u.src !== 'plan').length} stock reports · {tips.length} finding{tips.length === 1 ? '' : 's'} · updated {ago(data?.generatedAt)}</p>
+            </div>
+            <span className={`ins-status ${live === 'live' ? 'on' : ''}`}><i />{live === 'live' ? 'Live analysis' : 'Re-analysing every 20 s'}</span>
+            <span className="ins-scan" aria-hidden="true" />
+          </div>
+          <div className="insights">
+          {tips.map((i, n) => (
+            <button key={i.id} type="button" className={`insight mini ${i.tone}`} style={{ animationDelay: `${n * 50}ms` }} disabled={!i.view}
+              onClick={() => i.view && setOpenInsight(i)} title={`${i.title}. ${i.detail}`}>
+              <span className="ic">{typeof i.count === 'number' ? fmt(i.count) : i.count}</span>
+              <span className="il">{i.label}</span>
+              {i.view && <span className="go" aria-hidden="true">→</span>}
+            </button>
+          ))}
+          </div>
+        </section>
+      )}
+
       {data && rows.length > 0 && (
         <div className="tabs" role="tablist" aria-label="Dashboard view">
           <button role="tab" aria-selected={tab === 'summary'} className={tab === 'summary' ? 'on' : ''} onClick={() => setTab('summary')}>Summary</button>
@@ -208,31 +254,6 @@ function Dashboard() {
           onSaved={(m) => { toast(m); load(); }} />
       )}
 
-      {tab === 'summary' && data && rows.length > 0 && (
-        <section className="ins-wrap" aria-labelledby="ins-title">
-          <div className="ins-head">
-            <span className="ins-spark" aria-hidden="true">
-              <svg viewBox="0 0 24 24" width="22" height="22"><path d="M12 2l2.2 6.3L20.5 10l-6.3 2.2L12 18.5l-2.2-6.3L3.5 10l6.3-1.7z" fill="currentColor" /><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9z" fill="currentColor" opacity=".7" /></svg>
-            </span>
-            <div className="ins-titles">
-              <h2 id="ins-title">Smart Insights <span className="ins-badge">Auto-generated</span></h2>
-              <p>Analysed {fmt(scoped.length)} plan lines against {(data?.uploads || []).filter((u) => u.src !== 'plan').length} stock reports · {tips.length} finding{tips.length === 1 ? '' : 's'} · updated {ago(data?.generatedAt)}</p>
-            </div>
-            <span className={`ins-status ${live === 'live' ? 'on' : ''}`}><i />{live === 'live' ? 'Live analysis' : 'Re-analysing every 20 s'}</span>
-            <span className="ins-scan" aria-hidden="true" />
-          </div>
-          <div className="insights">
-          {tips.map((i, n) => (
-            <button key={i.id} type="button" className={`insight mini ${i.tone}`} style={{ animationDelay: `${n * 50}ms` }} disabled={!i.view}
-              onClick={() => i.view && setOpenInsight(i)} title={`${i.title}. ${i.detail}`}>
-              <span className="ic">{typeof i.count === 'number' ? fmt(i.count) : i.count}</span>
-              <span className="il">{i.label}</span>
-              {i.view && <span className="go" aria-hidden="true">→</span>}
-            </button>
-          ))}
-          </div>
-        </section>
-      )}
 
       {data && rows.length === 0 ? (
         <div className="card empty">
@@ -242,25 +263,6 @@ function Dashboard() {
         </div>
       ) : (
         <>
-          {tab === 'summary' && <section className="kpis" aria-label="Key figures">
-            <div className="kpi"><span className="k">Plan lines</span><span className={`v ${!data ? 'skel' : ''}`}><CountUp value={t.lines} format={(n) => fmt(n)} /></span>
-              <span className="s">{fmt(t.done)} done · {fmt(t.open)} open</span>
-              {unfiltered && prevW && thisW && <span className="s">vs {weekLabel(prevW.week)}: {fmt(prevW.lines)} {delta(thisW.lines, prevW.lines)}</span>}
-              <div className="meter"><span style={{ width: `${t.lines ? (t.done / t.lines) * 100 : 0}%`, background: 'var(--ok)' }} /></div></div>
-            <div className="kpi"><span className="k">Required QTY</span><span className="v"><CountUp value={t.qty} format={compact} /></span><span className="s">Variance (QTY − Assigned) {compact(t.variance)}</span>{unfiltered && prevW && thisW && <span className="s">vs {weekLabel(prevW.week)}: {compact(prevW.qty)} {delta(thisW.qty, prevW.qty, false, true)}</span>}</div>
-            <div className="kpi"><span className="k">Full UR stock</span><span className="v"><CountUp value={t.ur} format={compact} /></span><span className="s">QI {compact(t.qi)} · Block {compact(t.block)}</span></div>
-            <div className="kpi"><span className="k">KFC / PFC UR</span><span className="v"><CountUp value={t.kfc_ur} format={compact} /></span><span className="s">PFC {compact(t.pfc_ur)}</span></div>
-            <div className="kpi"><span className="k">At plant (PLANT)</span><span className="v"><CountUp value={t.plant_qty} format={compact} /></span><span className="s">TN QTY {compact(t.tn_qty)}</span></div>
-            {!!data?.dispatch?.items.length && (
-              <div className="kpi ok"><span className="k">Dispatched</span><span className="v"><CountUp value={t.dispatched} format={compact} /></span>
-                <span className="s">{fmt(t.dispatchedLines)} line{t.dispatchedLines === 1 ? '' : 's'} complete · balance {compact(t.balance)}</span>
-                <div className="meter"><span style={{ width: `${t.qty ? Math.min(100, (t.dispatched / t.qty) * 100) : 0}%`, background: 'var(--ok)' }} /></div></div>
-            )}
-            <div className={`kpi ${t.shortLines ? 'bad' : 'ok'}`}><span className="k">Open & short of UR</span><span className="v"><CountUp value={t.shortLines} format={(n) => fmt(n)} /></span><span className="s">{compact(t.short)} balance QTY not covered</span></div>
-            <div className="kpi"><span className="k">Stock coverage</span><span className="v"><CountUp value={t.lines ? (t.cov.Covered / t.lines) * 100 : 0} format={(n) => Math.round(n) + '%'} /></span>
-              <span className="s">lines with UR ≥ QTY</span>
-              <div className="meter">{COVERAGES.map((c) => <span key={c} title={`${c}: ${t.cov[c]}`} style={{ width: `${t.lines ? (t.cov[c] / t.lines) * 100 : 0}%`, background: COV_COLOR[c] }} />)}</div></div>
-          </section>}
 
 
           {tab === 'details' && <>
