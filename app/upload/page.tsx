@@ -27,6 +27,8 @@ interface SheetJob {
   mode?: 'merge' | 'replace-plant' | 'replace-week';
   /** plan only: plant for lines that have none (and the plant a replace-plant upload replaces) */
   plant?: string;
+  /** stock reports: 'replace' the whole report (default) or 'add' this file to what is there (another part of the same report) */
+  stockMode?: 'replace' | 'add';
 }
 
 function Uploads() {
@@ -94,10 +96,10 @@ function Uploads() {
     setJob(j.id, { state: 'sending', msg: undefined });
     try {
       const rows = applyMapping(j.src, j.grid, j.map);
-      const r = await api<PlanPreview & { accepted: number; skipped: number; weeks?: string[] }>('/api/upload', { method: 'POST', body: { src: j.src, fileName: j.file, sheetName: j.sheet, rows, ...planOpts(j, myPlant) } });
+      const r = await api<PlanPreview & { accepted: number; skipped: number; weeks?: string[]; stockDups?: number }>('/api/upload', { method: 'POST', body: { src: j.src, fileName: j.file, sheetName: j.sheet, rows, ...planOpts(j, myPlant) } });
       const wk = r.weeks?.length ? ` to ${r.weeks.map((w) => 'Week ' + Number(w.slice(-2))).join(', ')}` : '';
       loadStatus();
-      const plan = j.src === 'plan' && r.added !== undefined ? `${fmt(r.added)} new, ${fmt(r.updated)} updated${r.removed ? `, ${fmt(r.removed)} removed` : ''}${r.inFileDups ? `, ${fmt(r.inFileDups)} repeated rows in the file merged` : ''}` : `${fmt(r.accepted)} rows saved`;
+      const plan = j.src === 'plan' && r.added !== undefined ? `${fmt(r.added)} new, ${fmt(r.updated)} updated${r.removed ? `, ${fmt(r.removed)} removed` : ''}${r.inFileDups ? `, ${fmt(r.inFileDups)} repeated rows in the file merged` : ''}` : `${fmt(r.accepted)} rows saved — ${j.stockMode === 'add' ? 'added to the current report' : 'whole report replaced, no duplicates'}${r.stockDups ? ` · ${fmt(r.stockDups)} repeated rows counted once` : ''}`;
       setJob(j.id, { state: 'done', msg: `${plan}${wk}${r.skipped > 0 ? ` · ${fmt(r.skipped)} rows without SO/LI/Material skipped` : ''}. Every open dashboard has updated.` });
     } catch (e) {
       setJob(j.id, { state: 'error', msg: e instanceof Error ? e.message : 'Upload failed.' });
@@ -106,7 +108,14 @@ function Uploads() {
   async function sendAll() {
     // plan first so the stock reports land on the new lines
     const order = [...jobs].filter((j) => j.src && j.state !== 'done').sort((a, b) => SRC_ORDER.indexOf(a.src as Src) - SRC_ORDER.indexOf(b.src as Src));
-    for (const j of order) await send(j);
+    // several files of the same stock report: the first replaces it, the rest are added to it
+    const seen = new Set<string>();
+    for (const j of order) {
+      const extra = j.src !== 'plan' && seen.has(j.src);
+      seen.add(j.src);
+      if (extra && j.stockMode !== 'add') setJob(j.id, { stockMode: 'add' });
+      await send(extra ? { ...j, stockMode: 'add' } : j);
+    }
   }
 
   async function deleteWeek(w: string) {
@@ -222,7 +231,7 @@ function Uploads() {
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
               <button className="btn primary" disabled={!ready} onClick={sendAll}>Upload {ready} sheet{ready === 1 ? '' : 's'}</button>
               <button className="btn" onClick={() => setJobs([])}>Clear list</button>
-              {dupSrc.length > 0 && <span className="notice bad" style={{ padding: '5px 10px' }}>More than one sheet is set as {dupSrc.map((s) => SRC_INFO[s as Src].title).join(', ')}. The last one uploaded wins.</span>}
+              {dupSrc.length > 0 && <span className="notice info" style={{ padding: '5px 10px' }}>{dupSrc.includes('plan') ? 'Several plan sheets: each merges into the plan without duplicates. ' : ''}{dupSrc.filter((x) => x !== 'plan').length ? `Several ${dupSrc.filter((x) => x !== 'plan').map((x) => SRC_INFO[x as Src].title).join(', ')} files: "Upload all" replaces the report with the first and adds the others to it — rows that repeat count once.` : ''}</span>}
             </div>
           )}
 
@@ -289,7 +298,7 @@ function show(v: unknown, id: string) {
 
 interface PlanPreview { added: number; updated: number; removed: number; kept: number; inFileDups: number; lines: number; plant: string | null; mode: string }
 function planOpts(j: SheetJob, myPlant: string) {
-  if (j.src !== 'plan') return {};
+  if (j.src !== 'plan') return j.stockMode === 'add' ? { mode: 'add' } : {};
   const plant = (j.plant ?? myPlant).trim();
   return { ...(j.week ? { week: j.week, forceWeek: true } : {}), mode: j.mode || 'merge', ...(plant ? { plant } : {}) };
 }
@@ -342,6 +351,12 @@ function SheetCard({ job, myPlant, plants, onChange, onSend, onRemove }: { job: 
       </div>
 
       {job.msg && <div className={`notice ${job.state === 'error' ? 'bad' : 'ok'}`}>{job.msg}</div>}
+      {job.src && job.src !== 'plan' && job.state !== 'done' && (
+        <div className="mode-pick" role="radiogroup" aria-label="How this report is saved">
+          <label><input type="radio" checked={job.stockMode !== 'add'} onChange={() => onChange({ stockMode: 'replace' })} /> <b>Replace whole report</b> <span className="muted">— a fresh {SRC_INFO[job.src].title} export. Old rows are removed, nothing is counted twice.</span></label>
+          <label><input type="radio" checked={job.stockMode === 'add'} onChange={() => onChange({ stockMode: 'add' })} /> <b>Add to current</b> <span className="muted">— another part of the same report (e.g. split by plant). Rows already there are updated, not duplicated.</span></label>
+        </div>
+      )}
       {job.src === 'plan' && job.state !== 'done' && (
         <div className="week-pick">
           <label htmlFor={`wk-${job.id}`}>Save this plan to</label>

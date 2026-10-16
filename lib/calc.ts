@@ -13,6 +13,8 @@ export interface Line {
   updated_by: string | null; updated_at: string | null;
   /** from the dispatch upload: QTY dispatched against this line, plan QTY left, UR left after the dispatch */
   dispatched?: number; balance?: number; ur_left?: number;
+  /** part of the dispatch that comes off UR: what was uploaded after the latest ZMMBE */
+  ur_take?: number;
   /** QI / Block released to UR by hand (until the next ZMMBE) */
   released?: number;
   /** dispatch item whose left-over QTY was assigned to this line */

@@ -71,7 +71,7 @@ function suggestDivide(rows: Record<string, unknown>[]): 1000 | 1 {
   return big / q.length >= 0.6 ? 1000 : 1;
 }
 
-interface PullPlan { week: string | null; weeks: WeekInfo[]; rows: Line[]; dispatch?: DispatchSummary }
+interface PullPlan { week: string | null; weeks: WeekInfo[]; rows: Line[]; dispatch?: DispatchSummary; stockAt?: string | null }
 interface Preview { lines: number; added: number; updated: number; removed: number; skipped: number; inFileDups: number; totalQty: number; items: number; matched: number; unmatched: string[] }
 interface DispRow { item: string; qty: number; raw_qty: number; pallet: string | null; location: string | null; lot: string | null; order_no: string | null; uom: string | null; file_name: string | null; uploaded_by: string; uploaded_at: string }
 
@@ -298,7 +298,7 @@ function Dispatch() {
       <section className="card" aria-labelledby="sum-title">
         <div className="sheet-top">
           <div><h2 id="sum-title">Dispatch vs plan · {week ? `Week ${Number(week.slice(-2))}` : ''}</h2>
-            <p className="sub" style={{ margin: 0 }}>Balance = plan QTY − dispatched. UR left = UR − dispatched.</p></div>
+            <p className="sub" style={{ margin: 0 }}>Balance = plan QTY − dispatched. UR left = UR − dispatch uploaded after the latest ZMMBE{plan?.stockAt ? ` (${new Date(plan.stockAt).toLocaleString('en-GB', { timeZone: 'Asia/Colombo', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })})` : ''} — dispatch before it is already out of that ZMMBE, so it is not taken off twice.</p></div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <div className="seg" role="group">
               <button className={show === 'items' ? 'on' : ''} onClick={() => setShow('items')}>By item</button>

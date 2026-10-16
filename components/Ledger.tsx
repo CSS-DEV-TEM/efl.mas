@@ -23,7 +23,7 @@ const COLS: Col[] = [
   { id: 'dispatched', label: 'Dispatched', grp: 'Dispatch', n: true, get: (l) => l.dispatched ?? 0, render: (l) => (l.dispatched ? <span className="disp-q">{q(l.dispatched)}{isDispatched(l) && <span className="tick" title="Fully dispatched — complete">✓</span>}</span> : '–') },
   { id: 'balance', label: 'Balance', grp: 'Dispatch', n: true, get: (l) => need(l), render: (l) => (l.dispatched ? <b className={need(l) > 0 ? '' : 'pos'}>{need(l) > 0 ? q(need(l)) : '0'}</b> : q(need(l))) },
   { id: 'ur', label: 'UR', grp: 'Full', n: true, get: (l) => l.ur, render: (l) => (l.released ? <span title={`Includes ${q(l.released)} QI / Block released to UR`}>{q(l.ur)}<span className="rel-tag">+rel</span></span> : q(l.ur)) },
-  { id: 'ur_left', label: 'UR left', grp: 'Full', n: true, full: true, get: (l) => avail(l), render: (l) => q(avail(l)) },
+  { id: 'ur_left', label: 'UR left', grp: 'Full', n: true, full: true, get: (l) => avail(l), render: (l) => <span title={l.dispatched ? `UR − ${q(l.ur_take ?? 0)} dispatched after the latest ZMMBE (${q((l.dispatched ?? 0) - (l.ur_take ?? 0))} dispatched before it is already out of ZMMBE)` : ''}>{q(avail(l))}</span> },
   { id: 'qi', label: 'QI', grp: 'Full', n: true, get: (l) => l.qi, render: (l) => q(l.qi) },
   { id: 'block', label: 'Block', grp: 'Full', n: true, get: (l) => l.block, render: (l) => q(l.block) },
   { id: 'assigned', label: 'Assigned', n: true, full: true, get: (l) => l.assigned, render: (l) => q(l.assigned) },
