@@ -1,7 +1,7 @@
 /** Types and the tracking figures worked out on top of the API's pull plan rows. */
 
 export interface Line {
-  row_no: number; key: string; week: string; so: string; li: string; item: string; date: string | null; qty: number;
+  id: number; row_no: number; key: string; week: string; src_user?: string | null; src_at?: string | null; so: string; li: string; item: string; date: string | null; qty: number;
   plant: string | null; remarks: string | null;
   ur: number; qi: number; block: number; assigned: number; variance: number;
   kfc_ur: number; kfc_qi: number; kfc_block: number; pfc_ur: number; pfc_qi: number; pfc_block: number;

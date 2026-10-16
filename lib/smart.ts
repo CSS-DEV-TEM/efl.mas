@@ -109,7 +109,8 @@ export type View =
   | { kind: 'due'; value: Due }
   | { kind: 'urgent' }
   | { kind: 'priority' }
-  | { kind: 'carried' };
+  | { kind: 'carried' }
+  | { kind: 'dup' };
 
 export function matchView(l: Line, v: View, today: string): boolean {
   switch (v.kind) {
@@ -119,12 +120,18 @@ export function matchView(l: Line, v: View, today: string): boolean {
     case 'urgent': { const d = due(l, today); return action(l) !== 'Done' && action(l) !== 'Ready to pull' && (d === 'Overdue' || d === 'Today'); }
     case 'priority': return action(l) !== 'Done' && isPriority(l);
     case 'carried': return action(l) !== 'Done' && !!l.carried;
+    case 'dup': return l.dup > 1;
   }
 }
 
 export interface Insight {
   id: string;
   tone: 'bad' | 'warn' | 'ok' | 'info' | 'accent';
+  /** big number on the compact card */
+  count: number | string;
+  /** short label on the compact card */
+  label: string;
+  /** full sentence, shown when the card is opened */
   title: string;
   detail: string;
   view?: View;
@@ -139,37 +146,37 @@ export function insights(rows: Line[], uploads: Upload[], today = todayLocal()):
   const out: Insight[] = [];
   const open = rows.filter((l) => !isDone(l));
   const urgent = open.filter((l) => { const d = due(l, today); return (d === 'Overdue' || d === 'Today') && action(l) !== 'Ready to pull'; });
-  if (urgent.length) out.push({ id: 'urgent', tone: 'bad', title: `${L(urgent.length)} due today or overdue ${are(urgent.length)} short of stock`, detail: `${n0(urgent.reduce((s, l) => s + shortBy(l), 0))} QTY still to find. Start here.`, view: { kind: 'urgent' } });
+  if (urgent.length) out.push({ id: 'urgent', tone: 'bad', count: urgent.length, label: 'Due / overdue & short', title: `${L(urgent.length)} due today or overdue ${are(urgent.length)} short of stock`, detail: `${n0(urgent.reduce((s, l) => s + shortBy(l), 0))} QTY still to find. Start here.`, view: { kind: 'urgent' } });
 
   const ready = open.filter((l) => action(l) === 'Ready to pull');
-  if (ready.length) out.push({ id: 'ready', tone: 'ok', title: `${L(ready.length)} ${are(ready.length)} ready to pull`, detail: `Full UR stock covers ${n0(ready.reduce((s, l) => s + l.qty, 0))} QTY. Mark them Done when loaded.`, view: { kind: 'action', value: 'Ready to pull' } });
+  if (ready.length) out.push({ id: 'ready', tone: 'ok', count: ready.length, label: 'Ready to pull', title: `${L(ready.length)} ${are(ready.length)} ready to pull`, detail: `Full UR stock covers ${n0(ready.reduce((s, l) => s + l.qty, 0))} QTY. Mark them Done when loaded.`, view: { kind: 'action', value: 'Ready to pull' } });
 
   const qi = open.filter((l) => action(l) === 'Release QI / Block');
-  if (qi.length) out.push({ id: 'qi', tone: 'info', title: `${L(qi.length)} can be covered by releasing QI / Block`, detail: `${n0(qi.reduce((s, l) => s + Math.min(l.qi + l.block, shortBy(l)), 0))} QTY waiting in QI or blocked stock.`, view: { kind: 'action', value: 'Release QI / Block' } });
+  if (qi.length) out.push({ id: 'qi', tone: 'info', count: qi.length, label: 'Release QI / Block', title: `${L(qi.length)} can be covered by releasing QI / Block`, detail: `${n0(qi.reduce((s, l) => s + Math.min(l.qi + l.block, shortBy(l)), 0))} QTY waiting in QI or blocked stock.`, view: { kind: 'action', value: 'Release QI / Block' } });
 
   const carried = open.filter((l) => l.carried);
-  if (carried.length) out.push({ id: 'carried', tone: 'warn', title: `${L(carried.length)} carried over from last week`, detail: `They were in the previous week's plan and not marked Done. ${n0(carried.reduce((s, l) => s + shortBy(l), 0))} QTY still short.`, view: { kind: 'carried' } });
+  if (carried.length) out.push({ id: 'carried', tone: 'warn', count: carried.length, label: 'Carried over', title: `${L(carried.length)} carried over from last week`, detail: `They were in the previous week's plan and not marked Done. ${n0(carried.reduce((s, l) => s + shortBy(l), 0))} QTY still short.`, view: { kind: 'carried' } });
 
   const pr = open.filter((l) => isPriority(l) && action(l) !== 'Ready to pull');
-  if (pr.length) out.push({ id: 'prio', tone: 'warn', title: `${n0(pr.length)} priority line${pr.length === 1 ? '' : 's'} (1st priority / last pallet) still short`, detail: 'Flagged in the plan Remarks.', view: { kind: 'priority' } });
+  if (pr.length) out.push({ id: 'prio', tone: 'warn', count: pr.length, label: 'Priority still short', title: `${n0(pr.length)} priority line${pr.length === 1 ? '' : 's'} (1st priority / last pallet) still short`, detail: 'Flagged in the plan Remarks.', view: { kind: 'priority' } });
 
   const none = open.filter((l) => action(l) === 'No stock');
-  if (none.length) out.push({ id: 'none', tone: 'bad', title: `${n0(none.length)} open line${none.length === 1 ? ' has' : 's have'} no stock and no TN`, detail: `${n0(none.reduce((s, l) => s + l.qty, 0))} QTY. Escalate or raise a TN.`, view: { kind: 'action', value: 'No stock' } });
+  if (none.length) out.push({ id: 'none', tone: 'bad', count: none.length, label: 'No stock, no TN', title: `${n0(none.length)} open line${none.length === 1 ? ' has' : 's have'} no stock and no TN`, detail: `${n0(none.reduce((s, l) => s + l.qty, 0))} QTY. Escalate or raise a TN.`, view: { kind: 'action', value: 'No stock' } });
 
   const tn = open.filter((l) => action(l) === 'Follow up TN');
-  if (tn.length) out.push({ id: 'tn', tone: 'accent', title: `${L(tn.length)} ${are(tn.length)} waiting on a transfer note`, detail: 'No stock in ZMMBE yet, but a TN exists in TRR.', view: { kind: 'action', value: 'Follow up TN' } });
+  if (tn.length) out.push({ id: 'tn', tone: 'accent', count: tn.length, label: 'Waiting on TN', title: `${L(tn.length)} ${are(tn.length)} waiting on a transfer note`, detail: 'No stock in ZMMBE yet, but a TN exists in TRR.', view: { kind: 'action', value: 'Follow up TN' } });
 
   // data health
   const up = new Map(uploads.map((u) => [u.src, u]));
   const missing = ['zmmbe', 'kfc', 'pfc', 'plant', 'trr'].filter((s) => !up.has(s));
-  if (rows.length && missing.length) out.push({ id: 'missing', tone: 'warn', title: `${missing.length} report${missing.length > 1 ? 's' : ''} not uploaded yet`, detail: `Missing: ${missing.map((s) => ({ zmmbe: 'ZMMBE', kfc: 'ZMMBE KFC', pfc: 'ZMMBE PFC', plant: 'PLANT', trr: 'TRR' } as Record<string, string>)[s]).join(', ')}. Figures that use them show 0.` });
+  if (rows.length && missing.length) out.push({ id: 'missing', tone: 'warn', count: missing.length, label: 'Reports missing', title: `${missing.length} report${missing.length > 1 ? 's' : ''} not uploaded yet`, detail: `Missing: ${missing.map((s) => ({ zmmbe: 'ZMMBE', kfc: 'ZMMBE KFC', pfc: 'ZMMBE PFC', plant: 'PLANT', trr: 'TRR' } as Record<string, string>)[s]).join(', ')}. Figures that use them show 0.` });
   const z = up.get('zmmbe');
-  if (z && Date.now() - Date.parse(z.uploaded_at) > 12 * 3600 * 1000) out.push({ id: 'stale', tone: 'warn', title: 'Stock data is more than 12 hours old', detail: `ZMMBE was uploaded ${Math.round((Date.now() - Date.parse(z.uploaded_at)) / 3600000)} h ago. Upload a fresh export for today's picture.` });
+  if (z && Date.now() - Date.parse(z.uploaded_at) > 12 * 3600 * 1000) out.push({ id: 'stale', tone: 'warn', count: `${Math.round((Date.now() - Date.parse(z.uploaded_at)) / 3600000)}h`, label: 'Stock data age', title: 'Stock data is more than 12 hours old', detail: `ZMMBE was uploaded ${Math.round((Date.now() - Date.parse(z.uploaded_at)) / 3600000)} h ago. Upload a fresh export for today's picture.` });
   const p = up.get('plan');
-  if (z && p && Date.parse(z.uploaded_at) < Date.parse(p.uploaded_at) - 6 * 3600 * 1000) out.push({ id: 'order', tone: 'warn', title: 'Stock is older than the plan', detail: 'The plan was uploaded well after the last ZMMBE. Upload ZMMBE again so stock matches the new lines.' });
+  if (z && p && Date.parse(z.uploaded_at) < Date.parse(p.uploaded_at) - 6 * 3600 * 1000) out.push({ id: 'order', tone: 'warn', count: '!', label: 'Stock older than plan', title: 'Stock is older than the plan', detail: 'The plan was uploaded well after the last ZMMBE. Upload ZMMBE again so stock matches the new lines.' });
   const dups = new Set(rows.filter((l) => l.dup > 1).map((l) => l.key)).size;
-  if (dups) out.push({ id: 'dup', tone: 'info', title: `${n0(dups)} SO / LI / Item keys appear more than once in the plan`, detail: 'Their stock is shown on each line; totals count it once.' });
+  if (dups) out.push({ id: 'dup', tone: 'info', count: dups, label: 'Repeated SO / LI / Item', view: { kind: 'dup' }, title: `${n0(dups)} SO / LI / Item keys appear more than once in the plan`, detail: 'Their stock is shown on each line; totals count it once.' });
 
-  if (!out.length && rows.length) out.push({ id: 'clear', tone: 'ok', title: 'Nothing needs attention', detail: 'Every open line is covered by UR stock.' });
+  if (!out.length && rows.length) out.push({ id: 'clear', tone: 'ok', count: '✓', label: 'All covered', title: 'Nothing needs attention', detail: 'Every open line is covered by UR stock.' });
   return out;
 }

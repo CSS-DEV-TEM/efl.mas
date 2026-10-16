@@ -8,7 +8,7 @@ export default function Page() {
   return <Shell admin><Users /></Shell>;
 }
 
-interface U { username: string; role: Role; created_at: string }
+interface U { username: string; role: Role; plant?: string | null; created_at: string }
 const ROLE_HELP: Record<Role, string> = {
   admin: 'Everything, plus users and clearing data',
   editor: 'Upload reports and edit Status / Comment / Vehicle',
@@ -18,7 +18,7 @@ const ROLE_HELP: Record<Role, string> = {
 function Users() {
   const { user, toast } = useShell();
   const [list, setList] = useState<U[]>([]);
-  const [form, setForm] = useState({ username: '', password: '', role: 'editor' as Role });
+  const [form, setForm] = useState({ username: '', password: '', role: 'editor' as Role, plant: '' });
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -33,7 +33,7 @@ function Users() {
     try {
       await api('/api/users', { method: 'POST', body: form });
       toast(`Saved ${form.username}`);
-      setForm({ username: '', password: '', role: 'editor' });
+      setForm({ username: '', password: '', role: 'editor', plant: '' });
       load();
     } catch (e) { setErr(e instanceof Error ? e.message : 'Could not save.'); } finally { setBusy(false); }
   }
@@ -41,8 +41,8 @@ function Users() {
     if (!window.confirm(`Remove ${u}? They will be signed out when their session ends.`)) return;
     try { await api('/api/users/' + encodeURIComponent(u), { method: 'DELETE' }); load(); } catch (e) { toast(e instanceof Error ? e.message : 'Could not remove.'); }
   }
-  async function setRole(u: string, role: Role) {
-    try { await api('/api/users', { method: 'POST', body: { username: u, role } }); load(); } catch (e) { toast(e instanceof Error ? e.message : 'Could not change role.'); }
+  async function setRole(u: string, role: Role, plant?: string | null) {
+    try { await api('/api/users', { method: 'POST', body: { username: u, role, ...(plant !== undefined ? { plant } : {}) } }); load(); } catch (e) { toast(e instanceof Error ? e.message : 'Could not change role.'); }
   }
 
   return (
@@ -50,7 +50,7 @@ function Users() {
       <div className="page-head">
         <div>
           <h1>Users</h1>
-          <p>Add people who can sign in. Entering an existing username with a new password resets that password.</p>
+          <p>Add people who can sign in. Give plant users their plant: their plan uploads are tagged with it and "Replace my plant" only touches their lines. Entering an existing username with a new password resets that password.</p>
         </div>
       </div>
 
@@ -65,6 +65,7 @@ function Users() {
               <option value="editor">Editor</option><option value="viewer">Viewer</option><option value="admin">Admin</option>
             </select>
           </label>
+          <label htmlFor="npl">Plant (optional)<input id="npl" value={form.plant} onChange={(e) => setForm({ ...form, plant: e.target.value.toUpperCase() })} placeholder="e.g. C051" /></label>
           <button className="btn primary" type="submit" disabled={busy}>Save user</button>
         </form>
         <p className="sub" style={{ marginTop: 10 }}>{ROLE_HELP[form.role]}.</p>
@@ -74,7 +75,7 @@ function Users() {
       <section className="card table-card">
         <div className="table-wrap" style={{ maxHeight: 'none' }}>
           <table className="ledger">
-            <thead><tr><th><button tabIndex={-1}>Username</button></th><th><button tabIndex={-1}>Role</button></th><th><button tabIndex={-1}>Added</button></th><th /></tr></thead>
+            <thead><tr><th><button tabIndex={-1}>Username</button></th><th><button tabIndex={-1}>Role</button></th><th><button tabIndex={-1}>Plant</button></th><th><button tabIndex={-1}>Added</button></th><th /></tr></thead>
             <tbody>
               {list.map((u) => (
                 <tr key={u.username}>
@@ -85,6 +86,8 @@ function Users() {
                       <option value="admin">admin</option><option value="editor">editor</option><option value="viewer">viewer</option>
                     </select>
                   </td>
+                  <td><input className="edit" defaultValue={u.plant || ''} placeholder="—" aria-label={`Plant for ${u.username}`}
+                    onBlur={(e) => { const v = e.target.value.trim().toUpperCase(); if (v !== (u.plant || '')) setRole(u.username, u.role, v || null); }} /></td>
                   <td className="muted">{ago(u.created_at)}</td>
                   <td style={{ textAlign: 'right' }}>{u.username !== user.username && <button className="btn sm danger" onClick={() => remove(u.username)}>Remove</button>}</td>
                 </tr>

@@ -48,9 +48,10 @@ export interface LedgerProps {
   full: boolean;
   flash: Set<string>;
   onSave: (key: string, field: 'status' | 'comment' | 'vehicle', value: string) => Promise<void>;
+  onEdit?: (l: Line) => void;
 }
 
-export default function Ledger({ rows, canEdit, full, flash, onSave }: LedgerProps) {
+export default function Ledger({ rows, canEdit, full, flash, onSave, onEdit }: LedgerProps) {
   const [sort, setSort] = useState<{ id: string; dir: 1 | -1 }>({ id: 'priority', dir: -1 });
   const [limit, setLimit] = useState(250);
   useEffect(() => setLimit(250), [rows.length]);
@@ -86,11 +87,12 @@ export default function Ledger({ rows, canEdit, full, flash, onSave }: LedgerPro
               {head('comment', 'Comment', false, 'Tracking')}
               {head('vehicle', 'Vehicle', false, 'Tracking')}
               <th><button type="button" tabIndex={-1}><span className="grp">&nbsp;</span>Updated</button></th>
+              {canEdit && onEdit && <th><button type="button" tabIndex={-1}><span className="grp">&nbsp;</span>Edit</button></th>}
             </tr>
           </thead>
           <tbody>
             {sorted.slice(0, limit).map((l) => (
-              <Row key={l.key + ':' + l.row_no} l={l} cols={cols} canEdit={canEdit} flash={flash.has(l.key)} onSave={onSave} />
+              <Row key={l.id ?? l.key + ':' + l.row_no} l={l} cols={cols} canEdit={canEdit} flash={flash.has(l.key)} onSave={onSave} onEdit={onEdit} />
             ))}
           </tbody>
         </table>
@@ -106,7 +108,7 @@ export default function Ledger({ rows, canEdit, full, flash, onSave }: LedgerPro
   );
 }
 
-const Row = memo(function Row({ l, cols, canEdit, flash, onSave }: { l: Line; cols: Col[]; canEdit: boolean; flash: boolean; onSave: LedgerProps['onSave'] }) {
+const Row = memo(function Row({ l, cols, canEdit, flash, onSave, onEdit }: { l: Line; cols: Col[]; canEdit: boolean; flash: boolean; onSave: LedgerProps['onSave']; onEdit?: (l: Line) => void }) {
   const done = isDone(l);
   return (
     <tr className={`${done ? 'done' : ''} ${flash ? 'flash' : ''}`}>
@@ -120,6 +122,7 @@ const Row = memo(function Row({ l, cols, canEdit, flash, onSave }: { l: Line; co
       <td><EditCell value={l.comment} field="comment" k={l.key} canEdit={canEdit} onSave={onSave} /></td>
       <td><EditCell value={l.vehicle} field="vehicle" k={l.key} canEdit={canEdit} onSave={onSave} list="vehicle-options" /></td>
       <td className="muted" title={l.updated_at || ''}>{l.updated_by || ''}</td>
+      {canEdit && onEdit && <td><button type="button" className="btn sm" onClick={() => onEdit(l)} aria-label={`Edit ${l.so} / ${l.li}`}>✎ Edit</button></td>}
     </tr>
   );
 });

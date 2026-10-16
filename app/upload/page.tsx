@@ -20,6 +20,10 @@ interface SheetJob {
   state: 'ready' | 'sending' | 'done' | 'error'; msg?: string;
   /** plan only: '' = auto from dates, or a week id like 2026-W43 */
   week?: string;
+  /** plan only: how the file joins what is already there */
+  mode?: 'merge' | 'replace-plant' | 'replace-week';
+  /** plan only: plant for lines that have none (and the plant a replace-plant upload replaces) */
+  plant?: string;
 }
 
 function Uploads() {
@@ -31,12 +35,16 @@ function Uploads() {
   const [counts, setCounts] = useState<Record<string, number>>({});
   const [weeks, setWeeks] = useState<WeekInfo[]>([]);
   const [history, setHistory] = useState<{ at: string; username: string; detail: string }[]>([]);
+  const [myPlant, setMyPlant] = useState<string>('');
+  const [plants, setPlants] = useState<string[]>([]);
+  useEffect(() => { api<{ user: { plant?: string | null } }>('/api/me').then((m) => setMyPlant(m.user.plant || '')).catch(() => {}); }, []);
   const input = useRef<HTMLInputElement>(null);
   const canEdit = user.role !== 'viewer';
 
   const loadStatus = useCallback(async () => {
     try {
-      const p = await api<{ uploads: Upload[]; counts: { src: string; n: number }[]; weeks: WeekInfo[] }>('/api/pullplan');
+      const p = await api<{ uploads: Upload[]; counts: { src: string; n: number }[]; weeks: WeekInfo[]; rows: { plant: string | null }[] }>('/api/pullplan');
+      setPlants(Array.from(new Set(p.rows.map((r) => r.plant || '').filter(Boolean))).sort());
       setUploads(p.uploads);
       setWeeks(p.weeks || []);
       api<{ activity: { at: string; username: string; detail: string }[] }>('/api/activity?action=upload').then((a) => setHistory(a.activity.slice(0, 12))).catch(() => {});
@@ -72,10 +80,11 @@ function Uploads() {
     setJob(j.id, { state: 'sending', msg: undefined });
     try {
       const rows = applyMapping(j.src, j.grid, j.map);
-      const r = await api<{ accepted: number; skipped: number; weeks?: string[] }>('/api/upload', { method: 'POST', body: { src: j.src, fileName: j.file, sheetName: j.sheet, rows, ...(j.src === 'plan' && j.week ? { week: j.week, forceWeek: true } : {}) } });
+      const r = await api<PlanPreview & { accepted: number; skipped: number; weeks?: string[] }>('/api/upload', { method: 'POST', body: { src: j.src, fileName: j.file, sheetName: j.sheet, rows, ...planOpts(j, myPlant) } });
       const wk = r.weeks?.length ? ` to ${r.weeks.map((w) => 'Week ' + Number(w.slice(-2))).join(', ')}` : '';
       loadStatus();
-      setJob(j.id, { state: 'done', msg: `${fmt(r.accepted)} rows saved${wk}${r.skipped ? ` · ${fmt(r.skipped)} rows without SO/LI/Material skipped` : ''}. Every open dashboard has updated.` });
+      const plan = j.src === 'plan' && r.added !== undefined ? `${fmt(r.added)} new, ${fmt(r.updated)} updated${r.removed ? `, ${fmt(r.removed)} removed` : ''}${r.inFileDups ? `, ${fmt(r.inFileDups)} repeated rows in the file merged` : ''}` : `${fmt(r.accepted)} rows saved`;
+      setJob(j.id, { state: 'done', msg: `${plan}${wk}${r.skipped > 0 ? ` · ${fmt(r.skipped)} rows without SO/LI/Material skipped` : ''}. Every open dashboard has updated.` });
     } catch (e) {
       setJob(j.id, { state: 'error', msg: e instanceof Error ? e.message : 'Upload failed.' });
     }
@@ -196,7 +205,7 @@ function Uploads() {
             </div>
           )}
 
-          {jobs.map((j) => <SheetCard key={j.id} job={j} onChange={(p) => setJob(j.id, p)} onSend={() => send(j)} onRemove={() => setJobs((js) => js.filter((x) => x.id !== j.id))} />)}
+          {jobs.map((j) => <SheetCard key={j.id} job={j} myPlant={myPlant} plants={plants} onChange={(p) => setJob(j.id, p)} onSend={() => send(j)} onRemove={() => setJobs((js) => js.filter((x) => x.id !== j.id))} />)}
         </>
       )}
     </main>
@@ -257,7 +266,14 @@ function show(v: unknown, id: string) {
   return String(v);
 }
 
-function SheetCard({ job, onChange, onSend, onRemove }: { job: SheetJob; onChange: (p: Partial<SheetJob>) => void; onSend: () => void; onRemove: () => void }) {
+interface PlanPreview { added: number; updated: number; removed: number; kept: number; inFileDups: number; lines: number; plant: string | null; mode: string }
+function planOpts(j: SheetJob, myPlant: string) {
+  if (j.src !== 'plan') return {};
+  const plant = (j.plant ?? myPlant).trim();
+  return { ...(j.week ? { week: j.week, forceWeek: true } : {}), mode: j.mode || 'merge', ...(plant ? { plant } : {}) };
+}
+
+function SheetCard({ job, myPlant, plants, onChange, onSend, onRemove }: { job: SheetJob; myPlant: string; plants: string[]; onChange: (p: Partial<SheetJob>) => void; onSend: () => void; onRemove: () => void }) {
   const fields = job.src ? FIELDS[job.src] : [];
   const width = Math.max(0, ...job.grid.slice(0, 50).map((r) => r?.length || 0));
   const header = job.map?.how === 'header' && job.map.headerRow !== undefined ? job.grid[job.map.headerRow] : null;
@@ -266,6 +282,21 @@ function SheetCard({ job, onChange, onSend, onRemove }: { job: SheetJob; onChang
   const usable = job.src ? usableCount(job.src, rows) : 0;
   const wks = useMemo(() => (job.src === 'plan' ? planWeeks(rows) : []), [job.src, rows]);
   const checks = useMemo(() => (job.src === 'plan' ? planChecks(rows, job.week || '') : []), [job.src, rows, job.week]);
+  // ask the server what this upload would do (new / updated / removed) before it is sent
+  const [preview, setPreview] = useState<PlanPreview | null>(null);
+  const [previewErr, setPreviewErr] = useState('');
+  const plantVal = job.plant ?? myPlant;
+  useEffect(() => {
+    if (job.src !== 'plan' || job.state === 'done' || !usable) { setPreview(null); return; }
+    let stop = false;
+    const t = setTimeout(async () => {
+      try {
+        const r = await api<PlanPreview>('/api/upload', { method: 'POST', body: { src: 'plan', rows, dryRun: true, ...planOpts(job, myPlant) } });
+        if (!stop) { setPreview(r); setPreviewErr(''); }
+      } catch (e) { if (!stop) { setPreview(null); setPreviewErr(e instanceof Error ? e.message : ''); } }
+    }, 350);
+    return () => { stop = true; clearTimeout(t); };
+  }, [job.src, job.state, job.week, job.mode, plantVal, rows, usable, myPlant]); // eslint-disable-line react-hooks/exhaustive-deps
   const missing = fields.filter((f) => f.required && (job.map?.cols[f.id] ?? -1) < 0);
   const how = job.map?.how === 'header' ? `header row ${(job.map.headerRow ?? 0) + 1}` : job.map?.how === 'keyed' ? 'your workbook layout (key in column A)' : 'SAP layout without key column';
 
@@ -302,6 +333,37 @@ function SheetCard({ job, onChange, onSend, onRemove }: { job: SheetJob; onChang
               ? `All ${fmt(usable)} lines go to Week ${Number(job.week.slice(-2))}. Only that week is replaced.`
               : wks.length ? `Lines go to ${wks.map(([w, o]) => `Week ${Number(w.slice(-2))} (${fmt(o.n)})`).join(', ')} by date. Only ${wks.length > 1 ? 'those weeks are' : 'that week is'} replaced.` : 'No dates found: lines go to the current week.'}
           </span>
+        </div>
+      )}
+      {job.src === 'plan' && job.state !== 'done' && (
+        <div className="plan-opts">
+          <div className="mode-pick" role="radiogroup" aria-label="How to add this file">
+            {([['merge', 'Merge', 'Add new lines and update matching ones. Nothing else is touched. Use this when each plant uploads its own file.'],
+              ['replace-plant', 'Replace my plant', 'Remove this plant\'s lines for the week, then add the file. Other plants stay.'],
+              ['replace-week', 'Replace whole week', 'Remove every line of the week, then add the file.']] as const).map(([v, label, help]) => (
+              <label key={v} className={`mode ${ (job.mode || 'merge') === v ? 'on' : ''}`}>
+                <input type="radio" name={`mode-${job.id}`} value={v} checked={(job.mode || 'merge') === v} onChange={() => onChange({ mode: v, state: 'ready', msg: undefined })} />
+                <b>{label}</b><span>{help}</span>
+              </label>
+            ))}
+          </div>
+          <label className="plant-pick">Plant
+            <input list={`plants-${job.id}`} value={plantVal} placeholder="e.g. C051" onChange={(e) => onChange({ plant: e.target.value.toUpperCase(), state: 'ready', msg: undefined })} />
+            <datalist id={`plants-${job.id}`}>{plants.map((p) => <option key={p} value={p} />)}</datalist>
+            <span className="muted">{(job.mode || 'merge') === 'replace-plant' ? 'Required: only this plant\'s lines are replaced.' : 'Given to lines that have no plant in the file.'}</span>
+          </label>
+          <div className={`preview-counts ${previewErr ? 'bad' : ''}`} aria-live="polite">
+            {previewErr ? previewErr : preview ? (
+              <>
+                <span className="pc new"><b>{fmt(preview.added)}</b> new</span>
+                <span className="pc upd"><b>{fmt(preview.updated)}</b> updated</span>
+                <span className="pc del"><b>{fmt(preview.removed)}</b> removed</span>
+                <span className="pc keep"><b>{fmt(preview.kept)}</b> other lines kept</span>
+                {preview.inFileDups > 0 && <span className="pc">{fmt(preview.inFileDups)} repeated rows in the file merged</span>}
+                <span className="muted">No line is ever added twice: a line with the same week, SO, LI, Item and date is updated.</span>
+              </>
+            ) : 'Checking what this upload will change…'}
+          </div>
         </div>
       )}
       {job.src === 'plan' && job.state !== 'done' && checks.length > 0 && (

@@ -8,8 +8,10 @@ import { api } from '@/lib/api';
 import { COVERAGES, ago, compact, coverage, fmt, fmtDate, isDone, totals, type Coverage, type Line, type Upload, type WeekInfo } from '@/lib/calc';
 import { exportPullPlan } from '@/lib/export';
 import { CountUp } from '@/components/Brand';
+import InsightDrawer from '@/components/InsightDrawer';
+import EditLine from '@/components/EditLine';
 import { SRC_INFO, SRC_ORDER } from '@/lib/mapping';
-import { ACTION_HELP, insights, matchView, todayLocal, type Action, type View } from '@/lib/smart';
+import { ACTION_HELP, insights, matchView, todayLocal, type Action, type Insight, type View } from '@/lib/smart';
 
 export default function Page() {
   return <Shell allowGuest><Dashboard /></Shell>;
@@ -41,6 +43,8 @@ function Dashboard() {
   const [search, setSearch] = useState('');
   const [full, setFull] = useState(false);
   const [view, setView] = useState<View>({ kind: 'all' });
+  const [openInsight, setOpenInsight] = useState<Insight | null>(null);
+  const [editing, setEditing] = useState<Line | 'new' | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const tableRef = useRef<HTMLElement>(null);
   const today = todayLocal();
@@ -199,9 +203,10 @@ function Dashboard() {
           </div>
           <div className="insights">
           {tips.map((i, n) => (
-            <button key={i.id} type="button" className={`insight ${i.tone}`} style={{ animationDelay: `${n * 60}ms` }} disabled={!i.view} onClick={() => i.view && openView(i.view)}>
-              <span className="dot" />
-              <span className="txt"><b>{i.title}</b><span>{i.detail}</span></span>
+            <button key={i.id} type="button" className={`insight mini ${i.tone}`} style={{ animationDelay: `${n * 50}ms` }} disabled={!i.view}
+              onClick={() => i.view && setOpenInsight(i)} title={`${i.title}. ${i.detail}`}>
+              <span className="ic">{typeof i.count === 'number' ? fmt(i.count) : i.count}</span>
+              <span className="il">{i.label}</span>
               {i.view && <span className="go" aria-hidden="true">→</span>}
             </button>
           ))}
@@ -277,6 +282,7 @@ function Dashboard() {
                   <h2>Plan lines</h2>
                   <p className="sub" style={{ margin: 0 }}>{fmt(tableRows.length)} lines{canEdit ? ' · click Status, Comment or Vehicle to edit — everyone sees it instantly' : guest ? ' · view only — sign in to edit' : ''}</p>
                 </div>
+                {canEdit && data?.week && <button type="button" className="btn" onClick={() => setEditing('new')}>+ Add line</button>}
                 <div className="seg" role="group" aria-label="Columns">
                   <button className={!full ? 'on' : ''} onClick={() => setFull(false)}>Key columns</button>
                   <button className={full ? 'on' : ''} onClick={() => setFull(true)}>All columns</button>
@@ -293,13 +299,25 @@ function Dashboard() {
                   </button>
                 ))}
               </div>
-              <Ledger rows={tableRows} canEdit={canEdit} full={full} flash={flash} onSave={save} />
+              <Ledger rows={tableRows} canEdit={canEdit} full={full} flash={flash} onSave={save} onEdit={(l) => setEditing(l)} />
               <datalist id="status-options">{STATUS_OPTIONS.map((s) => <option key={s} value={s} />)}</datalist>
               <datalist id="vehicle-options">{vehicles.map((s) => <option key={s} value={s} />)}</datalist>
             </section>
 
           </div>
         </>
+      )}
+      {openInsight?.view && data?.week && (
+        <InsightDrawer insight={openInsight} week={data.week} canEdit={canEdit}
+          rows={scoped.filter((r) => matchView(r, openInsight.view!, today))}
+          onEdit={(l) => setEditing(l)}
+          onShowInTable={() => { const v = openInsight.view!; setOpenInsight(null); openView(v); }}
+          onClose={() => setOpenInsight(null)} />
+      )}
+      {editing && data?.week && (
+        <EditLine line={editing === 'new' ? null : editing} week={data.week}
+          onClose={() => setEditing(null)}
+          onSaved={(msg) => { toast(msg); load(); }} />
       )}
     </main>
   );
