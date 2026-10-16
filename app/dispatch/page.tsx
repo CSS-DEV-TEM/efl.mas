@@ -59,7 +59,7 @@ function extract(grid: Grid, m: Map_) {
   }
   return out;
 }
-const usable = (rows: Record<string, unknown>[]) => rows.filter((r) => /^\d/.test(String(r.item ?? '').trim()) && num(r.qty) > 0);
+const usable = (rows: Record<string, unknown>[]) => rows.filter((r) => /^[A-Za-z]{0,4}\d/.test(String(r.item ?? '').trim()) && num(r.qty) > 0);
 
 /** SAP-style exports often give metres × 1000 as whole numbers: suggest ÷1000 when most values are big round numbers. */
 function suggestDivide(rows: Record<string, unknown>[]): 1000 | 1 {

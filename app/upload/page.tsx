@@ -259,7 +259,7 @@ function planWeeks(rows: Record<string, unknown>[]) {
 /** Problems worth knowing before a plan goes in. */
 function planChecks(rows: Record<string, unknown>[], fixedWeek: string) {
   const out: string[] = [];
-  const usable = rows.filter((r) => /^\d/.test(String(r.so ?? '').trim()) && String(r.li ?? '').trim() && String(r.item ?? '').trim());
+  const usable = rows.filter((r) => /^[A-Za-z]{0,4}\d/.test(String(r.so ?? '').trim()) && String(r.li ?? '').trim() && String(r.item ?? '').trim());
   const noDate = usable.filter((r) => !toIsoDate(r.date)).length;
   const badQty = usable.filter((r) => !(Number(String(r.qty ?? '').replace(/,/g, '')) > 0)).length;
   const seen = new Map<string, number>();

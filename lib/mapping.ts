@@ -217,5 +217,5 @@ export function applyMapping(src: Src, grid: Grid, m: Mapping) {
 /** Rows the server will accept (has SO, LI and item/material). */
 export function usableCount(src: Src, rows: Record<string, unknown>[]) {
   const itemField = src === 'plan' ? 'item' : 'material';
-  return rows.filter((r) => /^\d/.test(String(r.so ?? '').trim()) && String(r.li ?? '').trim() !== '' && String(r[itemField] ?? '').trim() !== '').length;
+  return rows.filter((r) => /^[A-Za-z]{0,4}\d/.test(String(r.so ?? '').trim()) && String(r.li ?? '').trim() !== '' && String(r[itemField] ?? '').trim() !== '').length;
 }
