@@ -1,6 +1,9 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import Shell, { useShell } from '@/components/Shell';
+import { isDispatchGrid, setPendingDispatch } from '@/lib/handoff';
 import { api } from '@/lib/api';
 import { ago, fmt, fmtDate, type Upload, type WeekInfo } from '@/lib/calc';
 import { TEMPLATES, downloadTemplate } from '@/lib/templates';
@@ -39,6 +42,9 @@ function Uploads() {
   const [plants, setPlants] = useState<string[]>([]);
   useEffect(() => { api<{ user: { plant?: string | null } }>('/api/me').then((m) => setMyPlant(m.user.plant || '')).catch(() => {}); }, []);
   const input = useRef<HTMLInputElement>(null);
+  const router = useRouter();
+  const [dispFiles, setDispFiles] = useState<File[]>([]);
+  const openDispatch = (f: File) => { setPendingDispatch(f); router.push('/dispatch/'); };
   const canEdit = user.role !== 'viewer';
 
   const loadStatus = useCallback(async () => {
@@ -57,9 +63,12 @@ function Uploads() {
   async function addFiles(files: FileList | File[]) {
     setReading(true);
     const next: SheetJob[] = [];
+    const disp: File[] = [];
     for (const f of Array.from(files)) {
       try {
         const sheets = readWorkbook(await f.arrayBuffer());
+        // a dispatch / pick file (Display Item Number + Actual Qty) belongs on the Dispatch page
+        if (sheets.some((s) => isDispatchGrid(s.grid)) && !sheets.some((s) => guessSrc(s.name))) { disp.push(f); continue; }
         for (const s of sheets) {
           if (!s.grid.length) continue;
           const src = guessSrc(s.name) ?? (sheets.length === 1 ? guessSrc(f.name) : null) ?? '';
@@ -71,6 +80,8 @@ function Uploads() {
     }
     setJobs((j) => [...j, ...next]);
     setReading(false);
+    if (disp.length === 1 && !next.length && !jobs.length) { toast(`${disp[0].name} is a dispatch file — opening it on the Dispatch page`); openDispatch(disp[0]); return; }
+    if (disp.length) setDispFiles((d) => [...d, ...disp]);
   }
 
   const setJob = (id: string, patch: Partial<SheetJob>) => setJobs((js) => js.map((j) => (j.id === id ? { ...j, ...patch } : j)));
@@ -120,7 +131,7 @@ function Uploads() {
       <div className="page-head">
         <div>
           <h1>Upload reports</h1>
-          <p>Drop the weekly plan and the SAP reports. Each upload replaces that report's previous data, the calculation runs again and every open dashboard updates live.</p>
+          <p>Dispatch / pick files (JAN0190…) go on the <Link href="/dispatch/">Dispatch page</Link>. Drop the weekly plan and the SAP reports here. Each upload replaces that report's previous data, the calculation runs again and every open dashboard updates live.</p>
         </div>
       </div>
 
@@ -197,6 +208,13 @@ function Uploads() {
             <input ref={input} type="file" hidden multiple accept=".xlsx,.xlsm,.xls,.csv" onChange={(e) => { if (e.target.files?.length) addFiles(e.target.files); e.target.value = ''; }} />
           </div>
 
+          {dispFiles.map((f, i) => (
+            <div key={f.name + i} className="notice info" style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+              <span><b>{f.name}</b> is a dispatch / pick file (Display Item Number + Actual Qty). Dispatch is uploaded on the Dispatch page.</span>
+              <button className="btn sm primary" onClick={() => openDispatch(f)}>Open in Dispatch →</button>
+              <button className="btn sm" onClick={() => setDispFiles((d) => d.filter((x) => x !== f))}>✕</button>
+            </div>
+          ))}
           {jobs.length > 0 && (
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
               <button className="btn primary" disabled={!ready} onClick={sendAll}>Upload {ready} sheet{ready === 1 ? '' : 's'}</button>

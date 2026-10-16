@@ -5,6 +5,7 @@ import Shell, { useShell } from '@/components/Shell';
 import { api } from '@/lib/api';
 import { ago, fmt, fmtDate, fmtQty, isDispatched, need, avail, type DispatchSummary, type Line, type WeekInfo } from '@/lib/calc';
 import { colLetter, readWorkbook, type Grid } from '@/lib/mapping';
+import { takePendingDispatch } from '@/lib/handoff';
 
 export default function Page() {
   return <Shell><Dispatch /></Shell>;
@@ -111,6 +112,9 @@ function Dispatch() {
   }, []);
   useEffect(() => { load(); }, [load, week]);
   useEffect(() => subscribe((m) => { if (m.type === 'data') load(); }), [subscribe, load]);
+
+  // a file handed over from the Uploads page
+  useEffect(() => { const f = takePendingDispatch(); if (f) addFile(f); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const grid = useMemo(() => file?.sheets.find((s) => s.name === sheet)?.grid || [], [file, sheet]);
   const rows = useMemo(() => (map ? extract(grid, map) : []), [grid, map]);
