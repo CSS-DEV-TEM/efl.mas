@@ -561,3 +561,5 @@ table.mini tr.gone td { opacity: .5; }
 .manual-pick { border: 1px dashed color-mix(in srgb, var(--warn) 60%, var(--line)); border-radius: 8px; padding: 10px 12px; }
 .manual-pick h3 { margin: 0 0 4px; font-size: 14px; display: flex; gap: 6px; align-items: center; }
 .kchooser { border: 1px solid var(--accent); border-radius: 8px; padding: 10px 12px; background: var(--accent-soft); }
+
+.sugg { display: inline-flex; flex-wrap: wrap; gap: 4px; }

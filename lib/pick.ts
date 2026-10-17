@@ -18,12 +18,14 @@ export interface Candidate {
   picks: { day: string; by_user: string; qty: number }[];
 }
 export interface LotInfo { lot: string; batch: string; qty: number; ur: number; qty_ok: boolean; invoice: string | null; vendor_batch: string | null; sloc: string | null; rolls: number; roll_sum: number }
-/** A shade-report roll whose Barcode Number is not a Korber Pallet: the Korber roll is chosen by hand. */
-export interface ManualRoll { lot: string; batch: string; material: string; vendor_batch: string | null; roll_no: string | null; barcode: string | null; roll_qty: number; shade: string | null; invoice: string | null; reason: string }
+/** A shade-report roll whose Korber pallet does not agree on Pallet, Lot, Supplier Hu, Invoice and Po: the Korber roll is chosen by hand. */
+export interface ManualRoll { lot: string; batch: string; material: string; vendor_batch: string | null; roll_no: string | null; barcode: string | null; roll_qty: number; shade: string | null; invoice: string | null; po?: string | null; reason: string;
+  /** Korber rolls with the same item, Lot Number, Supplier Hu, Invoice and Po (another pallet). */
+  suggest?: KorberRow[] }
 export interface KorberRow { pallet: string; item: string; lot: string | null; qty: number; uom: string | null; invoice: string | null; location: string | null; supplier_hu: string | null; status: string | null; available: number; picked_before: number }
 export interface Candidates {
   manual?: ManualRoll[];
-  /** Available QTY of the Barcode = Pallet rolls, and the balance they cannot cover (only that is picked by hand). */
+  /** Available QTY of the matched rolls, and the balance they cannot cover (only that is picked by hand). */
   matchedAvail?: number; shortfall?: number;
   line: { so: string; li: string; item: string; qty: number; plant: string | null; key: string; week: string; date: string };
   need: number; picked: number; stock: { batch: string; ur: number; sloc: string }[]; lots: LotInfo[]; rolls: Candidate[]; steps: string[];

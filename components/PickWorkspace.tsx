@@ -46,7 +46,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload }: { 
     <>
       <section className="card" aria-labelledby="pd-title">
         <h2 id="pd-title">Pick data</h2>
-        <p className="sub">Upload in any order; each upload replaces the previous one. Matching: ZMMBE → ZINR (SO, LI, Material, Batch, UR = Insp. Lot Qty) → ZCOMENT VIEW Shade Report (Inspection lot) → Korber (Barcode = Pallet; Item, Lot, Supplier HU, Qty and Invoice checked).</p>
+        <p className="sub">Upload in any order; each upload replaces the previous one. Matching: ZMMBE → ZINR (SO, LI, Material, Batch, UR = Insp. Lot Qty) → ZCOMENT VIEW Shade Report (Inspection lot) → Korber — a roll is matched only when all agree: Barcode Number = Pallet, Vendor Batch = Lot Number, Vendor Roll No = Supplier Hu (ZCOMENT), Vendor Invoice No = Invoice Number and Purchasing Document = Po Number (ZINR). Qty differences need “Confirmed”.</p>
         <div className="pick-ups">
           {PICK_SRCS.map((p) => {
             const u = status?.uploads.find((x) => x.src === p.src);
@@ -114,7 +114,7 @@ const Check = ({ v, label }: { v: boolean | null | undefined; label: string }) =
     : <span className={`chk ${v ? 'ok' : 'bad'}`} title={`${label} ${v ? 'matches' : 'does not match'}`}>{v ? '✓' : '✗'}</span>;
 
 type Sel = Record<string, { qty: string; confirmed: boolean; manual?: ManualRoll; korber?: KorberRow }>;
-/** Selects the Barcode = Pallet rolls in order until the line's balance is covered; the last one is cut to fit. */
+/** Selects the matched rolls in order until the line's balance is covered; the last one is cut to fit. */
 function fillFrom(c: Candidates, prev: Sel): Sel {
   const n: Sel = {};
   let left = Math.max(0, Math.round((c.need - c.picked) * 1000) / 1000);
@@ -150,7 +150,7 @@ function PickModal({ week, line, onClose, onDone }: { week: string; line: LineP;
     return n;
   });
   const autoFill = () => { if (c) setSel((s) => ({ ...fillFrom(c, s), ...Object.fromEntries(Object.entries(s).filter(([, x]) => x.manual)) })); };
-  // manual pick is only for the balance the Barcode = Pallet rolls cannot cover
+  // manual pick is only for the balance the matched rolls cannot cover
   const shortfall = c ? (c.shortfall ?? remaining) : 0;
   const manualTotal = Object.values(sel).filter((x) => x.manual).reduce((t, x) => t + (Number(x.qty) || 0), 0);
   const manualLeft = Math.max(0, Math.round((shortfall - manualTotal) * 1000) / 1000);
@@ -199,11 +199,11 @@ function PickModal({ week, line, onClose, onDone }: { week: string; line: LineP;
               {!c.lots.length && <span className="pk-lot warn">No ZINR lot matched</span>}
             </div>
             {c.steps.length > 0 && <div className="notice warn" style={{ fontSize: 12.5 }}>{c.steps.slice(0, 6).map((s, i) => <div key={i}>{s}</div>)}{c.steps.length > 6 && <div>… and {c.steps.length - 6} more</div>}</div>}
-            {!c.rolls.length ? <p className="muted">No Korber pallet matched a Barcode Number for this line.{c.manual?.length ? ' Use Manual pick below.' : ' Check that ZINR, ZCOMENT VIEW and Korber are uploaded and current.'}</p> : (
+            {!c.rolls.length ? <p className="muted">No Korber pallet matched on Pallet, Lot, Supplier Hu, Invoice and Po for this line.{c.manual?.length ? ' Use Manual pick below.' : ' Check that ZINR, ZCOMENT VIEW and Korber are uploaded and current.'}</p> : (
               <div className="table-wrap" style={{ maxHeight: 380 }}>
                 <table className="mini">
                   <thead><tr><th /><th>Pallet</th><th>Location</th><th>Supplier HU</th><th>Lot</th><th>Shade</th><th className="n">Korber qty</th><th className="n">Roll qty</th><th className="n">Available</th>
-                    <th title="Item · Lot · Supplier HU · Qty · Invoice">Checks</th><th className="n">Pick qty</th><th>Confirm</th></tr></thead>
+                    <th title="Item · Lot · Supplier HU · Invoice · Po · Qty">Checks</th><th className="n">Pick qty</th><th>Confirm</th></tr></thead>
                   <tbody>{c.rolls.map((r) => {
                     const s = sel[r.pallet], gone = r.available <= 1e-9;
                     return (
@@ -212,7 +212,7 @@ function PickModal({ week, line, onClose, onDone }: { week: string; line: LineP;
                         <td className="mono">{r.pallet}</td><td>{r.location}</td><td>{r.supplier_hu}</td><td>{r.lot}</td><td><b>{r.shade}</b></td>
                         <td className="n">{fmtQty(r.actual_qty)}</td><td className="n">{fmtQty(r.roll_qty)}</td>
                         <td className="n">{gone ? <span className="pill mute" title={r.picks.map((p) => `${p.day} ${p.by_user}: ${p.qty}`).join('\n')}>picked</span> : r.picked_before ? <span title={`Picked before: ${r.picks.map((p) => `${p.day} ${p.by_user} ${p.qty}`).join(', ')}`}>{fmtQty(r.available)} <span className="pill accent">balance</span></span> : fmtQty(r.available)}</td>
-                        <td className="checks"><Check v={r.checks.item} label="Item" /><Check v={r.checks.lot} label="Lot" /><Check v={r.checks.hu} label="Supplier HU" /><Check v={r.checks.qty} label="Qty" /><Check v={r.checks.invoice} label="Invoice" /></td>
+                        <td className="checks"><Check v={r.checks.item} label="Item" /><Check v={r.checks.lot} label="Lot" /><Check v={r.checks.hu} label="Supplier HU" /><Check v={r.checks.invoice} label="Invoice" /><Check v={r.checks.po} label="Po Number" /><Check v={r.checks.qty} label="Qty" /></td>
                         <td className="n">{s ? <input className="as-search" type="number" step="0.001" min="0.001" max={r.available} style={{ width: 92 }} value={s.qty}
                           onChange={(e) => setSel((x) => ({ ...x, [r.pallet]: { ...x[r.pallet], qty: e.target.value } }))} aria-label="Pick qty" /> : ''}</td>
                         <td>{r.needsConfirm ? (s ? <label className="conf" title={r.warnings.join('\n')}><input type="checkbox" checked={s.confirmed} onChange={(e) => setSel((x) => ({ ...x, [r.pallet]: { ...x[r.pallet], confirmed: e.target.checked } }))} /> Confirmed</label>
@@ -224,12 +224,12 @@ function PickModal({ week, line, onClose, onDone }: { week: string; line: LineP;
               </div>
             )}
             {(c.manual?.length ?? 0) > 0 && shortfall <= 1e-9 && (
-              <p className="muted small" style={{ margin: '8px 0 0' }}>{c.manual!.length} shade-report roll{c.manual!.length === 1 ? ' has' : 's have'} no Korber pallet, but the Barcode = Pallet rolls cover the line, so no manual pick is needed.</p>
+              <p className="muted small" style={{ margin: '8px 0 0' }}>{c.manual!.length} shade-report roll{c.manual!.length === 1 ? ' has' : 's have'} no matching Korber pallet, but the matched rolls cover the line, so no manual pick is needed.</p>
             )}
             {(c.manual?.length ?? 0) > 0 && shortfall > 1e-9 && (
               <div className="manual-pick">
                 <h3>Manual pick · balance {fmtQty(shortfall)} <span className="pill warn">{c.manual!.length}</span></h3>
-                <p className="sub" style={{ margin: '0 0 6px' }}>The Barcode = Pallet rolls leave <b>{fmtQty(shortfall)}</b> to pick{manualTotal > 0 ? <> (<b>{fmtQty(manualLeft)}</b> still open)</> : ''}. Only that balance can be picked by hand: choose the Korber roll for a shade-report roll without a pallet (search or scan pallet, lot or supplier HU); it is always checked with “Confirmed”.</p>
+                <p className="sub" style={{ margin: '0 0 6px' }}>The matched rolls leave <b>{fmtQty(shortfall)}</b> to pick{manualTotal > 0 && manualLeft > 1e-9 ? <> (<b>{fmtQty(manualLeft)}</b> still open)</> : ''}. Only that balance can be picked by hand: choose the Korber roll for a roll that did not match (use a suggestion, or search / scan pallet, lot or supplier HU); it is always checked with “Confirmed”.</p>
                 <table className="mini">
                   <thead><tr><th>Roll</th><th>ZCOMENT barcode</th><th>Insp. lot</th><th>Vendor batch</th><th>Shade</th><th className="n">Roll qty</th><th>Why</th><th>Korber roll</th><th className="n">Pick qty</th><th>Confirm</th></tr></thead>
                   <tbody>{c.manual!.map((m, i) => {
@@ -239,7 +239,12 @@ function PickModal({ week, line, onClose, onDone }: { week: string; line: LineP;
                         <td><b>{m.roll_no || '–'}</b></td><td className="mono">{m.barcode || <span className="muted">none</span>}</td><td>{m.lot}</td><td>{m.vendor_batch}</td><td><b>{m.shade}</b></td><td className="n">{fmtQty(m.roll_qty)}</td>
                         <td className="muted small">{m.reason}</td>
                         <td>{chosen ? <span className="mono">{chosen[0]} <button className="btn sm" onClick={() => setSel((x) => { const n = { ...x }; delete n[chosen[0]]; return n; })} aria-label="Remove">✕</button></span>
-                          : <button className="btn sm" disabled={manualLeft <= 1e-9} title={manualLeft <= 1e-9 ? 'The balance is already covered' : undefined} onClick={() => setChoosing(m)}>Choose Korber roll…</button>}</td>
+                          : <span className="sugg">
+                            {(m.suggest || []).filter((k) => k.available > 1e-9 && !sel[k.pallet]).slice(0, 2).map((k) => (
+                              <button key={k.pallet} className="btn sm" disabled={manualLeft <= 1e-9} title={`Same Lot, Supplier Hu, Invoice and Po · ${k.location ?? ''} · ${fmtQty(k.available)} available`} onClick={() => useKorber(m, k)}>Use {k.pallet}</button>
+                            ))}
+                            <button className="btn sm" disabled={manualLeft <= 1e-9} title={manualLeft <= 1e-9 ? 'The balance is already covered' : undefined} onClick={() => setChoosing(m)}>Choose Korber roll…</button>
+                          </span>}</td>
                         <td className="n">{chosen ? <input className="as-search" type="number" step="0.001" min="0.001" max={Math.min(chosen[1].korber?.available ?? Infinity, Math.round((shortfall - manualTotal + (Number(chosen[1].qty) || 0)) * 1000) / 1000)} style={{ width: 92 }} value={chosen[1].qty}
                           onChange={(e) => setSel((x) => ({ ...x, [chosen[0]]: { ...x[chosen[0]], qty: e.target.value } }))} aria-label="Pick qty" /> : ''}</td>
                         <td>{chosen ? <label className="conf"><input type="checkbox" checked={chosen[1].confirmed} onChange={(e) => setSel((x) => ({ ...x, [chosen[0]]: { ...x[chosen[0]], confirmed: e.target.checked } }))} /> Confirmed</label> : ''}</td>
