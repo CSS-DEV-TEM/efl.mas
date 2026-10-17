@@ -275,7 +275,7 @@ function PickModal({ week, line, onClose, onDone }: { week: string; line: LineP;
             <div className="pk-sec">
               <div className="pk-sec-head">
                 <h3>Matched rolls <span className="pill ok">{open.length}</span>{gone.length > 0 && <span className="muted small"> · {gone.length} already picked</span>}</h3>
-                <span className="muted small">Barcode, Lot, Supplier Hu, Invoice and Po all match. The system selects them for the plan QTY.</span>
+                <span className="muted small">Barcode = Pallet (also re-labelled pallets like COMPCP… / RCP…), Lot, Supplier Hu, Invoice and Po all match. The system selects them for the plan QTY.</span>
                 <span style={{ flex: 1 }} />
                 {open.length > 0 && <button type="button" className="btn sm" onClick={() => applyAuto(c, Object.fromEntries(manualSel))}>Auto select</button>}
                 {nSel > 0 && <button type="button" className="btn sm" onClick={() => { setSel({}); setLast(null); }}>Clear</button>}
@@ -290,7 +290,7 @@ function PickModal({ week, line, onClose, onDone }: { week: string; line: LineP;
                         <tr key={r.pallet} className={`${s ? 'picked' : ''} ${isGone ? 'gone' : ''}`} onClick={(e) => { if (!isGone && (e.target as HTMLElement).tagName !== 'INPUT') toggle(r); }}>
                           <td><input type="checkbox" disabled={isGone} checked={!!s} onChange={() => toggle(r)} aria-label={`Pick ${r.pallet}`} /></td>
                           <td><b>{r.supplier_hu}</b></td>
-                          <td className="mono">{r.pallet}</td><td>{r.location}</td><td><b>{r.shade}</b></td>
+                          <td className="mono">{r.pallet}{r.via && <span className="pill accent" style={{ marginLeft: 4 }} title={`ZCOMENT Barcode Number ${r.barcode} — the same roll number in Korber under pallet ${r.via}`}>barcode {r.barcode}</span>}</td><td>{r.location}</td><td><b>{r.shade}</b></td>
                           <td className="n">{isGone ? <span className="pill mute" title={r.picks.map((p) => `${p.day} ${p.by_user}: ${p.qty}`).join('\n')}>picked</span>
                             : <>{fmtQty(r.available)}{r.picked_before > 0 && <span className="pill accent" style={{ marginLeft: 4 }} title={`Picked before: ${r.picks.map((p) => `${p.day} ${p.by_user} ${p.qty}`).join(', ')}`}>balance</span>}</>}</td>
                           <td className="n">{s ? <span className="pk-qty">
@@ -299,7 +299,7 @@ function PickModal({ week, line, onClose, onDone }: { week: string; line: LineP;
                               onChange={(e) => setSel((x) => ({ ...x, [r.pallet]: { ...x[r.pallet], qty: e.target.value } }))} aria-label="Pick qty" />
                           </span> : ''}</td>
                           <td>{r.needsConfirm ? <span className="pill warn" title={`${r.warnings.join('\n')}\n\n${checkText(r.checks)}`}>Check: {r.warnings[0]}</span>
-                            : <span className="pill ok" title={checkText(r.checks)}>All match ✓</span>}</td>
+                            : <span className="pill ok" title={`${checkText(r.checks)}${r.qtyNote ? `\n\n${r.qtyNote}` : ''}`}>All match ✓{r.qtyNote ? ' · split roll' : ''}</span>}</td>
                         </tr>
                       );
                     })}</tbody>
