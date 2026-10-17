@@ -9,8 +9,12 @@ const q = (n: number) => (Math.abs(n) < 0.0005 ? '' : fmt(n, 2));
 const c = (n: number) => (n ? fmt(n) : '');
 
 /** Plant-wise summary in the layout of the daily pull summary sheet. Click a plant to see its lines. */
-export default function PlantSummary({ rows, plants, received = [], week, canEdit, onPlant, onSaved }: {
-  rows: Line[]; plants: PlantInfo[]; received?: { code: string; received: string | null }[]; week: string; canEdit: boolean; onPlant: (code: string) => void; onSaved: (msg: string) => void;
+/**
+ * `week` is the period the received times belong to: the week (2026-W47), or the day for a day plan (2026-11-17).
+ * Target times are system settings (admin only); received times are typed by the users.
+ */
+export default function PlantSummary({ rows, plants, received = [], week, day, canTarget, canEdit, onPlant, onSaved }: {
+  rows: Line[]; plants: PlantInfo[]; received?: { code: string; received: string | null }[]; week: string; day?: string | null; canTarget: boolean; canEdit: boolean; onPlant: (code: string) => void; onSaved: (msg: string) => void;
 }) {
   const s = useMemo(() => plantSummary(rows, plants, received), [rows, plants, received]);
   const saveTarget = async (code: string, v: string) => {
@@ -28,7 +32,7 @@ export default function PlantSummary({ rows, plants, received = [], week, canEdi
     <tr key={r.code} className={isTotal ? 'total' : ''} onClick={isTotal ? undefined : () => onPlant(r.code)} title={isTotal ? '' : `Show ${r.name} lines`}>
       <td>{isTotal ? '' : r.responsible}</td>
       <td className="pname">{r.name}{!isTotal && r.name !== r.code && <small>{r.code}</small>}</td>
-      <td onClick={(e) => e.stopPropagation()}>{isTotal ? '' : <TimeCell value={r.target} canEdit={canEdit} placeholder="10:00 AM" title="Target time — click to change" onSave={(v) => saveTarget(r.code, v)} weekly />}</td>
+      <td onClick={(e) => e.stopPropagation()}>{isTotal ? '' : <TimeCell value={r.target} canEdit={canTarget} placeholder="10:00 AM" title="Target time (admin setting) — click to change" onSave={(v) => saveTarget(r.code, v)} weekly />}</td>
       <td onClick={(e) => e.stopPropagation()} className={r.late === true ? 'late' : r.late === false ? 'ontime' : ''}>{isTotal ? '' : <TimeCell value={r.receivedText} canEdit={canEdit} placeholder="9:48 AM" manual={r.receivedManual}
         title={r.receivedManual ? 'Typed on the dashboard — click to change, clear it to use the upload time' : r.received ? 'Plan upload time — click to type the real received time' : 'Click to type the received time'} onSave={(v) => saveReceived(r.code, v)} />}</td>
       {pair(r.plan)}{pair(r.ur, true)}
@@ -45,18 +49,18 @@ export default function PlantSummary({ rows, plants, received = [], week, canEdi
     const ws = XLSX.utils.aoa_to_sheet([head, ...s.rows.map(line), line(s.total)]);
     ws['!cols'] = head.map((h, i) => ({ wch: i < 4 ? 14 : Math.max(7, h.length + 2) }));
     const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Summary');
-    XLSX.writeFile(wb, `Plant_Summary_${week}.xlsx`);
+    XLSX.writeFile(wb, `Plant_Summary_${day || week}.xlsx`);
   };
 
   return (
     <section className="card psum-card" aria-labelledby="psum-title">
       <div className="table-head">
         <div>
-          <h2 id="psum-title">Plant summary</h2>
+          <h2 id="psum-title">Plant summary{day ? <span className="pill accent" style={{ marginLeft: 8, fontSize: 12 }}>Day plan · {day}</span> : ''}</h2>
           <p className="sub" style={{ margin: 0 }}>QTY still to send split by what covers it: UR → QI → Block → NIH (not in house). SOLI = SO/LI lines. W/H = UR SOLI ÷ {SOLI_PER_HOUR} per hour. Total = UR + Adhoc. Click a plant to see its lines.</p>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
-          {canEdit && <button className="btn sm" onClick={() => setSetup(true)}>Plant settings</button>}
+          {canTarget && <button className="btn sm" onClick={() => setSetup(true)}>Plant settings</button>}
           <button className="btn sm" onClick={exportXlsx}>Export</button>
         </div>
       </div>
@@ -80,7 +84,7 @@ export default function PlantSummary({ rows, plants, received = [], week, canEdi
   );
 }
 
-function PlantSetup({ rows, plants, onClose, onSaved }: { rows: Line[]; plants: PlantInfo[]; onClose: () => void; onSaved: (m: string) => void }) {
+export function PlantSetup({ rows, plants, onClose, onSaved }: { rows: Line[]; plants: PlantInfo[]; onClose: () => void; onSaved: (m: string) => void }) {
   const codes = Array.from(new Set([...plants.map((p) => p.code.toUpperCase()), ...rows.map((r) => (r.plant || '').toUpperCase()).filter(Boolean)]));
   const [list, setList] = useState<PlantInfo[]>(codes.map((code, i) => plants.find((p) => p.code.toUpperCase() === code) || { code, name: '', responsible: '', target: '', sort: i + 1 }));
   const [removed, setRemoved] = useState<string[]>([]);

@@ -3,9 +3,13 @@
 export const API_URL = (process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8787').replace(/\/+$/, '');
 
 /** The Worker version this website needs (see API_VERSION in worker/src/index.ts). */
-export const NEEDS_API = 21;
+export const NEEDS_API = 22;
 
-export type Role = 'admin' | 'editor' | 'viewer';
+export type Role = 'admin' | 'head' | 'editor' | 'viewer';
+/** How each role is called on screen (the "editor" role is a planner's user account). */
+export const ROLE_NAME: Record<Role, string> = { admin: 'Admin', head: 'Head', editor: 'User', viewer: 'Viewer' };
+/** Admin and Head see and change everyone's plan and picks; only the Admin changes system settings. */
+export const isBossRole = (r?: Role | null) => r === 'admin' || r === 'head';
 export interface User { username: string; role: Role }
 interface Stored { token: string; user: User; expires: number }
 

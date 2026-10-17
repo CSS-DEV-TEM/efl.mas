@@ -20,7 +20,7 @@ export default function Page() {
   return <Shell allowGuest><Dashboard /></Shell>;
 }
 
-interface PullPlan { week: string | null; prevWeek?: string | null; rev?: string | null; weeks: WeekInfo[]; rows: Line[]; dispatch?: DispatchSummary; plants?: PlantInfo[]; received?: { code: string; received: string | null }[]; releases?: { key: string; qi: number; block: number; by_user: string; at: string; active: boolean }[]; uploads: Upload[]; counts: { src: string; n: number }[]; generatedAt: string }
+interface PullPlan { week: string | null; prevWeek?: string | null; rev?: string | null; weeks: WeekInfo[]; rows: Line[]; dispatch?: DispatchSummary; plants?: PlantInfo[]; received?: { period?: string; code: string; received: string | null }[]; releases?: { key: string; qi: number; block: number; by_user: string; at: string; active: boolean }[]; uploads: Upload[]; counts: { src: string; n: number }[]; generatedAt: string }
 
 /** "2026-W42" → "Week 42" */
 const weekLabel = (w: string | null | undefined) => (w ? `Week ${Number(w.slice(-2))}` : '');
@@ -182,6 +182,24 @@ function Dashboard() {
         </nav>
       )}
 
+      {data && dates.length > 0 && (
+        <nav className="days" aria-label="Day plan">
+          <span className="weeks-label">Plan for</span>
+          <button type="button" className={`day-chip ${!date ? 'on' : ''}`} aria-pressed={!date} onClick={() => setDate(null)}><b>Whole week</b><span>{fmt(rows.length)} lines</span></button>
+          {dates.map((d) => {
+            const n = rows.filter((r) => r.date === d);
+            const open = n.filter((r) => !isDone(r)).length;
+            return (
+              <button key={d} type="button" className={`day-chip ${date === d ? 'on' : ''} ${d === today ? 'today' : ''}`} aria-pressed={date === d} onClick={() => setDate(date === d ? null : d)}
+                title={`Day plan ${fmtDate(d)}: ${n.length} lines, ${open} open`}>
+                <b>{new Date(d + 'T00:00:00Z').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' })}{d === today ? ' · today' : ''}</b>
+                <span>{fmt(n.length)} lines{open ? ` · ${fmt(open)} open` : ' · done'}</span>
+              </button>
+            );
+          })}
+        </nav>
+      )}
+
       {data && rows.length > 0 && <section className="kpis compact" aria-label="Key figures">
         <div className="kpi"><span className="k">Plan lines</span><span className={`v ${!data ? 'skel' : ''}`}><CountUp value={t.lines} format={(n) => fmt(n)} /></span>
           <span className="s">{fmt(t.done)} done · {fmt(t.open)} open</span>
@@ -249,7 +267,9 @@ function Dashboard() {
       </div>}
 
       {tab === 'summary' && data?.week && rows.length > 0 && (
-        <PlantSummary rows={rows} plants={data.plants || []} received={data.received || []} week={data.week} canEdit={canEdit}
+        <PlantSummary rows={date ? rows.filter((r) => r.date === date) : rows} plants={data.plants || []}
+          received={(data.received || []).filter((r) => (r.period ?? data.week) === (date || data.week))} week={date || data.week} day={date}
+          canTarget={!guest && user.role === 'admin'} canEdit={canEdit}
           onPlant={(c) => { setPlant(rows.some((r) => (r.plant || '').toUpperCase() === c) ? (rows.find((r) => (r.plant || '').toUpperCase() === c)!.plant || '') : ''); setView({ kind: 'all' }); setTab('details'); }}
           onSaved={(m) => { toast(m); load(); }} />
       )}

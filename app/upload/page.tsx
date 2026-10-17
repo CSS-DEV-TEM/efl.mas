@@ -27,7 +27,7 @@ interface SheetJob {
   /** plan only: '' = auto from dates, or a week id like 2026-W43 */
   week?: string;
   /** plan only: how the file joins what is already there */
-  mode?: 'merge' | 'replace-plant' | 'replace-week';
+  mode?: 'merge' | 'replace-plant' | 'replace-week' | 'replace-day';
   /** plan only: plant for lines that have none (and the plant a replace-plant upload replaces) */
   plant?: string;
   /** stock reports: 'replace' the whole report (default) or 'add' this file to what is there (another part of the same report) */
@@ -304,7 +304,7 @@ function show(v: unknown, id: string) {
   return String(v);
 }
 
-interface PlanPreview { added: number; updated: number; removed: number; kept: number; inFileDups: number; lines: number; plant: string | null; mode: string }
+interface PlanPreview { days?: string[]; added: number; updated: number; removed: number; kept: number; inFileDups: number; lines: number; plant: string | null; mode: string }
 function planOpts(j: SheetJob, myPlant: string) {
   if (j.src !== 'plan') return j.stockMode === 'add' ? { mode: 'add' } : {};
   const plant = (j.plant ?? myPlant).trim();
@@ -383,6 +383,7 @@ function SheetCard({ job, myPlant, plants, onChange, onSend, onRemove }: { job: 
         <div className="plan-opts">
           <div className="mode-pick" role="radiogroup" aria-label="How to add this file">
             {([['merge', 'Merge', 'Add new lines and update matching ones. Nothing else is touched. Use this when each plant uploads its own file.'],
+              ['replace-day', 'Day plan', 'Replace only the day(s) in this file: your lines on those dates are removed, then the file is added. Other days of the week stay.'],
               ['replace-plant', 'Replace my plant', 'Remove this plant\'s lines for the week, then add the file. Other plants stay.'],
               ['replace-week', 'Replace whole week', 'Remove every line of the week, then add the file.']] as const).map(([v, label, help]) => (
               <label key={v} className={`mode ${ (job.mode || 'merge') === v ? 'on' : ''}`}>
@@ -404,6 +405,7 @@ function SheetCard({ job, myPlant, plants, onChange, onSend, onRemove }: { job: 
                 <span className="pc del"><b>{fmt(preview.removed)}</b> removed</span>
                 <span className="pc keep"><b>{fmt(preview.kept)}</b> other lines kept</span>
                 {preview.inFileDups > 0 && <span className="pc">{fmt(preview.inFileDups)} repeated rows in the file merged</span>}
+                {(job.mode || 'merge') === 'replace-day' && preview.days?.length ? <span className="pc">Day plan for {preview.days.map((d) => fmtDate(d)).join(', ')}</span> : null}
                 <span className="muted">No line is ever added twice: a line with the same week, SO, LI, Item and date is updated.</span>
               </>
             ) : 'Checking what this upload will change…'}

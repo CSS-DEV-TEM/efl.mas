@@ -11,11 +11,21 @@ import {
 type LineP = Line & { picked?: number; picked_rolls?: number };
 const today = () => new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
 
+/** Why a plan line is still pending, in the order the work is done. */
+const PENDING_ORDER = ['Part picked', 'Ready to pull', 'Partial pull', 'Release QI / Block', 'Follow up TN', 'No stock'];
+const PENDING_TONE: Record<string, string> = { 'Part picked': 'accent', 'Ready to pull': 'ok', 'Partial pull': 'info', 'Release QI / Block': 'warn', 'Follow up TN': 'warn', 'No stock': 'bad' };
+function pendingWhy(l: LineP): string {
+  if ((l.picked ?? 0) > 0) return 'Part picked';
+  const a = action(l);
+  return PENDING_ORDER.includes(a) ? a : 'No stock';
+}
+
 /** Pick tab of the Dispatch page: the three pick reports, Ready-to-pull lines with Pick, and the pick history / Packing List. */
 export default function PickWorkspace({ week, rows, canEdit, toast, reload }: { week: string; rows: LineP[]; canEdit: boolean; toast: (m: string) => void; reload: () => void }) {
   const [status, setStatus] = useState<{ counts: { src: string; n: number }[]; uploads: { src: string; file_name: string | null; row_count: number; uploaded_by: string; uploaded_at: string }[] } | null>(null);
   const [busy, setBusy] = useState<PickSrc | null>(null);
-  const [scope, setScope] = useState<'ready' | 'open' | 'picked'>('ready');
+  const [scope, setScope] = useState<'pending' | 'ready' | 'open' | 'picked'>('pending');
+  const [why, setWhy] = useState('');
   const [q, setQ] = useState('');
   const [picking, setPicking] = useState<LineP | null>(null);
   const [histKey, setHistKey] = useState(0);
@@ -36,10 +46,22 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload }: { 
 
   const list = useMemo(() => {
     const s = q.trim().toLowerCase();
-    return rows.filter((l) => (scope === 'picked' ? (l.picked ?? 0) > 0 : need(l) > 1e-9 && (scope === 'open' ? avail(l) > 0 : action(l) === 'Ready to pull')))
+    return rows.filter((l) => (scope === 'picked' ? (l.picked ?? 0) > 0
+      : scope === 'pending' ? !isDispatched(l) && need(l) > 1e-9 && (!why || pendingWhy(l) === why)
+      : need(l) > 1e-9 && (scope === 'open' ? avail(l) > 0 : action(l) === 'Ready to pull')))
       .filter((l) => !s || [l.so, l.li, l.item, l.plant].join(' ').toLowerCase().includes(s))
       .sort((a, b) => String(a.date ?? '').localeCompare(String(b.date ?? '')) || a.row_no - b.row_no);
-  }, [rows, scope, q]);
+  }, [rows, scope, q, why]);
+  // everything of the plan not dispatched yet, by what it is waiting for
+  const pending = useMemo(() => {
+    const m = new Map<string, { n: number; qty: number }>();
+    for (const l of rows) {
+      if (isDispatched(l) || need(l) <= 1e-9) continue;
+      const k = pendingWhy(l); const x = m.get(k) || { n: 0, qty: 0 };
+      x.n++; x.qty += need(l); m.set(k, x);
+    }
+    return PENDING_ORDER.filter((k) => m.has(k)).map((k) => ({ why: k, ...m.get(k)! }));
+  }, [rows]);
   const cnt = (src: string) => status?.counts.find((c) => c.src === src)?.n ?? 0;
 
   return (
@@ -67,19 +89,33 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload }: { 
       <section className="card" aria-labelledby="rp-title">
         <div className="sheet-top">
           <div>
-            <h2 id="rp-title">Ready to pull → Pick <span className="pill ok" style={{ marginLeft: 6 }}>{fmt(list.length)}</span></h2>
-            <p className="sub" style={{ margin: 0 }}>Plan lines whose UR covers the balance — they appear here as soon as a ZMMBE upload makes them ready. Picked QTY counts as Dispatched; fully picked lines move to “Picked”.</p>
+            <h2 id="rp-title">Plan → Pick <span className="pill ok" style={{ marginLeft: 6 }}>{fmt(list.length)}</span></h2>
+            <p className="sub" style={{ margin: 0 }}>Pending = every plan line not dispatched yet, by what it is waiting for. Ready to pull = UR covers the balance (they appear as soon as a ZMMBE upload makes them ready). Picked QTY counts as Dispatched.</p>
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
             <input type="search" className="as-search" placeholder="Search SO, item…" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search lines" />
             <div className="seg" role="group">
+              <button className={scope === 'pending' ? 'on' : ''} onClick={() => { setScope('pending'); setWhy(''); }}>Pending</button>
               <button className={scope === 'ready' ? 'on' : ''} onClick={() => setScope('ready')}>Ready to pull</button>
               <button className={scope === 'open' ? 'on' : ''} onClick={() => setScope('open')}>All with UR</button>
               <button className={scope === 'picked' ? 'on' : ''} onClick={() => setScope('picked')}>Picked</button>
             </div>
           </div>
         </div>
-        {!list.length ? <p className="muted">No lines {scope === 'ready' ? 'are ready to pull' : scope === 'picked' ? 'picked yet' : 'with UR stock'} in {week}.</p> : (
+        {pending.length > 0 && (
+          <div className="pend-bar" role="group" aria-label="Pending by reason">
+            <span className="weeks-label">Pending</span>
+            <button type="button" className={`pend-chip ${scope === 'pending' && !why ? 'on' : ''}`} onClick={() => { setScope('pending'); setWhy(''); }}>
+              <b>{fmt(pending.reduce((t, p) => t + p.n, 0))}</b><span>All · {fmtQty(pending.reduce((t, p) => t + p.qty, 0))}</span>
+            </button>
+            {pending.map((p) => (
+              <button key={p.why} type="button" className={`pend-chip ${PENDING_TONE[p.why] || ''} ${scope === 'pending' && why === p.why ? 'on' : ''}`} onClick={() => { setScope('pending'); setWhy(p.why); }}>
+                <b>{fmt(p.n)}</b><span>{p.why} · {fmtQty(p.qty)}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        {!list.length ? <p className="muted">No lines {scope === 'ready' ? 'are ready to pull' : scope === 'picked' ? 'picked yet' : scope === 'pending' ? 'pending' : 'with UR stock'} in {week}.</p> : (
           <div className="table-wrap" style={{ maxHeight: 460 }}>
             <table className="mini">
               <thead><tr><th>SO</th><th>LI</th><th>Item</th><th>Date</th><th>Plant</th><th className="n">QTY</th><th className="n">Picked = Dispatched</th><th className="n">Balance</th><th className="n">UR left</th><th>State</th><th /></tr></thead>
@@ -91,7 +127,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload }: { 
                     <td className="n">{fmtQty(l.qty)}</td>
                     <td className="n">{pk ? <>{fmtQty(pk)} <span className="muted">({l.picked_rolls} roll{l.picked_rolls === 1 ? '' : 's'})</span></> : '–'}</td>
                     <td className="n"><b>{fmtQty(need(l))}</b></td><td className="n">{fmtQty(avail(l))}</td>
-                    <td>{done && Number((l as LineP & { closed_short?: number }).closed_short) > 0 ? <span className="pill ok" title="Closed short by a Normal pick">Picked ✓ · {fmtQty(Number((l as LineP & { closed_short?: number }).closed_short))} short</span> : done ? <span className="pill ok">Picked ✓ · Dispatched</span> : pk ? <span className="pill accent">Part picked</span> : <span className="pill mute">To pick</span>}</td>
+                    <td>{scope === 'pending' && !done ? <span className={`pill ${PENDING_TONE[pendingWhy(l)] || 'mute'}`}>{pendingWhy(l)}</span> : done && Number((l as LineP & { closed_short?: number }).closed_short) > 0 ? <span className="pill ok" title="Closed short by a Normal pick">Picked ✓ · {fmtQty(Number((l as LineP & { closed_short?: number }).closed_short))} short</span> : done ? <span className="pill ok">Picked ✓ · Dispatched</span> : pk ? <span className="pill accent">Part picked</span> : <span className="pill mute">To pick</span>}</td>
                     <td>{canEdit && !done && <button className="btn sm primary" onClick={() => setPicking(l)}>{pk ? 'Pick more' : 'Pick'}</button>}</td>
                   </tr>
                 );
@@ -182,6 +218,16 @@ function PickModal({ week, line, onClose, onDone }: { week: string; line: LineP;
   const [lastMode, setLastMode] = useState<'cut' | 'full' | 'leave'>('cut');
   const [kind, setKindS] = useState<'normal' | 'offsite'>(() => { try { return localStorage.getItem('mas-pick-kind') === 'offsite' ? 'offsite' : 'normal'; } catch { return 'normal'; } });
   const [closeShort, setCloseShort] = useState(false);
+  // the admin's pick rules (Settings → Pick rules)
+  const [rules, setRules] = useState({ fullRollPct: 10, defaultPickKind: 'normal' as 'normal' | 'offsite', allowOffsite: true, allowNormalShort: true, allowNormalFull: true });
+  useEffect(() => {
+    api<{ settings: typeof rules }>('/api/settings').then((r) => {
+      setRules(r.settings);
+      let saved: string | null = null; try { saved = localStorage.getItem('mas-pick-kind'); } catch { /* private mode */ }
+      const k = r.settings.allowOffsite ? ((saved as 'normal' | 'offsite' | null) || r.settings.defaultPickKind) : 'normal';
+      setKindS(k);
+    }).catch(() => {});
+  }, []);
   const [checkedOk, setCheckedOk] = useState(false);
   const [overOk, setOverOk] = useState(false);
   const [choosing, setChoosing] = useState<ManualRoll | null>(null);
@@ -204,7 +250,7 @@ function PickModal({ week, line, onClose, onDone }: { week: string; line: LineP;
   const nSel = Object.keys(sel).length;
   const diff = r3(total - remaining);
   const lastOn = !!(last && (sel[last.pallet] || lastMode === 'leave'));
-  const lastSmall = !!last && (last.full - last.cut) <= Math.max(0.1 * Number(line.qty || remaining), 1e-9);
+  const lastSmall = !!last && (last.full - last.cut) <= Math.max((rules.fullRollPct / 100) * Number(line.qty || remaining), 1e-9);
   const setLastTo = (m: 'cut' | 'full' | 'leave') => {
     if (!last) return;
     setLastMode(m);
@@ -277,9 +323,9 @@ function PickModal({ week, line, onClose, onDone }: { week: string; line: LineP;
             <button type="button" role="radio" aria-checked={kind === 'normal'} className={kind === 'normal' ? 'on' : ''} onClick={() => setKind('normal')}>
               <b>Normal</b><span>Full roll or a little less allowed</span>
             </button>
-            <button type="button" role="radio" aria-checked={kind === 'offsite'} className={kind === 'offsite' ? 'on' : ''} onClick={() => setKind('offsite')}>
+            {rules.allowOffsite && <button type="button" role="radio" aria-checked={kind === 'offsite'} className={kind === 'offsite' ? 'on' : ''} onClick={() => setKind('offsite')}>
               <b>Offsite</b><span>Exact QTY only</span>
-            </button>
+            </button>}
           </div>
           <button type="button" className="btn sm" onClick={onClose} aria-label="Close">✕</button>
         </div>
@@ -363,12 +409,12 @@ function PickModal({ week, line, onClose, onDone }: { week: string; line: LineP;
                   <button type="button" role="radio" aria-checked={lastMode === 'cut'} className={lastMode === 'cut' ? 'on' : ''} onClick={() => setLastTo('cut')}>
                     <b>Cut the roll</b><span>Pick {fmtQty(last.cut)} · exact plan QTY</span>
                   </button>
-                  <button type="button" role="radio" aria-checked={lastMode === 'full'} className={lastMode === 'full' ? 'on' : ''} onClick={() => setLastTo('full')}>
+                  {rules.allowNormalFull && <button type="button" role="radio" aria-checked={lastMode === 'full'} className={lastMode === 'full' ? 'on' : ''} onClick={() => setLastTo('full')}>
                     <b>Send full roll{lastSmall ? ' (recommended)' : ''}</b><span>Pick {fmtQty(last.full)} · +{fmt(last.full - last.cut, 2)} over plan — I confirm</span>
-                  </button>
-                  <button type="button" role="radio" aria-checked={lastMode === 'leave'} className={lastMode === 'leave' ? 'on' : ''} onClick={() => setLastTo('leave')}>
+                  </button>}
+                  {rules.allowNormalShort && <button type="button" role="radio" aria-checked={lastMode === 'leave'} className={lastMode === 'leave' ? 'on' : ''} onClick={() => setLastTo('leave')}>
                     <b>Leave this roll</b><span>Send {fmt(last.cut, 2)} less · line closed short — I confirm</span>
-                  </button>
+                  </button>}
                 </div>
               </div>
             ))}
@@ -401,7 +447,7 @@ function PickModal({ week, line, onClose, onDone }: { week: string; line: LineP;
             {choosing && <KorberChooser item={line.item} roll={choosing} taken={Object.keys(sel)} onUse={(k) => useKorber(choosing, k)} onClose={() => setChoosing(null)} />}
 
             {offsiteOver && <div className="notice bad">Offsite pick: the selected QTY is {fmt(diff, 2)} over the plan balance. Cut the last roll to the exact QTY or untick a roll.</div>}
-            {kind === 'normal' && isShort && !(lastOn && lastMode === 'leave') && (
+            {kind === 'normal' && rules.allowNormalShort && isShort && !(lastOn && lastMode === 'leave') && (
               <div className="pk-confirm soft">
                 <label><input type="checkbox" checked={closeShort} onChange={(e) => setCloseShort(e.target.checked)} />
                   <span><b>Close the line {fmt(-diff, 2)} short</b><small>Tick to treat the line as complete with this pick (no cut, nothing more to pick). Leave unticked to pick the rest later.</small></span>

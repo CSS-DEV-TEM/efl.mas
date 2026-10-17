@@ -2,7 +2,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { NEEDS_API, api, clearSession, getSession, getViewUser, setViewUser, type User } from '@/lib/api';
+import { NEEDS_API, ROLE_NAME, api, clearSession, getSession, getViewUser, setViewUser, type User } from '@/lib/api';
 import { useLive, type LiveMessage, type LiveState } from '@/lib/live';
 import { Credit, Logo } from '@/components/Brand';
 
@@ -85,7 +85,7 @@ export default function Shell({ children, admin, allowGuest }: { children: React
     { href: '/', label: 'Dashboard' },
     { href: '/upload/', label: 'Uploads' },
     { href: '/dispatch/', label: 'Pick & Dispatch' },
-    ...(user.role === 'admin' ? [{ href: '/users/', label: 'Users' }] : []),
+    ...(user.role === 'admin' ? [{ href: '/settings/', label: 'Settings' }] : []),
   ];
   const liveText = state === 'live' ? 'Live' : state === 'connecting' ? 'Connecting…' : 'Updates on activity';
 
@@ -117,7 +117,7 @@ export default function Shell({ children, admin, allowGuest }: { children: React
                     </select>
                   </label>
                 )}
-                <span className="who">{user.username}<span className="role">{user.role}</span></span>
+                <span className="who">{user.username}<span className="role">{ROLE_NAME[user.role] || user.role}</span></span>
                 <button className="btn sm" onClick={() => { clearSession(); setGuest(true); setUser({ username: 'Guest', role: 'viewer' }); if (!allowGuest) router.replace('/'); }}>Sign out</button>
               </>
             )}

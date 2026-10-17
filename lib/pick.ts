@@ -43,6 +43,8 @@ export interface PickHistory { day: string | null; requests: PickReq[]; picks: P
 
 export const ordinal = (n: number) => { const v = n % 100, s = ['th', 'st', 'nd', 'rd']; return n + (s[(v - 20) % 10] || s[v] || s[0]); };
 const hn = (v: unknown) => String(v ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+/** Korber item: Display Item Number, else the Item Number without the client code (MASKRE-1000240167 → 1000240167). */
+const korberItemKey = (display: unknown, item: unknown) => itemKey(display) || itemKey(String(item ?? '').trim().toUpperCase().replace(/^[A-Z]{2,10}-(?=[A-Z0-9])/, ''));
 const itemKey = (v: unknown) => { let s = String(v ?? '').trim(); if (/^\d+\.0+$/.test(s)) s = s.replace(/\.0+$/, ''); if (/^\d+$/.test(s)) s = s.replace(/^0+(?=\d)/, ''); return s.toUpperCase(); };
 
 /** Finds the sheet and header row holding the report's columns. */
@@ -70,8 +72,8 @@ export async function uploadPickFile(src: PickSrc, file: File) {
   const total = rows.length;
   if (src === 'korber') {
     const keys = new Set((await api<{ items: string[] }>('/api/pick/keys')).items.map(itemKey));
-    const ii = t.header.map(hn).indexOf('item number');
-    rows = rows.filter((r) => keys.has(itemKey(r[ii])));
+    const hh = t.header.map(hn), ii = hh.indexOf('item number'), di = hh.indexOf('display item number');
+    rows = rows.filter((r) => keys.has(korberItemKey(di >= 0 ? r[di] : null, r[ii])));
     if (!rows.length) throw new Error('None of the Korber rolls are for items in the plan. Upload the weekly plan first.');
   }
   if (src === 'zcoment') {
@@ -124,7 +126,8 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
         if (c === 'Pick No') return i === 0 ? pickNo : null;
         if (c === 'Shade') return p.shade ?? '';
         const k = col(PL_FROM[c]);
-        const v = k >= 0 ? raw[k] : null;
+        let v = k >= 0 ? raw[k] : null;
+        if (c === 'Item Number') { const d = col('display item number'); v = korberItemKey(d >= 0 ? raw[d] : null, v) || v; }
         return (c === 'Item Number' ? num(v) : (v ?? '')) as string | number;
       });
     });
