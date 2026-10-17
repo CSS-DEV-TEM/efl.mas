@@ -558,3 +558,6 @@ table.mini tr.gone td { opacity: .5; }
 .db-groups label { display: flex; gap: 8px; align-items: flex-start; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; cursor: pointer; }
 .db-groups small { display: block; color: var(--ink-3); font-size: 11.5px; }
 .db-confirm { border: 1px solid var(--line-strong); border-radius: 6px; padding: 6px 8px; width: 110px; margin-left: 6px; background: var(--panel); color: var(--ink); font: inherit; }
+.manual-pick { border: 1px dashed color-mix(in srgb, var(--warn) 60%, var(--line)); border-radius: 8px; padding: 10px 12px; }
+.manual-pick h3 { margin: 0 0 4px; font-size: 14px; display: flex; gap: 6px; align-items: center; }
+.kchooser { border: 1px solid var(--accent); border-radius: 8px; padding: 10px 12px; background: var(--accent-soft); }

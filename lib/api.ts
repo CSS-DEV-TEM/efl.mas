@@ -3,7 +3,7 @@
 export const API_URL = (process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8787').replace(/\/+$/, '');
 
 /** The Worker version this website needs (see API_VERSION in worker/src/index.ts). */
-export const NEEDS_API = 12;
+export const NEEDS_API = 13;
 
 export type Role = 'admin' | 'editor' | 'viewer';
 export interface User { username: string; role: Role }
