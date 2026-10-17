@@ -109,114 +109,213 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload }: { 
   );
 }
 
-const Check = ({ v, label }: { v: boolean | null | undefined; label: string }) =>
-  v === null || v === undefined ? <span className="chk na" title={`${label}: not available`}>–</span>
-    : <span className={`chk ${v ? 'ok' : 'bad'}`} title={`${label} ${v ? 'matches' : 'does not match'}`}>{v ? '✓' : '✗'}</span>;
+const CHECK_LABELS: [string, string][] = [['barcode', 'Barcode = Pallet'], ['lot', 'Vendor Batch = Lot Number'], ['hu', 'Vendor Roll No = Supplier Hu'], ['invoice', 'Invoice'], ['po', 'Purchasing Document = Po Number'], ['item', 'Item'], ['qty', 'Roll qty = Actual Qty']];
+const checkText = (c: Record<string, boolean | null>) => CHECK_LABELS.map(([k, l]) => `${c[k] === true ? '✓' : c[k] === false ? '✗' : '–'} ${l}`).join('\n');
+const r3 = (n: number) => Math.round(n * 1000) / 1000;
 
-type Sel = Record<string, { qty: string; confirmed: boolean; manual?: ManualRoll; korber?: KorberRow }>;
-/** Selects the matched rolls in order until the line's balance is covered; the last one is cut to fit. */
-function fillFrom(c: Candidates, prev: Sel): Sel {
-  const n: Sel = {};
-  let left = Math.max(0, Math.round((c.need - c.picked) * 1000) / 1000);
-  for (const r of c.rolls) {
+type SelV = { qty: string; manual?: ManualRoll; korber?: KorberRow };
+type Sel = Record<string, SelV>;
+interface LastRoll { pallet: string; hu: string | null; full: number; cut: number }
+
+/**
+ * The system's choice: full rolls (Supplier HU order) while they fit in the balance, then for the rest
+ * the roll that fits it best (the smallest one that covers it) — cut to the balance, or sent in full if the user confirms.
+ */
+function autoPlan(c: Candidates): { sel: Sel; last: LastRoll | null } {
+  let left = r3(c.need - c.picked);
+  const sel: Sel = {};
+  const avail = c.rolls.filter((r) => r.available > 1e-9);
+  for (const r of avail) {
     if (left <= 1e-9) break;
-    if (r.available <= 1e-9) continue;
-    const qv = Math.min(r.available, left);
-    n[r.pallet] = { qty: String(Math.round(qv * 1000) / 1000), confirmed: prev[r.pallet]?.confirmed ?? false };
-    left -= qv;
+    if (r.available <= left + 1e-9) { sel[r.pallet] = { qty: String(r3(r.available)) }; left = r3(left - r.available); }
   }
-  return n;
+  let last: LastRoll | null = null;
+  if (left > 1e-9) {
+    const fit = avail.filter((r) => !sel[r.pallet] && r.available >= left).sort((a, b) => a.available - b.available)[0];
+    if (fit) { sel[fit.pallet] = { qty: String(left) }; last = { pallet: fit.pallet, hu: fit.supplier_hu, full: r3(fit.available), cut: left }; }
+  }
+  return { sel, last };
 }
 
 function PickModal({ week, line, onClose, onDone }: { week: string; line: LineP; onClose: () => void; onDone: (m: string) => void }) {
   const [c, setC] = useState<Candidates | null>(null);
   const [err, setErr] = useState('');
   const [sel, setSel] = useState<Sel>({});
+  const [last, setLast] = useState<LastRoll | null>(null);
+  const [lastMode, setLastMode] = useState<'cut' | 'full'>('cut');
+  const [checkedOk, setCheckedOk] = useState(false);
+  const [overOk, setOverOk] = useState(false);
   const [choosing, setChoosing] = useState<ManualRoll | null>(null);
   const [pickNo, setPickNo] = useState('');
   const [busy, setBusy] = useState(false);
+  const [showNotes, setShowNotes] = useState(false);
+
+  const applyAuto = useCallback((x: Candidates, keepManual: Sel = {}) => {
+    const a = autoPlan(x);
+    setSel({ ...a.sel, ...keepManual }); setLast(a.last); setLastMode('cut'); setOverOk(false);
+  }, []);
   useEffect(() => {
     api<Candidates>(`/api/pick/candidates?week=${encodeURIComponent(week)}&key=${encodeURIComponent(line.key)}&date=${encodeURIComponent(line.date ?? '')}`)
-      .then((x) => { setC(x); setSel(fillFrom(x, {})); }).catch((e) => setErr(e instanceof Error ? e.message : 'Could not load rolls.'));
-  }, [week, line]);
+      .then((x) => { setC(x); applyAuto(x); }).catch((e) => setErr(e instanceof Error ? e.message : 'Could not load rolls.'));
+  }, [week, line, applyAuto]);
   useEffect(() => { const k = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); }; window.addEventListener('keydown', k); return () => window.removeEventListener('keydown', k); }, [onClose]);
 
-  const remaining = c ? Math.max(0, Math.round((c.need - c.picked) * 1000) / 1000) : 0;
-  const total = Object.values(sel).reduce((t, x) => t + (Number(x.qty) || 0), 0);
+  const remaining = c ? Math.max(0, r3(c.need - c.picked)) : 0;
+  const total = r3(Object.values(sel).reduce((t, x) => t + (Number(x.qty) || 0), 0));
+  const nSel = Object.keys(sel).length;
+  const diff = r3(total - remaining);
+  const lastOn = !!(last && sel[last.pallet]);
+  const lastSmall = !!last && (last.full - last.cut) <= Math.max(0.1 * Number(line.qty || remaining), 1e-9);
+  const setLastTo = (m: 'cut' | 'full') => {
+    if (!last) return;
+    setLastMode(m);
+    setSel((s) => (s[last.pallet] ? { ...s, [last.pallet]: { ...s[last.pallet], qty: String(m === 'full' ? last.full : last.cut) } } : s));
+  };
   const toggle = (r: Candidate) => setSel((s) => {
     const n = { ...s };
     if (n[r.pallet]) delete n[r.pallet];
-    else { const left = Math.max(0, remaining - Object.values(n).reduce((t, x) => t + (Number(x.qty) || 0), 0)); n[r.pallet] = { qty: String(Math.round(Math.min(r.available, left || r.available) * 1000) / 1000), confirmed: false }; }
+    else { const left = r3(remaining - Object.values(n).reduce((t, x) => t + (Number(x.qty) || 0), 0)); n[r.pallet] = { qty: String(r3(left > 1e-9 ? Math.min(r.available, left) : r.available)) }; }
     return n;
   });
-  const autoFill = () => { if (c) setSel((s) => ({ ...fillFrom(c, s), ...Object.fromEntries(Object.entries(s).filter(([, x]) => x.manual)) })); };
   // manual pick is only for the balance the matched rolls cannot cover
   const shortfall = c ? (c.shortfall ?? remaining) : 0;
   const manualTotal = Object.values(sel).filter((x) => x.manual).reduce((t, x) => t + (Number(x.qty) || 0), 0);
-  const manualLeft = Math.max(0, Math.round((shortfall - manualTotal) * 1000) / 1000);
-  const unconfirmed = c ? [
-    ...c.rolls.filter((r) => sel[r.pallet] && !sel[r.pallet].manual && r.needsConfirm && !sel[r.pallet].confirmed).map((r) => ({ pallet: r.pallet, why: r.warnings.join('; ') })),
-    ...Object.entries(sel).filter(([, x]) => x.manual && !x.confirmed).map(([pallet, x]) => ({ pallet, why: `chosen by hand for roll ${x.manual!.roll_no || '?'}` })),
-  ] : [];
+  const manualLeft = Math.max(0, r3(shortfall - manualTotal));
   const manualSel = Object.entries(sel).filter(([, x]) => x.manual);
   const useKorber = (m: ManualRoll, k: KorberRow) => {
     setChoosing(null);
     if (c?.rolls.some((r) => r.pallet === k.pallet)) { if (!sel[k.pallet]) toggle(c.rolls.find((r) => r.pallet === k.pallet)!); return; }
     if (manualLeft <= 1e-9) return;
-    setSel((x) => ({ ...x, [k.pallet]: { qty: String(Math.round(Math.min(k.available, manualLeft) * 1000) / 1000), confirmed: false, manual: m, korber: k } }));
+    setSel((x) => ({ ...x, [k.pallet]: { qty: String(r3(Math.min(k.available, manualLeft))), manual: m, korber: k } }));
   };
+  // rolls the user has to look at before picking: a check that did not pass, or chosen by hand
+  const flagged = c ? [
+    ...c.rolls.filter((r) => sel[r.pallet] && r.needsConfirm).map((r) => ({ pallet: r.pallet, why: `${r.supplier_hu ?? ''} ${r.warnings.join('; ')}`.trim() })),
+    ...manualSel.map(([pallet, x]) => ({ pallet, why: `chosen by hand for roll ${x.manual!.roll_no || '?'}` })),
+  ] : [];
+  const overByFullRoll = lastOn && lastMode === 'full';
+  const needOverOk = diff > 0.0005 && remaining > 0 && !overByFullRoll;
+  const blocked = !nSel || (flagged.length > 0 && !checkedOk) || (needOverOk && !overOk) || Object.values(sel).some((x) => !(Number(x.qty) > 0));
+
   const save = async () => {
     if (!c) return;
     setBusy(true); setErr('');
     try {
       const r = await api<{ label: string; qty: number; rolls: number; day: string }>('/api/pick', { method: 'POST', body: {
-        week, key: line.key, date: line.date, pickNo: pickNo.trim() || null,
-        rolls: Object.entries(sel).map(([pallet, x]) => ({ pallet, qty: Number(x.qty), confirmed: x.confirmed, ...(x.manual ? { manual: x.manual } : {}) })),
+        week, key: line.key, date: line.date, pickNo: pickNo.trim() || null, overConfirmed: diff > 0.0005 ? (overByFullRoll || overOk) : false,
+        rolls: Object.entries(sel).map(([pallet, x]) => ({ pallet, qty: Number(x.qty), confirmed: checkedOk, ...(x.manual ? { manual: x.manual } : {}) })),
       } });
       onDone(`${r.label} pick of ${r.day}: ${r.rolls} roll${r.rolls === 1 ? '' : 's'}, ${fmt(r.qty, 2)} — ${line.so} / ${line.li}`);
     } catch (e) { setErr(e instanceof Error ? e.message : 'Pick failed.'); } finally { setBusy(false); }
   };
 
+  const open = c ? c.rolls.filter((r) => r.available > 1e-9) : [];
+  const gone = c ? c.rolls.filter((r) => r.available <= 1e-9) : [];
   return (
     <div className="modal-back" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="modal xwide" role="dialog" aria-modal="true" aria-labelledby="pk-title">
+      <div className="modal xwide pkm" role="dialog" aria-modal="true" aria-labelledby="pk-title">
         <div className="modal-head">
           <div>
-            <h2 id="pk-title">Pick {line.so} / {line.li} / {line.item}</h2>
-            <p className="sub" style={{ margin: 0 }}>{fmtDate(line.date)} · {line.plant} · plan QTY {fmtQty(line.qty)}{c ? <> · already picked <b>{fmtQty(c.picked)}</b> · to pick <b>{fmtQty(remaining)}</b></> : ''}</p>
+            <h2 id="pk-title">Pick {line.so} / {line.li}</h2>
+            <p className="sub" style={{ margin: 0 }}>Item {line.item} · {fmtDate(line.date)} · {line.plant || '–'}</p>
           </div>
           <button type="button" className="btn sm" onClick={onClose} aria-label="Close">✕</button>
         </div>
+
+        <div className="pk-stats">
+          <div><span>Plan QTY</span><b>{fmtQty(line.qty)}</b></div>
+          <div><span>Already picked</span><b>{c ? fmtQty(c.picked) : '…'}</b></div>
+          <div className="em"><span>To pick</span><b>{c ? fmtQty(remaining) : '…'}</b></div>
+          <div><span>Selected</span><b>{fmt(total, 2)}</b><small>{nSel} roll{nSel === 1 ? '' : 's'}</small></div>
+          <div className={!c ? '' : Math.abs(diff) <= 0.0005 ? 'ok' : diff > 0 ? 'warn' : 'short'}>
+            <span>{!c ? 'Status' : Math.abs(diff) <= 0.0005 ? 'Status' : diff > 0 ? 'Over plan' : 'Still to pick'}</span>
+            <b>{!c ? '…' : Math.abs(diff) <= 0.0005 ? 'Exact ✓' : fmt(Math.abs(diff), 2)}</b>
+          </div>
+        </div>
+
         {!c && !err && <p className="muted">Matching ZMMBE → ZINR → ZCOMENT → Korber…</p>}
         {c && (
           <>
             <div className="pk-chain">
               {c.lots.map((l) => (
                 <span key={l.lot} className={`pk-lot ${l.qty_ok ? '' : 'warn'}`} title={`Batch ${l.batch}${l.sloc ? ' · St Loc ' + l.sloc : ''}${l.invoice ? ' · invoice ' + l.invoice : ''}`}>
-                  Lot <b>{l.lot}</b> · batch {l.batch} · {fmtQty(l.qty)} {l.qty_ok ? '= UR ✓' : `≠ UR ${fmtQty(l.ur)}`} · {l.rolls} roll{l.rolls === 1 ? '' : 's'} ({fmtQty(l.roll_sum)})
+                  Lot <b>{l.lot}</b> · batch {l.batch} · {fmtQty(l.qty)} {l.qty_ok ? '= UR ✓' : `≠ UR ${fmtQty(l.ur)}`} · {l.rolls} roll{l.rolls === 1 ? '' : 's'}
                 </span>
               ))}
               {!c.lots.length && <span className="pk-lot warn">No ZINR lot matched</span>}
+              {c.steps.length > 0 && <button type="button" className="linkish" onClick={() => setShowNotes((v) => !v)}>{showNotes ? 'Hide' : 'Show'} {c.steps.length} note{c.steps.length === 1 ? '' : 's'}</button>}
             </div>
-            {c.steps.length > 0 && <div className="notice warn" style={{ fontSize: 12.5 }}>{c.steps.slice(0, 6).map((s, i) => <div key={i}>{s}</div>)}{c.steps.length > 6 && <div>… and {c.steps.length - 6} more</div>}</div>}
-            {!c.rolls.length ? <p className="muted">No Korber pallet matched on Pallet, Lot, Supplier Hu, Invoice and Po for this line.{c.manual?.length ? ' Use Manual pick below.' : ' Check that ZINR, ZCOMENT VIEW and Korber are uploaded and current.'}</p> : (
-              <div className="table-wrap" style={{ maxHeight: 380 }}>
+            {showNotes && <div className="notice warn" style={{ fontSize: 12.5 }}>{c.steps.map((s, i) => <div key={i}>{s}</div>)}</div>}
+
+            <div className="pk-sec">
+              <div className="pk-sec-head">
+                <h3>Matched rolls <span className="pill ok">{open.length}</span>{gone.length > 0 && <span className="muted small"> · {gone.length} already picked</span>}</h3>
+                <span className="muted small">Barcode, Lot, Supplier Hu, Invoice and Po all match. The system selects them for the plan QTY.</span>
+                <span style={{ flex: 1 }} />
+                {open.length > 0 && <button type="button" className="btn sm" onClick={() => applyAuto(c, Object.fromEntries(manualSel))}>Auto select</button>}
+                {nSel > 0 && <button type="button" className="btn sm" onClick={() => { setSel({}); setLast(null); }}>Clear</button>}
+              </div>
+              {!c.rolls.length ? <p className="muted">No Korber roll matched for this line.{c.manual?.length ? ' See “Not matched” below.' : ' Check that ZINR, ZCOMENT VIEW and Korber are uploaded and current.'}</p> : (
+                <div className="table-wrap" style={{ maxHeight: 360 }}>
+                  <table className="mini pk-table">
+                    <thead><tr><th /><th>Supplier HU</th><th>Pallet</th><th>Location</th><th>Shade</th><th className="n">Available</th><th className="n">Pick qty</th><th>Match</th></tr></thead>
+                    <tbody>{[...open, ...gone].map((r) => {
+                      const s = sel[r.pallet], isGone = r.available <= 1e-9, isLast = lastOn && last!.pallet === r.pallet;
+                      return (
+                        <tr key={r.pallet} className={`${s ? 'picked' : ''} ${isGone ? 'gone' : ''}`} onClick={(e) => { if (!isGone && (e.target as HTMLElement).tagName !== 'INPUT') toggle(r); }}>
+                          <td><input type="checkbox" disabled={isGone} checked={!!s} onChange={() => toggle(r)} aria-label={`Pick ${r.pallet}`} /></td>
+                          <td><b>{r.supplier_hu}</b></td>
+                          <td className="mono">{r.pallet}</td><td>{r.location}</td><td><b>{r.shade}</b></td>
+                          <td className="n">{isGone ? <span className="pill mute" title={r.picks.map((p) => `${p.day} ${p.by_user}: ${p.qty}`).join('\n')}>picked</span>
+                            : <>{fmtQty(r.available)}{r.picked_before > 0 && <span className="pill accent" style={{ marginLeft: 4 }} title={`Picked before: ${r.picks.map((p) => `${p.day} ${p.by_user} ${p.qty}`).join(', ')}`}>balance</span>}</>}</td>
+                          <td className="n">{s ? <span className="pk-qty">
+                            {isLast && <span className={`pill ${lastMode === 'full' ? 'warn' : 'accent'}`}>{lastMode === 'full' ? 'full roll' : 'cut'}</span>}
+                            <input className="as-search" type="number" step="0.001" min="0.001" max={r.available} value={s.qty} onClick={(e) => e.stopPropagation()}
+                              onChange={(e) => setSel((x) => ({ ...x, [r.pallet]: { ...x[r.pallet], qty: e.target.value } }))} aria-label="Pick qty" />
+                          </span> : ''}</td>
+                          <td>{r.needsConfirm ? <span className="pill warn" title={`${r.warnings.join('\n')}\n\n${checkText(r.checks)}`}>Check: {r.warnings[0]}</span>
+                            : <span className="pill ok" title={checkText(r.checks)}>All match ✓</span>}</td>
+                        </tr>
+                      );
+                    })}</tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            {lastOn && last && (
+              <div className={`pk-last ${lastSmall ? 'small-over' : ''}`}>
+                <div>
+                  <b>Last roll {last.hu || ''}</b> <span className="mono">{last.pallet}</span>
+                  <div className="muted small">The plan needs {fmtQty(last.cut)} more; this roll has {fmtQty(last.full)}.{lastSmall ? ` Sending it in full is only ${fmt(last.full - last.cut, 2)} over the plan — no cut roll.` : ''}</div>
+                </div>
+                <div className="pk-choice" role="radiogroup" aria-label="Last roll">
+                  <button type="button" role="radio" aria-checked={lastMode === 'cut'} className={lastMode === 'cut' ? 'on' : ''} onClick={() => setLastTo('cut')}>
+                    <b>Cut the roll</b><span>Pick {fmtQty(last.cut)} · exact plan QTY</span>
+                  </button>
+                  <button type="button" role="radio" aria-checked={lastMode === 'full'} className={lastMode === 'full' ? 'on' : ''} onClick={() => setLastTo('full')}>
+                    <b>Send full roll{lastSmall ? ' (recommended)' : ''}</b><span>Pick {fmtQty(last.full)} · +{fmt(last.full - last.cut, 2)} over plan — I confirm</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {(c.manual?.length ?? 0) > 0 && shortfall > 1e-9 && (
+              <div className="manual-pick">
+                <h3>Not matched — pick by hand <span className="pill warn">{c.manual!.length}</span></h3>
+                <p className="sub" style={{ margin: '0 0 6px' }}>The matched rolls leave <b>{fmtQty(shortfall)}</b>{manualTotal > 0 && manualLeft > 1e-9 ? <> (<b>{fmtQty(manualLeft)}</b> still open)</> : ''}. Only this balance can be picked by hand: choose a Korber roll (search or scan pallet, lot or supplier HU).</p>
                 <table className="mini">
-                  <thead><tr><th /><th>Pallet</th><th>Location</th><th>Supplier HU</th><th>Lot</th><th>Shade</th><th className="n">Korber qty</th><th className="n">Roll qty</th><th className="n">Available</th>
-                    <th title="Item · Lot · Supplier HU · Invoice · Po · Qty">Checks</th><th className="n">Pick qty</th><th>Confirm</th></tr></thead>
-                  <tbody>{c.rolls.map((r) => {
-                    const s = sel[r.pallet], gone = r.available <= 1e-9;
+                  <thead><tr><th>Roll</th><th>ZCOMENT barcode</th><th>Shade</th><th className="n">Roll qty</th><th>Why it did not match</th><th>Korber roll</th><th className="n">Pick qty</th></tr></thead>
+                  <tbody>{c.manual!.map((m, i) => {
+                    const chosen = manualSel.find(([, x]) => x.manual === m);
                     return (
-                      <tr key={r.pallet} className={`${s ? 'picked' : ''} ${gone ? 'gone' : ''}`}>
-                        <td><input type="checkbox" disabled={gone} checked={!!s} onChange={() => toggle(r)} aria-label={`Pick ${r.pallet}`} /></td>
-                        <td className="mono">{r.pallet}</td><td>{r.location}</td><td>{r.supplier_hu}</td><td>{r.lot}</td><td><b>{r.shade}</b></td>
-                        <td className="n">{fmtQty(r.actual_qty)}</td><td className="n">{fmtQty(r.roll_qty)}</td>
-                        <td className="n">{gone ? <span className="pill mute" title={r.picks.map((p) => `${p.day} ${p.by_user}: ${p.qty}`).join('\n')}>picked</span> : r.picked_before ? <span title={`Picked before: ${r.picks.map((p) => `${p.day} ${p.by_user} ${p.qty}`).join(', ')}`}>{fmtQty(r.available)} <span className="pill accent">balance</span></span> : fmtQty(r.available)}</td>
-                        <td className="checks"><Check v={r.checks.item} label="Item" /><Check v={r.checks.lot} label="Lot" /><Check v={r.checks.hu} label="Supplier HU" /><Check v={r.checks.invoice} label="Invoice" /><Check v={r.checks.po} label="Po Number" /><Check v={r.checks.qty} label="Qty" /></td>
-                        <td className="n">{s ? <input className="as-search" type="number" step="0.001" min="0.001" max={r.available} style={{ width: 92 }} value={s.qty}
-                          onChange={(e) => setSel((x) => ({ ...x, [r.pallet]: { ...x[r.pallet], qty: e.target.value } }))} aria-label="Pick qty" /> : ''}</td>
-                        <td>{r.needsConfirm ? (s ? <label className="conf" title={r.warnings.join('\n')}><input type="checkbox" checked={s.confirmed} onChange={(e) => setSel((x) => ({ ...x, [r.pallet]: { ...x[r.pallet], confirmed: e.target.checked } }))} /> Confirmed</label>
-                          : <span className="pill warn" title={r.warnings.join('\n')}>check</span>) : ''}</td>
+                      <tr key={i} className={chosen ? 'picked' : ''}>
+                        <td><b>{m.roll_no || '–'}</b></td><td className="mono">{m.barcode || <span className="muted">none</span>}</td><td><b>{m.shade}</b></td><td className="n">{fmtQty(m.roll_qty)}</td>
+                        <td className="muted small">{m.reason}</td>
+                        <td>{chosen ? <span className="mono">{chosen[0]} <button className="btn sm" onClick={() => setSel((x) => { const n = { ...x }; delete n[chosen[0]]; return n; })} aria-label="Remove">✕</button></span>
+                          : <button className="btn sm" disabled={manualLeft <= 1e-9} title={manualLeft <= 1e-9 ? 'The balance is already covered' : undefined} onClick={() => setChoosing(m)}>Choose Korber roll…</button>}</td>
+                        <td className="n">{chosen ? <input className="as-search" type="number" step="0.001" min="0.001" max={Math.min(chosen[1].korber?.available ?? Infinity, r3(shortfall - manualTotal + (Number(chosen[1].qty) || 0)))} style={{ width: 92 }} value={chosen[1].qty}
+                          onChange={(e) => setSel((x) => ({ ...x, [chosen[0]]: { ...x[chosen[0]], qty: e.target.value } }))} aria-label="Pick qty" /> : ''}</td>
                       </tr>
                     );
                   })}</tbody>
@@ -224,48 +323,35 @@ function PickModal({ week, line, onClose, onDone }: { week: string; line: LineP;
               </div>
             )}
             {(c.manual?.length ?? 0) > 0 && shortfall <= 1e-9 && (
-              <p className="muted small" style={{ margin: '8px 0 0' }}>{c.manual!.length} shade-report roll{c.manual!.length === 1 ? ' has' : 's have'} no matching Korber pallet, but the matched rolls cover the line, so no manual pick is needed.</p>
-            )}
-            {(c.manual?.length ?? 0) > 0 && shortfall > 1e-9 && (
-              <div className="manual-pick">
-                <h3>Manual pick · balance {fmtQty(shortfall)} <span className="pill warn">{c.manual!.length}</span></h3>
-                <p className="sub" style={{ margin: '0 0 6px' }}>The matched rolls leave <b>{fmtQty(shortfall)}</b> to pick{manualTotal > 0 && manualLeft > 1e-9 ? <> (<b>{fmtQty(manualLeft)}</b> still open)</> : ''}. Only that balance can be picked by hand: choose the Korber roll for a roll that did not match (use a suggestion, or search / scan pallet, lot or supplier HU); it is always checked with “Confirmed”.</p>
-                <table className="mini">
-                  <thead><tr><th>Roll</th><th>ZCOMENT barcode</th><th>Insp. lot</th><th>Vendor batch</th><th>Shade</th><th className="n">Roll qty</th><th>Why</th><th>Korber roll</th><th className="n">Pick qty</th><th>Confirm</th></tr></thead>
-                  <tbody>{c.manual!.map((m, i) => {
-                    const chosen = manualSel.find(([, x]) => x.manual === m);
-                    return (
-                      <tr key={i} className={chosen ? 'picked' : ''}>
-                        <td><b>{m.roll_no || '–'}</b></td><td className="mono">{m.barcode || <span className="muted">none</span>}</td><td>{m.lot}</td><td>{m.vendor_batch}</td><td><b>{m.shade}</b></td><td className="n">{fmtQty(m.roll_qty)}</td>
-                        <td className="muted small">{m.reason}</td>
-                        <td>{chosen ? <span className="mono">{chosen[0]} <button className="btn sm" onClick={() => setSel((x) => { const n = { ...x }; delete n[chosen[0]]; return n; })} aria-label="Remove">✕</button></span>
-                          : <span className="sugg">
-                            {(m.suggest || []).filter((k) => k.available > 1e-9 && !sel[k.pallet]).slice(0, 2).map((k) => (
-                              <button key={k.pallet} className="btn sm" disabled={manualLeft <= 1e-9} title={`Same Lot, Supplier Hu, Invoice and Po · ${k.location ?? ''} · ${fmtQty(k.available)} available`} onClick={() => useKorber(m, k)}>Use {k.pallet}</button>
-                            ))}
-                            <button className="btn sm" disabled={manualLeft <= 1e-9} title={manualLeft <= 1e-9 ? 'The balance is already covered' : undefined} onClick={() => setChoosing(m)}>Choose Korber roll…</button>
-                          </span>}</td>
-                        <td className="n">{chosen ? <input className="as-search" type="number" step="0.001" min="0.001" max={Math.min(chosen[1].korber?.available ?? Infinity, Math.round((shortfall - manualTotal + (Number(chosen[1].qty) || 0)) * 1000) / 1000)} style={{ width: 92 }} value={chosen[1].qty}
-                          onChange={(e) => setSel((x) => ({ ...x, [chosen[0]]: { ...x[chosen[0]], qty: e.target.value } }))} aria-label="Pick qty" /> : ''}</td>
-                        <td>{chosen ? <label className="conf"><input type="checkbox" checked={chosen[1].confirmed} onChange={(e) => setSel((x) => ({ ...x, [chosen[0]]: { ...x[chosen[0]], confirmed: e.target.checked } }))} /> Confirmed</label> : ''}</td>
-                      </tr>
-                    );
-                  })}</tbody>
-                </table>
-              </div>
+              <p className="muted small" style={{ margin: 0 }}>{c.manual!.length} shade-report roll{c.manual!.length === 1 ? ' does' : 's do'} not match a Korber roll, but the matched rolls cover the line — nothing to pick by hand.</p>
             )}
             {choosing && <KorberChooser item={line.item} roll={choosing} taken={Object.keys(sel)} onUse={(k) => useKorber(choosing, k)} onClose={() => setChoosing(null)} />}
-            {unconfirmed.length > 0 && <div className="notice warn">{unconfirmed.map((r) => <div key={r.pallet}><b>{r.pallet}</b>: {r.why} — tick Confirmed after checking the roll.</div>)}</div>}
+
+            {(flagged.length > 0 || needOverOk) && (
+              <div className="pk-confirm">
+                {flagged.length > 0 && (
+                  <label><input type="checkbox" checked={checkedOk} onChange={(e) => setCheckedOk(e.target.checked)} />
+                    <span><b>I checked {flagged.length === 1 ? 'this roll' : `these ${flagged.length} rolls`}</b>{flagged.map((f) => <small key={f.pallet}><span className="mono">{f.pallet}</span> — {f.why}</small>)}</span>
+                  </label>
+                )}
+                {needOverOk && (
+                  <label><input type="checkbox" checked={overOk} onChange={(e) => setOverOk(e.target.checked)} />
+                    <span><b>Send {fmt(diff, 2)} over the plan balance</b><small>The selected QTY is more than the {fmtQty(remaining)} still to pick.</small></span>
+                  </label>
+                )}
+              </div>
+            )}
           </>
         )}
         {err && <div className="notice bad">{err}</div>}
         <div className="modal-foot">
-          {c && c.rolls.length > 0 && <button type="button" className="btn" onClick={autoFill} disabled={remaining <= 0}>Select rolls for {fmtQty(remaining)}</button>}
           <label className="pk-no">HJ Pick No <input className="as-search" value={pickNo} onChange={(e) => setPickNo(e.target.value)} placeholder="e.g. 21204655" style={{ width: 130 }} /></label>
-          <span className="pk-total">Selected <b>{fmt(total, 2)}</b>{c ? <> / {fmtQty(remaining)}</> : ''}{total > remaining + 1e-6 && remaining > 0 ? <span className="pill warn" style={{ marginLeft: 6 }}>over by {fmt(total - remaining, 2)}</span> : ''}</span>
           <span style={{ flex: 1 }} />
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
-          <button type="button" className="btn primary" disabled={busy || !Object.keys(sel).length || unconfirmed.length > 0} onClick={save}>{busy ? 'Saving…' : `Pick ${Object.keys(sel).length} roll${Object.keys(sel).length === 1 ? '' : 's'}`}</button>
+          <button type="button" className="btn primary" disabled={busy || blocked} onClick={save}
+            title={blocked && nSel ? (flagged.length && !checkedOk ? 'Tick “I checked” first' : needOverOk && !overOk ? 'Confirm the over-plan QTY first' : '') : undefined}>
+            {busy ? 'Saving…' : `Pick ${nSel} roll${nSel === 1 ? '' : 's'} · ${fmt(total, 2)}`}
+          </button>
         </div>
       </div>
     </div>
