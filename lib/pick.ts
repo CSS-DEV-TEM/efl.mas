@@ -23,6 +23,8 @@ export interface ManualRoll { lot: string; batch: string; material: string; vend
 export interface KorberRow { pallet: string; item: string; lot: string | null; qty: number; uom: string | null; invoice: string | null; location: string | null; supplier_hu: string | null; status: string | null; available: number; picked_before: number }
 export interface Candidates {
   manual?: ManualRoll[];
+  /** Available QTY of the Barcode = Pallet rolls, and the balance they cannot cover (only that is picked by hand). */
+  matchedAvail?: number; shortfall?: number;
   line: { so: string; li: string; item: string; qty: number; plant: string | null; key: string; week: string; date: string };
   need: number; picked: number; stock: { batch: string; ur: number; sloc: string }[]; lots: LotInfo[]; rolls: Candidate[]; steps: string[];
 }
