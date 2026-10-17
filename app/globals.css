@@ -532,3 +532,23 @@ table.mini tr.picked td { background: var(--accent-soft); }
 .tcell-in.bad { border-color: var(--bad); box-shadow: 0 0 0 2px color-mix(in srgb, var(--bad) 30%, transparent); }
 .pos-c { color: var(--ok); }
 .psum td, .psum th { padding-left: 6px; padding-right: 6px; }
+
+/* picking */
+.pick-ups { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 10px; margin-top: 8px; }
+.pick-up { display: grid; gap: 6px; align-content: start; padding: 12px; border: 1px dashed var(--line-strong); border-radius: 8px; background: var(--panel-2); }
+.pick-up .btn { justify-self: start; }
+.small { font-size: 12px; }
+.modal.xwide { width: min(1180px, 100%); }
+.pk-chain { display: flex; flex-wrap: wrap; gap: 6px; }
+.pk-lot { font-size: 12px; padding: 3px 9px; border-radius: 999px; background: color-mix(in srgb, var(--ok) 12%, transparent); color: var(--ink-2); }
+.pk-lot.warn { background: color-mix(in srgb, var(--warn) 16%, transparent); }
+table.mini td.checks { white-space: nowrap; }
+.chk { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 4px; font-size: 11px; font-weight: 700; margin-right: 2px; }
+.chk.ok { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+.chk.bad { background: color-mix(in srgb, var(--bad) 18%, transparent); color: var(--bad); }
+.chk.na { color: var(--ink-3); }
+.conf { display: inline-flex; gap: 4px; align-items: center; font-size: 12px; font-weight: 600; color: var(--warn); white-space: nowrap; }
+.pk-no { display: inline-flex; gap: 6px; align-items: center; font-size: 12.5px; color: var(--ink-2); }
+.pk-total { font-size: 13px; }
+table.mini tr.gone td { opacity: .5; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }

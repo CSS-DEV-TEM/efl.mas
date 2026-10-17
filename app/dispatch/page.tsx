@@ -9,6 +9,7 @@ import { colLetter, readWorkbook, type Grid } from '@/lib/mapping';
 import { takePendingDispatch } from '@/lib/handoff';
 import AssignDispatch from '@/components/AssignDispatch';
 import OverPlan from '@/components/OverPlan';
+import PickWorkspace from '@/components/PickWorkspace';
 
 export default function Page() {
   return <Shell><Dispatch /></Shell>;
@@ -97,6 +98,10 @@ function Dispatch() {
   const [sending, setSending] = useState(false);
   const [over, setOver] = useState(false);
   const [show, setShow] = useState<'items' | 'lines' | 'pallets'>('items');
+  // Pick (ready-to-pull lines, pick history, packing list) or Dispatch (dispatch file upload and matching)
+  const [tab, setTab] = useState<'pick' | 'dispatch'>('pick');
+  useEffect(() => { if (location.hash === '#dispatch') setTab('dispatch'); }, []);
+  const pickTab = (t: 'pick' | 'dispatch') => { setTab(t); try { window.history.replaceState(null, '', t === 'dispatch' ? '#dispatch' : location.pathname); } catch { /* ignore */ } };
   const input = useRef<HTMLInputElement>(null);
   const weekRef = useRef(week); weekRef.current = week;
 
@@ -203,6 +208,12 @@ function Dispatch() {
         </div>
       </div>
       {err && <div className="notice bad">{err}</div>}
+      <div className="tabs" role="tablist" aria-label="Dispatch view">
+        <button role="tab" aria-selected={tab === 'pick'} className={tab === 'pick' ? 'on' : ''} onClick={() => pickTab('pick')}>Pick &amp; Packing List</button>
+        <button role="tab" aria-selected={tab === 'dispatch'} className={tab === 'dispatch' ? 'on' : ''} onClick={() => pickTab('dispatch')}>Dispatch upload</button>
+      </div>
+      {tab === 'pick' && week && plan && <PickWorkspace week={week} rows={plan.rows} canEdit={canEdit} toast={toast} reload={load} />}
+      {tab === 'dispatch' && <>
       {plan && !plan.weeks.length && <div className="notice warn">There is no weekly plan yet. Upload a plan first, then its dispatch.</div>}
 
       <section className="kpis" aria-label="Dispatch figures">
@@ -370,6 +381,7 @@ function Dispatch() {
           <div className="wk-list">{history.map((h, i) => <div key={i} className="wk-row"><span>{h.detail}</span><span className="num muted">{h.username} · {ago(h.at)}</span></div>)}</div>
         </section>
       )}
+      </>}
     </main>
   );
 }
