@@ -1,7 +1,7 @@
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Shell, { useShell } from '@/components/Shell';
-import { api } from '@/lib/api';
+import { api, userParam } from '@/lib/api';
 import { useRefreshOnActivity } from '@/lib/freshness';
 import { fmtDate, type Line, type WeekInfo } from '@/lib/calc';
 import PickWorkspace from '@/components/PickWorkspace';
@@ -24,7 +24,7 @@ function Dispatch() {
   const load = useCallback(async () => {
     try {
       const w = weekRef.current;
-      const p = await api<PullPlan>('/api/pullplan' + (w ? '?week=' + encodeURIComponent(w) : ''));
+      const p = await api<PullPlan>('/api/pullplan' + (w ? '?week=' + encodeURIComponent(w) + userParam() : userParam(true)));
       // a slower answer for a week no longer picked must not overwrite the current one
       if (weekRef.current && p.week !== weekRef.current) return;
       setPlan(p);

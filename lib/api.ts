@@ -3,7 +3,7 @@
 export const API_URL = (process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8787').replace(/\/+$/, '');
 
 /** The Worker version this website needs (see API_VERSION in worker/src/index.ts). */
-export const NEEDS_API = 17;
+export const NEEDS_API = 18;
 
 export type Role = 'admin' | 'editor' | 'viewer';
 export interface User { username: string; role: Role }
@@ -22,6 +22,13 @@ export function getSession(): Stored | null {
 }
 export function saveSession(s: Stored) { try { localStorage.setItem(KEY, JSON.stringify(s)); } catch { /* private mode */ } }
 export function clearSession() { try { localStorage.removeItem(KEY); } catch { /* ignore */ } }
+
+/** Admins and viewers can look at one user's plan / picks ('' = everyone). Editors always see their own. */
+const VIEW_KEY = 'mas-view-user';
+export function getViewUser(): string { try { return localStorage.getItem(VIEW_KEY) || ''; } catch { return ''; } }
+export function setViewUser(u: string) { try { if (u) localStorage.setItem(VIEW_KEY, u); else localStorage.removeItem(VIEW_KEY); } catch { /* private mode */ } }
+/** "&user=…" for the plan and pick-history requests (the Worker ignores it for editors). */
+export function userParam(first = false): string { const u = getViewUser(); return u ? (first ? '?' : '&') + 'user=' + encodeURIComponent(u) : ''; }
 
 export class ApiError extends Error { constructor(public status: number, msg: string) { super(msg); } }
 

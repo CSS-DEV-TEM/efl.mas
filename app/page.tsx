@@ -6,7 +6,7 @@ import Ledger, { STATUS_OPTIONS } from '@/components/Ledger';
 import { COV_COLOR } from '@/components/Charts';
 import PlantSummary from '@/components/PlantSummary';
 import type { PlantInfo } from '@/lib/summary';
-import { api } from '@/lib/api';
+import { api, userParam } from '@/lib/api';
 import { useRefreshOnActivity } from '@/lib/freshness';
 import { COVERAGES, type DispatchSummary, ago, compact, coverage, fmt, fmtDate, isDone, totals, type Coverage, type Line, type Upload, type WeekInfo } from '@/lib/calc';
 import { exportPullPlan } from '@/lib/export';
@@ -70,7 +70,7 @@ function Dashboard() {
   const load = useCallback(async () => {
     try {
       const w = weekRef.current;
-      const p = await api<PullPlan>('/api/pullplan' + (w ? '?week=' + encodeURIComponent(w) : ''));
+      const p = await api<PullPlan>('/api/pullplan' + (w ? '?week=' + encodeURIComponent(w) + userParam() : userParam(true)));
       if (w && p.week !== w) setPickedWeek(null); // that week was deleted: back to the latest
       setData(p); setErr('');
     } catch (e) { setErr(e instanceof Error ? e.message : 'Could not load data.'); }

@@ -6,7 +6,7 @@ import Shell, { useShell } from '@/components/Shell';
 import { isDispatchGrid } from '@/lib/handoff';
 import { action } from '@/lib/smart';
 import type { Line } from '@/lib/calc';
-import { api } from '@/lib/api';
+import { api, userParam } from '@/lib/api';
 import { useRefreshOnActivity } from '@/lib/freshness';
 import { ago, fmt, fmtDate, type Upload, type WeekInfo } from '@/lib/calc';
 import { TEMPLATES, downloadTemplate } from '@/lib/templates';
@@ -56,7 +56,7 @@ function Uploads() {
 
   const loadStatus = useCallback(async () => {
     try {
-      const p = await api<{ week: string | null; rev?: string | null; uploads: Upload[]; counts: { src: string; n: number }[]; weeks: WeekInfo[]; rows: Line[] }>('/api/pullplan');
+      const p = await api<{ week: string | null; rev?: string | null; uploads: Upload[]; counts: { src: string; n: number }[]; weeks: WeekInfo[]; rows: Line[] }>('/api/pullplan' + userParam(true));
       if (p.week) setReadyNow({ week: p.week, n: p.rows.filter((l) => action(l) === 'Ready to pull').length });
       setPlants(Array.from(new Set(p.rows.map((r) => r.plant || '').filter(Boolean))).sort());
       setUploads(p.uploads);

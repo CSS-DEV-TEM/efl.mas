@@ -30,7 +30,7 @@ export interface Candidates {
   line: { so: string; li: string; item: string; qty: number; plant: string | null; key: string; week: string; date: string };
   need: number; picked: number; stock: { batch: string; ur: number; sloc: string }[]; lots: LotInfo[]; rolls: Candidate[]; steps: string[];
 }
-export interface PickReq { id: number; day: string; seq: number; pick_no: string | null; week: string; line: string; so: string; li: string; item: string; plant: string | null; need: number; qty: number; rolls: number; by_user: string; at: string; cancelled_at: string | null; cancelled_by: string | null; match?: string | null }
+export interface PickReq { id: number; day: string; seq: number; pick_no: string | null; week: string; line: string; so: string; li: string; item: string; plant: string | null; need: number; qty: number; rolls: number; by_user: string; at: string; cancelled_at: string | null; cancelled_by: string | null; match?: string | null; kind?: string | null; closed?: number | null; short?: number | null }
 export interface PickRoll { id: number; req_id: number; day: string; week: string; line: string; so: string; li: string; item: string; pallet: string; qty: number; roll_qty: number; partial: number; shade: string | null; lot: string | null; insp_lot: string | null; batch: string | null; note: string | null; by_user: string; at: string; cancelled_at: string | null; korber: string | null }
 export interface PickHistory { day: string | null; requests: PickReq[]; picks: PickRoll[]; days: { day: string; n: number; open: number }[]; korberHeader: unknown[] | null }
 
@@ -101,7 +101,10 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
   const col = (name: string) => header.indexOf(name);
   const U = XLSXS.utils;
   const wb = U.book_new();
-  const summary: (string | number | null)[][] = [['Req', 'Total Qty', 'Total Rolls', 'Pick No', 'Remarks']];
+  const summary: (string | number | null)[][] = [['Req', 'Total Qty', 'Total Rolls', 'Pick No', 'Type', 'Remarks']];
+  // the admin's "All users" view: every user has a 1st, 2nd … so the sheet names carry the user
+  const multi = new Set(reqs.map((r) => r.by_user)).size > 1;
+  const sheetName = (r: PickReq) => (multi ? `${r.by_user} ${ordinal(r.seq)}` : ordinal(r.seq)).replace(/[\\/?*[\]:]/g, '').slice(0, 31);
   const korberRows: unknown[][] = [];
   for (const r of reqs) {
     const rolls = h.picks.filter((p) => p.req_id === r.id && !p.cancelled_at);
@@ -147,15 +150,16 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
     matched.forEach((row, i) => row.forEach((_, j) => style(U.encode_col(j) + (last + 2 + i), ST.match)));
     ws['!cols'] = [20.5, 16.3, 16.7, 23, 18.5, 10.8, 11.7, 15.8, 27.7, 19.8, 20, 21.3, 9.5, 14.7, 14.8].map((w) => ({ wch: w }));
     ws['!autofilter'] = { ref: `A6:O${Math.max(6, last)}` };
-    U.book_append_sheet(wb, ws, ordinal(r.seq));
-    summary.push([ordinal(r.seq), qty, rolls.length, pickNo, `${r.so} / ${r.li} / ${r.item}${cut ? ` · ${cut} cut roll${cut > 1 ? 's' : ''}` : ''}`]);
+    U.book_append_sheet(wb, ws, sheetName(r));
+    summary.push([sheetName(r), qty, rolls.length, pickNo, r.kind === 'offsite' ? 'Offsite' : 'Normal',
+      `${r.so} / ${r.li} / ${r.item}${cut ? ` · ${cut} cut roll${cut > 1 ? 's' : ''}` : ''}${r.closed ? ` · closed ${r.short ?? ''} short` : ''}${multi ? ` · ${r.by_user}` : ''}`]);
   }
   const n = summary.length;
   summary.push(['Total', null, null]);
   const sws = U.aoa_to_sheet(summary);
   sws[`B${n + 1}`] = { t: 'n', v: reqs.reduce((t, r) => t + r.qty, 0), f: `SUM(B2:B${n})` };
   sws[`C${n + 1}`] = { t: 'n', v: reqs.reduce((t, r) => t + r.rolls, 0), f: `SUM(C2:C${n})` };
-  sws['!cols'] = [{ wch: 8 }, { wch: 12 }, { wch: 12 }, { wch: 14 }, { wch: 46 }];
+  sws['!cols'] = [{ wch: multi ? 16 : 8 }, { wch: 12 }, { wch: 12 }, { wch: 14 }, { wch: 9 }, { wch: 52 }];
   U.book_append_sheet(wb, sws, 'Summary');
   if (opts.korberSheet !== false && h.korberHeader) {
     const kws = U.aoa_to_sheet([h.korberHeader as (string | number)[], ...(korberRows as (string | number)[][])]);

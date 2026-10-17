@@ -1,6 +1,6 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api } from '@/lib/api';
+import { api, userParam } from '@/lib/api';
 import { ago, avail, fmt, fmtDate, fmtQty, isDispatched, need, type Line } from '@/lib/calc';
 import { action } from '@/lib/smart';
 import {
@@ -91,7 +91,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload }: { 
                     <td className="n">{fmtQty(l.qty)}</td>
                     <td className="n">{pk ? <>{fmtQty(pk)} <span className="muted">({l.picked_rolls} roll{l.picked_rolls === 1 ? '' : 's'})</span></> : '–'}</td>
                     <td className="n"><b>{fmtQty(need(l))}</b></td><td className="n">{fmtQty(avail(l))}</td>
-                    <td>{done ? <span className="pill ok">Picked ✓ · Dispatched</span> : pk ? <span className="pill accent">Part picked</span> : <span className="pill mute">To pick</span>}</td>
+                    <td>{done && Number((l as LineP & { closed_short?: number }).closed_short) > 0 ? <span className="pill ok" title="Closed short by a Normal pick">Picked ✓ · {fmtQty(Number((l as LineP & { closed_short?: number }).closed_short))} short</span> : done ? <span className="pill ok">Picked ✓ · Dispatched</span> : pk ? <span className="pill accent">Part picked</span> : <span className="pill mute">To pick</span>}</td>
                     <td>{canEdit && !done && <button className="btn sm primary" onClick={() => setPicking(l)}>{pk ? 'Pick more' : 'Pick'}</button>}</td>
                   </tr>
                 );
@@ -142,7 +142,9 @@ function PickModal({ week, line, onClose, onDone }: { week: string; line: LineP;
   const [err, setErr] = useState('');
   const [sel, setSel] = useState<Sel>({});
   const [last, setLast] = useState<LastRoll | null>(null);
-  const [lastMode, setLastMode] = useState<'cut' | 'full'>('cut');
+  const [lastMode, setLastMode] = useState<'cut' | 'full' | 'leave'>('cut');
+  const [kind, setKindS] = useState<'normal' | 'offsite'>(() => { try { return localStorage.getItem('mas-pick-kind') === 'offsite' ? 'offsite' : 'normal'; } catch { return 'normal'; } });
+  const [closeShort, setCloseShort] = useState(false);
   const [checkedOk, setCheckedOk] = useState(false);
   const [overOk, setOverOk] = useState(false);
   const [choosing, setChoosing] = useState<ManualRoll | null>(null);
@@ -152,7 +154,7 @@ function PickModal({ week, line, onClose, onDone }: { week: string; line: LineP;
 
   const applyAuto = useCallback((x: Candidates, keepManual: Sel = {}) => {
     const a = autoPlan(x);
-    setSel({ ...a.sel, ...keepManual }); setLast(a.last); setLastMode('cut'); setOverOk(false);
+    setSel({ ...a.sel, ...keepManual }); setLast(a.last); setLastMode('cut'); setOverOk(false); setCloseShort(false);
   }, []);
   useEffect(() => {
     api<Candidates>(`/api/pick/candidates?week=${encodeURIComponent(week)}&key=${encodeURIComponent(line.key)}&date=${encodeURIComponent(line.date ?? '')}`)
@@ -164,12 +166,23 @@ function PickModal({ week, line, onClose, onDone }: { week: string; line: LineP;
   const total = r3(Object.values(sel).reduce((t, x) => t + (Number(x.qty) || 0), 0));
   const nSel = Object.keys(sel).length;
   const diff = r3(total - remaining);
-  const lastOn = !!(last && sel[last.pallet]);
+  const lastOn = !!(last && (sel[last.pallet] || lastMode === 'leave'));
   const lastSmall = !!last && (last.full - last.cut) <= Math.max(0.1 * Number(line.qty || remaining), 1e-9);
-  const setLastTo = (m: 'cut' | 'full') => {
+  const setLastTo = (m: 'cut' | 'full' | 'leave') => {
     if (!last) return;
     setLastMode(m);
-    setSel((s) => (s[last.pallet] ? { ...s, [last.pallet]: { ...s[last.pallet], qty: String(m === 'full' ? last.full : last.cut) } } : s));
+    setCloseShort(m === 'leave');
+    setSel((s) => {
+      const n = { ...s };
+      if (m === 'leave') delete n[last.pallet];
+      else n[last.pallet] = { ...(n[last.pallet] || {}), qty: String(m === 'full' ? last.full : last.cut) };
+      return n;
+    });
+  };
+  // Offsite: exact QTY only — the last roll is always cut, nothing over, no closing short
+  const setKind = (k: 'normal' | 'offsite') => {
+    setKindS(k); try { localStorage.setItem('mas-pick-kind', k); } catch { /* private mode */ }
+    if (k === 'offsite') { if (lastMode !== 'cut') setLastTo('cut'); setCloseShort(false); setOverOk(false); }
   };
   const toggle = (r: Candidate) => setSel((s) => {
     const n = { ...s };
@@ -194,18 +207,22 @@ function PickModal({ week, line, onClose, onDone }: { week: string; line: LineP;
     ...manualSel.map(([pallet, x]) => ({ pallet, why: `chosen by hand for roll ${x.manual!.roll_no || '?'}` })),
   ] : [];
   const overByFullRoll = lastOn && lastMode === 'full';
-  const needOverOk = diff > 0.0005 && remaining > 0 && !overByFullRoll;
-  const blocked = !nSel || (flagged.length > 0 && !checkedOk) || (needOverOk && !overOk) || Object.values(sel).some((x) => !(Number(x.qty) > 0));
+  const offsiteOver = kind === 'offsite' && diff > 0.0005;
+  const needOverOk = kind === 'normal' && diff > 0.0005 && remaining > 0 && !overByFullRoll;
+  const isShort = diff < -0.0005 && nSel > 0;
+  const blocked = !nSel || offsiteOver || (flagged.length > 0 && !checkedOk) || (needOverOk && !overOk) || Object.values(sel).some((x) => !(Number(x.qty) > 0));
 
   const save = async () => {
     if (!c) return;
     setBusy(true); setErr('');
     try {
       const r = await api<{ label: string; qty: number; rolls: number; day: string }>('/api/pick', { method: 'POST', body: {
-        week, key: line.key, date: line.date, pickNo: pickNo.trim() || null, overConfirmed: diff > 0.0005 ? (overByFullRoll || overOk) : false,
+        week, key: line.key, date: line.date, pickNo: pickNo.trim() || null, kind,
+        overConfirmed: kind === 'normal' && diff > 0.0005 ? (overByFullRoll || overOk) : false,
+        closeShort: kind === 'normal' && isShort && closeShort,
         rolls: Object.entries(sel).map(([pallet, x]) => ({ pallet, qty: Number(x.qty), confirmed: checkedOk, ...(x.manual ? { manual: x.manual } : {}) })),
       } });
-      onDone(`${r.label} pick of ${r.day}: ${r.rolls} roll${r.rolls === 1 ? '' : 's'}, ${fmt(r.qty, 2)} — ${line.so} / ${line.li}`);
+      onDone(`${kind === 'offsite' ? 'Offsite' : 'Normal'} ${r.label} pick of ${r.day}: ${r.rolls} roll${r.rolls === 1 ? '' : 's'}, ${fmt(r.qty, 2)} — ${line.so} / ${line.li}`);
     } catch (e) { setErr(e instanceof Error ? e.message : 'Pick failed.'); } finally { setBusy(false); }
   };
 
@@ -219,6 +236,14 @@ function PickModal({ week, line, onClose, onDone }: { week: string; line: LineP;
             <h2 id="pk-title">Pick {line.so} / {line.li}</h2>
             <p className="sub" style={{ margin: 0 }}>Item {line.item} · {fmtDate(line.date)} · {line.plant || '–'}</p>
           </div>
+          <div className="pk-kind" role="radiogroup" aria-label="Pick type">
+            <button type="button" role="radio" aria-checked={kind === 'normal'} className={kind === 'normal' ? 'on' : ''} onClick={() => setKind('normal')}>
+              <b>Normal</b><span>Full roll or a little less allowed</span>
+            </button>
+            <button type="button" role="radio" aria-checked={kind === 'offsite'} className={kind === 'offsite' ? 'on' : ''} onClick={() => setKind('offsite')}>
+              <b>Offsite</b><span>Exact QTY only</span>
+            </button>
+          </div>
           <button type="button" className="btn sm" onClick={onClose} aria-label="Close">✕</button>
         </div>
 
@@ -228,7 +253,7 @@ function PickModal({ week, line, onClose, onDone }: { week: string; line: LineP;
           <div className="em"><span>To pick</span><b>{c ? fmtQty(remaining) : '…'}</b></div>
           <div><span>Selected</span><b>{fmt(total, 2)}</b><small>{nSel} roll{nSel === 1 ? '' : 's'}</small></div>
           <div className={!c ? '' : Math.abs(diff) <= 0.0005 ? 'ok' : diff > 0 ? 'warn' : 'short'}>
-            <span>{!c ? 'Status' : Math.abs(diff) <= 0.0005 ? 'Status' : diff > 0 ? 'Over plan' : 'Still to pick'}</span>
+            <span>{!c ? 'Status' : Math.abs(diff) <= 0.0005 ? 'Status' : diff > 0 ? 'Over plan' : closeShort && kind === 'normal' ? 'Short (line closed)' : 'Still to pick'}</span>
             <b>{!c ? '…' : Math.abs(diff) <= 0.0005 ? 'Exact ✓' : fmt(Math.abs(diff), 2)}</b>
           </div>
         </div>
@@ -283,11 +308,19 @@ function PickModal({ week, line, onClose, onDone }: { week: string; line: LineP;
               )}
             </div>
 
-            {lastOn && last && (
+            {lastOn && last && (kind === 'offsite' ? (
+              <div className="pk-last">
+                <div>
+                  <b>Last roll {last.hu || ''}</b> <span className="mono">{last.pallet}</span>
+                  <div className="muted small">Offsite pick: the roll is cut to {fmtQty(last.cut)} of {fmtQty(last.full)} so the QTY is exactly the plan. A full roll or a short pick is not allowed.</div>
+                </div>
+                <span className="pill accent">Cut to {fmtQty(last.cut)}</span>
+              </div>
+            ) : (
               <div className={`pk-last ${lastSmall ? 'small-over' : ''}`}>
                 <div>
                   <b>Last roll {last.hu || ''}</b> <span className="mono">{last.pallet}</span>
-                  <div className="muted small">The plan needs {fmtQty(last.cut)} more; this roll has {fmtQty(last.full)}.{lastSmall ? ` Sending it in full is only ${fmt(last.full - last.cut, 2)} over the plan — no cut roll.` : ''}</div>
+                  <div className="muted small">The plan needs {fmtQty(last.cut)} more; this roll has {fmtQty(last.full)}. Choose how to send it.</div>
                 </div>
                 <div className="pk-choice" role="radiogroup" aria-label="Last roll">
                   <button type="button" role="radio" aria-checked={lastMode === 'cut'} className={lastMode === 'cut' ? 'on' : ''} onClick={() => setLastTo('cut')}>
@@ -296,9 +329,12 @@ function PickModal({ week, line, onClose, onDone }: { week: string; line: LineP;
                   <button type="button" role="radio" aria-checked={lastMode === 'full'} className={lastMode === 'full' ? 'on' : ''} onClick={() => setLastTo('full')}>
                     <b>Send full roll{lastSmall ? ' (recommended)' : ''}</b><span>Pick {fmtQty(last.full)} · +{fmt(last.full - last.cut, 2)} over plan — I confirm</span>
                   </button>
+                  <button type="button" role="radio" aria-checked={lastMode === 'leave'} className={lastMode === 'leave' ? 'on' : ''} onClick={() => setLastTo('leave')}>
+                    <b>Leave this roll</b><span>Send {fmt(last.cut, 2)} less · line closed short — I confirm</span>
+                  </button>
                 </div>
               </div>
-            )}
+            ))}
 
             {(c.manual?.length ?? 0) > 0 && shortfall > 1e-9 && (
               <div className="manual-pick">
@@ -327,6 +363,14 @@ function PickModal({ week, line, onClose, onDone }: { week: string; line: LineP;
             )}
             {choosing && <KorberChooser item={line.item} roll={choosing} taken={Object.keys(sel)} onUse={(k) => useKorber(choosing, k)} onClose={() => setChoosing(null)} />}
 
+            {offsiteOver && <div className="notice bad">Offsite pick: the selected QTY is {fmt(diff, 2)} over the plan balance. Cut the last roll to the exact QTY or untick a roll.</div>}
+            {kind === 'normal' && isShort && !(lastOn && lastMode === 'leave') && (
+              <div className="pk-confirm soft">
+                <label><input type="checkbox" checked={closeShort} onChange={(e) => setCloseShort(e.target.checked)} />
+                  <span><b>Close the line {fmt(-diff, 2)} short</b><small>Tick to treat the line as complete with this pick (no cut, nothing more to pick). Leave unticked to pick the rest later.</small></span>
+                </label>
+              </div>
+            )}
             {(flagged.length > 0 || needOverOk) && (
               <div className="pk-confirm">
                 {flagged.length > 0 && (
@@ -350,7 +394,7 @@ function PickModal({ week, line, onClose, onDone }: { week: string; line: LineP;
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
           <button type="button" className="btn primary" disabled={busy || blocked} onClick={save}
             title={blocked && nSel ? (flagged.length && !checkedOk ? 'Tick “I checked” first' : needOverOk && !overOk ? 'Confirm the over-plan QTY first' : '') : undefined}>
-            {busy ? 'Saving…' : `Pick ${nSel} roll${nSel === 1 ? '' : 's'} · ${fmt(total, 2)}`}
+            {busy ? 'Saving…' : `${kind === 'offsite' ? 'Offsite' : 'Normal'} pick · ${nSel} roll${nSel === 1 ? '' : 's'} · ${fmt(total, 2)}`}
           </button>
         </div>
       </div>
@@ -400,12 +444,12 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
   const [day, setDay] = useState(today());
   const [h, setH] = useState<PickHistory | null>(null);
   const [open, setOpen] = useState<number | null>(null);
-  const load = useCallback(() => { api<PickHistory>('/api/pick/history?day=' + day).then(setH).catch(() => {}); }, [day]);
+  const load = useCallback(() => { api<PickHistory>('/api/pick/history?day=' + day + userParam()).then(setH).catch(() => {}); }, [day]);
   useEffect(() => { load(); }, [load]);
   const live = (h?.requests || []).filter((r) => !r.cancelled_at);
   const cancel = async (path: string, what: string) => {
-    if (!confirm(`Cancel ${what}? The roll${path.includes('/req/') ? 's become' : ' becomes'} pickable again.`)) return;
-    try { await api(path, { method: 'DELETE' }); toast(`${what} cancelled`); load(); onChanged(); } catch (e) { toast(e instanceof Error ? e.message : 'Failed.'); }
+    if (!confirm(`Cancel ${what}? It is deleted from the pick history and the roll${path.includes('/req/') ? 's become' : ' becomes'} pickable again.`)) return;
+    try { await api(path, { method: 'DELETE' }); toast(`${what} cancelled and deleted from the history`); load(); onChanged(); } catch (e) { toast(e instanceof Error ? e.message : 'Failed.'); }
   };
   const days = Array.from(new Set([today(), ...(h?.days || []).map((d) => d.day)])).sort().reverse();
   return (
@@ -413,7 +457,7 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
       <div className="sheet-top">
         <div>
           <h2 id="ph-title">Pick history &amp; Packing List</h2>
-          <p className="sub" style={{ margin: 0 }}>Shared by everyone. A picked roll can't be picked again; a part-picked roll keeps only its balance. Cancel to free the rolls.</p>
+          <p className="sub" style={{ margin: 0 }}>Your picks of the day and your Packing List. A picked roll can't be picked again by anyone; a part-picked roll keeps only its balance. Cancel deletes the pick and frees its rolls.</p>
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
           <select className="as-search" value={day} onChange={(e) => setDay(e.target.value)} aria-label="Day">
@@ -426,25 +470,27 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
       {!h?.requests.length ? <p className="muted">No picks on {fmtDate(day)}.</p> : (
         <div className="table-wrap" style={{ maxHeight: 'none' }}>
           <table className="mini">
-            <thead><tr><th>Req</th><th>SO / LI / Item</th><th>Plant</th><th className="n">Plan QTY</th><th className="n">Picked</th><th className="n">Rolls</th><th>HJ Pick No</th><th>By</th><th /></tr></thead>
+            <thead><tr><th>Req</th><th>Type</th><th>SO / LI / Item</th><th>Plant</th><th className="n">Plan QTY</th><th className="n">Picked</th><th className="n">Rolls</th><th>HJ Pick No</th><th>By</th><th /></tr></thead>
             <tbody>{h.requests.map((r) => {
               const rolls = h.picks.filter((p) => p.req_id === r.id);
               return [
                 <tr key={r.id} className={r.cancelled_at ? 'gone' : ''} onClick={() => setOpen(open === r.id ? null : r.id)} style={{ cursor: 'pointer' }}>
-                  <td><b>{ordinal(r.seq)}</b>{r.cancelled_at && <span className="pill mute" style={{ marginLeft: 4 }}>cancelled</span>}</td>
-                  <td>{r.so} / {r.li} / {r.item}</td><td>{r.plant}</td><td className="n">{fmtQty(r.need)}</td><td className="n"><b>{fmtQty(r.qty)}</b></td><td className="n">{r.rolls}</td>
+                  <td><b>{ordinal(r.seq)}</b></td>
+                  <td><span className={`pill ${r.kind === 'offsite' ? 'accent' : 'mute'}`}>{r.kind === 'offsite' ? 'Offsite' : 'Normal'}</span></td>
+                  <td>{r.so} / {r.li} / {r.item}</td><td>{r.plant}</td><td className="n">{fmtQty(r.need)}</td>
+                  <td className="n"><b>{fmtQty(r.qty)}</b>{r.closed ? <span className="pill warn" style={{ marginLeft: 4 }} title="Line closed short">−{fmtQty(r.short ?? 0)}</span> : ''}</td><td className="n">{r.rolls}</td>
                   <td>{r.pick_no}</td><td className="muted">{r.by_user} · {ago(r.at)}</td>
-                  <td>{canEdit && !r.cancelled_at && <button className="btn sm" onClick={(e) => { e.stopPropagation(); cancel(`/api/pick/req/${r.id}`, `${ordinal(r.seq)} pick`); }}>Cancel</button>}</td>
+                  <td>{canEdit && <button className="btn sm" onClick={(e) => { e.stopPropagation(); cancel(`/api/pick/req/${r.id}`, `${ordinal(r.seq)} pick`); }}>Cancel</button>}</td>
                 </tr>,
                 open === r.id && (
-                  <tr key={r.id + 'd'}><td colSpan={9} style={{ background: 'var(--panel-2)' }}>
+                  <tr key={r.id + 'd'}><td colSpan={10} style={{ background: 'var(--panel-2)' }}>
                     <table className="mini">
                       <thead><tr><th>Pallet</th><th>Lot</th><th>Shade</th><th className="n">Roll qty</th><th className="n">Picked</th><th>Insp. lot</th><th>Note</th><th /></tr></thead>
                       <tbody>{rolls.map((p) => (
                         <tr key={p.id} className={p.cancelled_at ? 'gone' : ''}>
                           <td className="mono">{p.pallet}</td><td>{p.lot}</td><td>{p.shade}</td><td className="n">{fmtQty(p.roll_qty)}</td>
                           <td className="n">{fmtQty(p.qty)}{p.partial ? <span className="pill accent" style={{ marginLeft: 4 }}>cut</span> : ''}</td><td>{p.insp_lot}</td><td className="muted">{p.note}</td>
-                          <td>{canEdit && !p.cancelled_at && !r.cancelled_at && <button className="btn sm" onClick={() => cancel(`/api/pick/roll/${p.id}`, `roll ${p.pallet}`)}>Remove</button>}</td>
+                          <td>{canEdit && <button className="btn sm" onClick={() => cancel(`/api/pick/roll/${p.id}`, `roll ${p.pallet}`)}>Remove</button>}</td>
                         </tr>
                       ))}</tbody>
                     </table>

@@ -2,7 +2,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { NEEDS_API, api, clearSession, getSession, type User } from '@/lib/api';
+import { NEEDS_API, api, clearSession, getSession, getViewUser, setViewUser, type User } from '@/lib/api';
 import { useLive, type LiveMessage, type LiveState } from '@/lib/live';
 import { Credit, Logo } from '@/components/Brand';
 
@@ -45,6 +45,15 @@ export default function Shell({ children, admin, allowGuest }: { children: React
   useEffect(() => {
     if (!user || guest) return;
     api<{ version?: number }>('/api/health').then((h) => setOldApi((h.version ?? 0) < NEEDS_API ? h.version ?? 0 : null)).catch(() => {});
+  }, [user, guest]);
+
+  // admins and viewers choose whose plan / picks they look at; editors only ever see their own
+  const [owners, setOwners] = useState<string[] | null>(null);
+  const [viewU, setViewU] = useState('');
+  useEffect(() => {
+    if (!user || guest || user.role === 'editor') return;
+    setViewU(getViewUser());
+    api<{ owners: string[] }>('/api/owners').then((r) => setOwners(r.owners)).catch(() => {});
   }, [user, guest]);
 
   const toast = useCallback((text: string) => {
@@ -99,6 +108,15 @@ export default function Shell({ children, admin, allowGuest }: { children: React
               <Link className="btn sm primary" href="/login/">Sign in to upload / edit</Link>
             ) : (
               <>
+                {owners && (
+                  <label className="view-user" title="Whose plan and picks to show">
+                    <span>Data of</span>
+                    <select value={viewU} onChange={(e) => { setViewUser(e.target.value); location.reload(); }} aria-label="Data of">
+                      <option value="">All users</option>
+                      {owners.map((o) => <option key={o} value={o}>{o === user.username ? `${o} (me)` : o}</option>)}
+                    </select>
+                  </label>
+                )}
                 <span className="who">{user.username}<span className="role">{user.role}</span></span>
                 <button className="btn sm" onClick={() => { clearSession(); setGuest(true); setUser({ username: 'Guest', role: 'viewer' }); if (!allowGuest) router.replace('/'); }}>Sign out</button>
               </>
