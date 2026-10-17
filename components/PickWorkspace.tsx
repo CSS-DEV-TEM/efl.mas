@@ -117,22 +117,59 @@ type SelV = { qty: string; manual?: ManualRoll; korber?: KorberRow };
 type Sel = Record<string, SelV>;
 interface LastRoll { pallet: string; hu: string | null; full: number; cut: number }
 
+/** How much of a roll counts for each batch: its ZCOMENT parts, limited to what is still available (smallest part first). */
+function rollParts(r: Candidate): { batch: string; qty: number }[] {
+  const parts = r.parts?.length ? [...r.parts].sort((a, b) => a.qty - b.qty) : [{ batch: r.batches[0] ?? '', qty: r.available }];
+  let left = r.available;
+  const out = parts.map((p) => { const q = Math.min(p.qty, left); left = r3(left - q); return { batch: p.batch, qty: q }; });
+  if (left > 1e-9 && out.length) out[out.length - 1].qty = r3(out[out.length - 1].qty + left); // Korber has a little more than ZCOMENT
+  return out;
+}
+
 /**
- * The system's choice: full rolls (Supplier HU order) while they fit in the balance, then for the rest
- * the roll that fits it best (the smallest one that covers it) — cut to the balance, or sent in full if the user confirms.
+ * The system's choice, batch by batch (each batch's UR comes from its own rolls in ZCOMENT):
+ * the smallest need first, full rolls while they fit, then the roll of that batch that fits the rest best — cut,
+ * or sent in full if the user confirms. A roll split over two batches (86 + 1 = 87) counts for both.
  */
 function autoPlan(c: Candidates): { sel: Sel; last: LastRoll | null } {
   let left = r3(c.need - c.picked);
   const sel: Sel = {};
   const avail = c.rolls.filter((r) => r.available > 1e-9);
+  let last: LastRoll | null = null;
+  const take = (r: Candidate, q: number, need: Map<string, number> | null) => {
+    sel[r.pallet] = { qty: String(r3(q)) };
+    left = r3(left - q);
+    if (need) {
+      let rest = q;
+      for (const p of rollParts(r)) { if (rest <= 1e-9) break; const t = Math.min(p.qty, rest); need.set(p.batch, Math.max(0, r3((need.get(p.batch) ?? 0) - t))); rest = r3(rest - t); }
+    }
+  };
+  const need = c.batchNeed?.length ? new Map(c.batchNeed.map((b) => [b.batch, b.need])) : null;
+  if (need) {
+    const order = Array.from(need.entries()).filter(([, n]) => n > 1e-9).sort((a, b) => a[1] - b[1]).map(([b]) => b);
+    for (const batch of order) {
+      const partOf = (r: Candidate) => rollParts(r).find((p) => p.batch === batch)?.qty ?? 0;
+      const rs = () => avail.filter((r) => !sel[r.pallet] && partOf(r) > 1e-9);
+      for (const r of rs()) {
+        const nb = need.get(batch) ?? 0;
+        if (nb <= 1e-9 || left <= 1e-9) break;
+        if (partOf(r) <= nb + 1e-9 && r.available <= left + 1e-9) take(r, r.available, need);
+      }
+      const nb = Math.min(need.get(batch) ?? 0, left);
+      if (nb > 1e-9) {
+        const fit = rs().filter((r) => partOf(r) >= nb - 1e-9).sort((a, b) => partOf(a) - partOf(b) || a.available - b.available)[0];
+        if (fit) { last = { pallet: fit.pallet, hu: fit.supplier_hu, full: r3(fit.available), cut: r3(nb) }; take(fit, nb, need); }
+      }
+    }
+  }
+  // whatever the batches do not explain: any matched roll, full rolls first, then the best fit
   for (const r of avail) {
     if (left <= 1e-9) break;
-    if (r.available <= left + 1e-9) { sel[r.pallet] = { qty: String(r3(r.available)) }; left = r3(left - r.available); }
+    if (!sel[r.pallet] && r.available <= left + 1e-9) take(r, r.available, null);
   }
-  let last: LastRoll | null = null;
   if (left > 1e-9) {
     const fit = avail.filter((r) => !sel[r.pallet] && r.available >= left).sort((a, b) => a.available - b.available)[0];
-    if (fit) { sel[fit.pallet] = { qty: String(left) }; last = { pallet: fit.pallet, hu: fit.supplier_hu, full: r3(fit.available), cut: left }; }
+    if (fit) { last = { pallet: fit.pallet, hu: fit.supplier_hu, full: r3(fit.available), cut: left }; take(fit, left, null); }
   }
   return { sel, last };
 }

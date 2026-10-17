@@ -19,6 +19,8 @@ export interface Candidate {
   /** found under another pallet label than the ZCOMENT Barcode Number (e.g. COMPCP… for CP…) */
   via?: string | null; barcode?: string | null;
   qtyNote?: string | null;
+  /** how much of the roll is in each batch of this line */
+  parts?: { batch: string; lot: string; qty: number }[];
 }
 export interface LotInfo { lot: string; batch: string; qty: number; ur: number; qty_ok: boolean; invoice: string | null; vendor_batch: string | null; sloc: string | null; rolls: number; roll_sum: number }
 /** A shade-report roll whose Korber pallet does not agree on Pallet, Lot, Supplier Hu, Invoice and Po: the Korber roll is chosen by hand. */
@@ -30,6 +32,8 @@ export interface Candidates {
   manual?: ManualRoll[];
   /** Available QTY of the matched rolls, and the balance they cannot cover (only that is picked by hand). */
   matchedAvail?: number; shortfall?: number;
+  /** what is still needed from each batch (its UR less what was picked), trimmed to the line balance */
+  batchNeed?: { batch: string; lots: string[]; ur: number; picked: number; need: number }[];
   line: { so: string; li: string; item: string; qty: number; plant: string | null; key: string; week: string; date: string };
   need: number; picked: number; stock: { batch: string; ur: number; sloc: string }[]; lots: LotInfo[]; rolls: Candidate[]; steps: string[];
 }
