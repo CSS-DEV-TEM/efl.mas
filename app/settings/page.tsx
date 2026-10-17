@@ -9,9 +9,9 @@ export default function Page() {
   return <Shell admin><Settings /></Shell>;
 }
 
-export interface SystemSettings { fullRollPct: number; defaultPickKind: 'normal' | 'offsite'; allowOffsite: boolean; allowNormalShort: boolean; allowNormalFull: boolean }
+export interface SystemSettings { fullRollPct: number; defaultPickKind: 'normal' | 'offsite'; allowOffsite: boolean; allowNormalShort: boolean; allowNormalFull: boolean; deriveFromZmmbe: boolean; pfcSlocs: string[]; plantSlocs: string[] }
 
-const TABS = [['pick', 'Pick rules'], ['plants', 'Plants & target times'], ['users', 'Users & roles'], ['database', 'Database']] as const;
+const TABS = [['pick', 'Pick rules'], ['reports', 'Reports from ZMMBE'], ['plants', 'Plants & target times'], ['users', 'Users & roles'], ['database', 'Database']] as const;
 type Tab = (typeof TABS)[number][0];
 
 /** Admin only: the system settings. Head accounts can do everything else but cannot open this page. */
@@ -32,6 +32,7 @@ function Settings() {
         {TABS.map(([t, label]) => <button key={t} role="tab" aria-selected={tab === t} className={tab === t ? 'on' : ''} onClick={() => setTab(t)}>{label}</button>)}
       </div>
       {tab === 'pick' && <PickRules toast={toast} />}
+      {tab === 'reports' && <ReportRules toast={toast} />}
       {tab === 'plants' && <PlantsSettings toast={toast} />}
       {tab === 'users' && <UsersAdmin />}
       {tab === 'database' && <ClearDatabase toast={toast} />}
@@ -127,5 +128,47 @@ function PlantsSettings({ toast }: { toast: (m: string) => void }) {
       </div>
       {err && <div className="notice bad" style={{ marginTop: 10 }}>{err}</div>}
     </form>
+  );
+}
+
+/** ZMMBE KFC / PFC / PLANT built from the ZMMBE upload by storage location, like the Pull Plan workbook. */
+function ReportRules({ toast }: { toast: (m: string) => void }) {
+  const [s, setS] = useState<SystemSettings | null>(null);
+  const [pfc, setPfc] = useState(''); const [plant, setPlant] = useState('');
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
+  useEffect(() => { api<{ settings: SystemSettings }>('/api/settings').then((r) => { setS(r.settings); setPfc(r.settings.pfcSlocs.join(', ')); setPlant(r.settings.plantSlocs.join(', ')); }).catch((e) => setErr(e instanceof Error ? e.message : 'Could not load.')); }, []);
+  const save = async () => {
+    if (!s) return;
+    setBusy(true); setErr('');
+    try {
+      const r = await api<{ settings: SystemSettings }>('/api/settings', { method: 'POST', body: { deriveFromZmmbe: s.deriveFromZmmbe, pfcSlocs: pfc, plantSlocs: plant } });
+      setS(r.settings); setPfc(r.settings.pfcSlocs.join(', ')); setPlant(r.settings.plantSlocs.join(', ')); toast('Report rules saved — they apply from the next ZMMBE upload');
+    } catch (e) { setErr(e instanceof Error ? e.message : 'Could not save.'); } finally { setBusy(false); }
+  };
+  if (!s) return <section className="card">{err ? <div className="notice bad">{err}</div> : <p className="muted">Loading…</p>}</section>;
+  return (
+    <section className="card set-card">
+      <h2>Reports from ZMMBE</h2>
+      <p className="sub">Like the Pull Plan workbook: one ZMMBE upload also fills ZMMBE KFC and ZMMBE PFC, split by storage location. A KFC / PFC / PLANT file uploaded on its own still replaces that report until the next ZMMBE upload.</p>
+      <div className="set-grid">
+        <label className="set-row">
+          <span><b>Build KFC, PFC (and PLANT) from ZMMBE</b><small>Turn off to upload the four reports separately as before.</small></span>
+          <input type="checkbox" checked={s.deriveFromZmmbe} onChange={(e) => setS({ ...s, deriveFromZmmbe: e.target.checked })} />
+        </label>
+        <label className="set-row">
+          <span><b>ZMMBE PFC = storage locations</b><small>ZMMBE rows in these St Locations (Week 40 workbook: 41; earlier files also COMF).</small></span>
+          <input className="set-text" value={pfc} onChange={(e) => setPfc(e.target.value)} placeholder="41, COMF" />
+        </label>
+        <div className="set-row">
+          <span><b>ZMMBE KFC = every other ZMMBE row</b><small>All ZMMBE stock that is not PFC (42, 44, 203 …). KFC + PFC = ZMMBE, as in the workbook.</small></span>
+        </div>
+        <label className="set-row">
+          <span><b>PLANT = storage locations</b><small>Stock at the plants (40, 70, 75). ZMMBE exports usually do not have these rows — then upload the PLANT report as before. If the ZMMBE file has them, they become PLANT and are left out of ZMMBE.</small></span>
+          <input className="set-text" value={plant} onChange={(e) => setPlant(e.target.value)} placeholder="40, 70, 75" />
+        </label>
+      </div>
+      {err && <div className="notice bad">{err}</div>}
+      <div style={{ marginTop: 12 }}><button className="btn primary" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save report rules'}</button></div>
+    </section>
   );
 }
