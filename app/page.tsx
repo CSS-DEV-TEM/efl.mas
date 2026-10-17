@@ -7,6 +7,7 @@ import { COV_COLOR } from '@/components/Charts';
 import PlantSummary from '@/components/PlantSummary';
 import type { PlantInfo } from '@/lib/summary';
 import { api } from '@/lib/api';
+import { useRefreshOnActivity } from '@/lib/freshness';
 import { COVERAGES, type DispatchSummary, ago, compact, coverage, fmt, fmtDate, isDone, totals, type Coverage, type Line, type Upload, type WeekInfo } from '@/lib/calc';
 import { exportPullPlan } from '@/lib/export';
 import { CountUp } from '@/components/Brand';
@@ -19,7 +20,7 @@ export default function Page() {
   return <Shell allowGuest><Dashboard /></Shell>;
 }
 
-interface PullPlan { week: string | null; prevWeek?: string | null; weeks: WeekInfo[]; rows: Line[]; dispatch?: DispatchSummary; plants?: PlantInfo[]; received?: { code: string; received: string | null }[]; releases?: { key: string; qi: number; block: number; by_user: string; at: string; active: boolean }[]; uploads: Upload[]; counts: { src: string; n: number }[]; generatedAt: string }
+interface PullPlan { week: string | null; prevWeek?: string | null; rev?: string | null; weeks: WeekInfo[]; rows: Line[]; dispatch?: DispatchSummary; plants?: PlantInfo[]; received?: { code: string; received: string | null }[]; releases?: { key: string; qi: number; block: number; by_user: string; at: string; active: boolean }[]; uploads: Upload[]; counts: { src: string; n: number }[]; generatedAt: string }
 
 /** "2026-W42" → "Week 42" */
 const weekLabel = (w: string | null | undefined) => (w ? `Week ${Number(w.slice(-2))}` : '');
@@ -75,12 +76,10 @@ function Dashboard() {
     } catch (e) { setErr(e instanceof Error ? e.message : 'Could not load data.'); }
   }, []);
   useEffect(() => { load(); }, [load, pickedWeek]);
-  // when the realtime connection is down (or not set up on the Worker), refresh every 20 s instead
-  useEffect(() => {
-    if (live === 'live') return;
-    const t = setInterval(() => { if (document.visibilityState === 'visible') load(); }, 20000);
-    return () => clearInterval(t);
-  }, [live, load]);
+  // no timer: when someone uses the page, check if anything changed and reload only then
+  useRefreshOnActivity(load, data ? data.rev ?? null : undefined, live !== 'live');
+  const [refreshing, setRefreshing] = useState(false);
+  const refreshNow = async () => { setRefreshing(true); try { await load(); } finally { setRefreshing(false); } };
   useEffect(() => { const t = setInterval(() => tick((x) => x + 1), 30000); return () => clearInterval(t); }, []);
 
   // realtime: a new upload reloads everything; a status edit patches the one line in place
@@ -156,6 +155,7 @@ function Dashboard() {
           </p>
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <button className="btn" onClick={refreshNow} disabled={refreshing} title="Load the latest data now">{refreshing ? 'Refreshing…' : '↻ Refresh'}</button>
           {canEdit && <Link className="btn" href="/upload/">Upload reports</Link>}
           <button className="btn primary" disabled={!tableRows.length} onClick={() => exportPullPlan(tableRows, `MAS_Weekly_Plan_${(data?.week || '').replace('-', '_')}`)}>Export Excel ({fmt(tableRows.length)})</button>
         </div>
@@ -212,7 +212,7 @@ function Dashboard() {
               <h2 id="ins-title">Smart Insights <span className="ins-badge">Auto-generated</span></h2>
               <p>Analysed {fmt(scoped.length)} plan lines against {(data?.uploads || []).filter((u) => u.src !== 'plan').length} stock reports · {tips.length} finding{tips.length === 1 ? '' : 's'} · updated {ago(data?.generatedAt)}</p>
             </div>
-            <span className={`ins-status ${live === 'live' ? 'on' : ''}`}><i />{live === 'live' ? 'Live analysis' : 'Re-analysing every 20 s'}</span>
+            <span className={`ins-status ${live === 'live' ? 'on' : ''}`}><i />{live === 'live' ? 'Live analysis' : 'Updates when you use the page'}</span>
             <span className="ins-scan" aria-hidden="true" />
           </div>
           <div className="insights">

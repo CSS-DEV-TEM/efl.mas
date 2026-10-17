@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
 import { liveUrl } from './api';
+import { fetchChanges } from './freshness';
 
 export type LiveState = 'connecting' | 'live' | 'offline';
 export interface LiveMessage { type: string; [k: string]: unknown }
@@ -50,10 +51,12 @@ export function useLive(onMessage: (m: LiveMessage) => void) {
       };
       ws.onerror = () => { try { ws?.close(); } catch { /* ignore */ } };
     };
-    connect();
+    // only open a WebSocket when the Worker has the realtime hub; otherwise stay quiet (no retry loop)
+    let noHub = false;
+    fetchChanges().then((c) => { if (c && !c.realtime) { noHub = true; setState('offline'); } else connect(); });
 
     // reconnect straight away when the tab comes back or the network returns
-    const wake = () => { if (document.visibilityState === 'visible' && (!ws || ws.readyState > 1)) { clearTimeout(timer); retry = 0; connect(); } };
+    const wake = () => { if (!noHub && document.visibilityState === 'visible' && (!ws || ws.readyState > 1)) { clearTimeout(timer); retry = 0; connect(); } };
     document.addEventListener('visibilitychange', wake);
     window.addEventListener('online', wake);
     return () => {

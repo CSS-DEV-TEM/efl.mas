@@ -78,7 +78,7 @@ export default function Shell({ children, admin, allowGuest }: { children: React
     { href: '/dispatch/', label: 'Dispatch' },
     ...(user.role === 'admin' ? [{ href: '/users/', label: 'Users' }] : []),
   ];
-  const liveText = state === 'live' ? 'Live' : state === 'connecting' ? 'Connecting…' : 'Auto-refresh every 20 s';
+  const liveText = state === 'live' ? 'Live' : state === 'connecting' ? 'Connecting…' : 'Updates on activity';
 
   return (
     <ShellCtx.Provider value={{ user, guest, live: state, online, subscribe, toast }}>

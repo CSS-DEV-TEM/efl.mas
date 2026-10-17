@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import Shell, { useShell } from '@/components/Shell';
 import { api } from '@/lib/api';
+import { useRefreshOnActivity } from '@/lib/freshness';
 import { ago, fmt, fmtDate, fmtQty, isDispatched, need, avail, type DispatchSummary, type Line, type WeekInfo } from '@/lib/calc';
 import { colLetter, readWorkbook, type Grid } from '@/lib/mapping';
 import { takePendingDispatch } from '@/lib/handoff';
@@ -71,7 +72,7 @@ function suggestDivide(rows: Record<string, unknown>[]): 1000 | 1 {
   return big / q.length >= 0.6 ? 1000 : 1;
 }
 
-interface PullPlan { week: string | null; weeks: WeekInfo[]; rows: Line[]; dispatch?: DispatchSummary; stockAt?: string | null }
+interface PullPlan { week: string | null; rev?: string | null; weeks: WeekInfo[]; rows: Line[]; dispatch?: DispatchSummary; stockAt?: string | null }
 interface Preview { lines: number; added: number; updated: number; removed: number; skipped: number; inFileDups: number; totalQty: number; items: number; matched: number; unmatched: string[] }
 interface DispRow { item: string; qty: number; raw_qty: number; pallet: string | null; location: string | null; lot: string | null; order_no: string | null; uom: string | null; file_name: string | null; uploaded_by: string; uploaded_at: string }
 
@@ -117,6 +118,7 @@ function Dispatch() {
   }, []);
   useEffect(() => { load(); }, [load, week]);
   useEffect(() => subscribe((m) => { if (m.type === 'data') load(); }), [subscribe, load]);
+  useRefreshOnActivity(load, plan ? plan.rev ?? null : undefined);
 
   // a file handed over from the Uploads page
   useEffect(() => { const f = takePendingDispatch(); if (f) addFile(f); }, []); // eslint-disable-line react-hooks/exhaustive-deps

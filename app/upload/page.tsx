@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import Shell, { useShell } from '@/components/Shell';
 import { isDispatchGrid, setPendingDispatch } from '@/lib/handoff';
 import { api } from '@/lib/api';
+import { useRefreshOnActivity } from '@/lib/freshness';
 import { ago, fmt, fmtDate, type Upload, type WeekInfo } from '@/lib/calc';
 import { TEMPLATES, downloadTemplate } from '@/lib/templates';
 import { todayLocal, weekDays, weekIdOf, weekOptions } from '@/lib/smart';
@@ -39,6 +40,7 @@ function Uploads() {
   const [uploads, setUploads] = useState<Upload[]>([]);
   const [counts, setCounts] = useState<Record<string, number>>({});
   const [weeks, setWeeks] = useState<WeekInfo[]>([]);
+  const [rev, setRev] = useState<string | null | undefined>(undefined);
   const [history, setHistory] = useState<{ at: string; username: string; detail: string }[]>([]);
   const [myPlant, setMyPlant] = useState<string>('');
   const [plants, setPlants] = useState<string[]>([]);
@@ -51,9 +53,10 @@ function Uploads() {
 
   const loadStatus = useCallback(async () => {
     try {
-      const p = await api<{ uploads: Upload[]; counts: { src: string; n: number }[]; weeks: WeekInfo[]; rows: { plant: string | null }[] }>('/api/pullplan');
+      const p = await api<{ rev?: string | null; uploads: Upload[]; counts: { src: string; n: number }[]; weeks: WeekInfo[]; rows: { plant: string | null }[] }>('/api/pullplan');
       setPlants(Array.from(new Set(p.rows.map((r) => r.plant || '').filter(Boolean))).sort());
       setUploads(p.uploads);
+      setRev(p.rev ?? null);
       setWeeks(p.weeks || []);
       api<{ activity: { at: string; username: string; detail: string }[] }>('/api/activity?action=upload').then((a) => setHistory(a.activity.slice(0, 12))).catch(() => {});
       setCounts(Object.fromEntries(p.counts.map((c) => [c.src, c.n])));
@@ -61,6 +64,7 @@ function Uploads() {
   }, []);
   useEffect(() => { loadStatus(); }, [loadStatus]);
   useEffect(() => subscribe((m) => { if (m.type === 'data') loadStatus(); }), [subscribe, loadStatus]);
+  useRefreshOnActivity(loadStatus, rev);
 
   async function addFiles(files: FileList | File[]) {
     setReading(true);
