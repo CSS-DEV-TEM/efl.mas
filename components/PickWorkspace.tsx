@@ -1,11 +1,10 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import * as XLSX from 'xlsx';
 import { api } from '@/lib/api';
 import { ago, avail, fmt, fmtDate, fmtQty, isDispatched, need, type Line } from '@/lib/calc';
 import { action } from '@/lib/smart';
 import {
-  PICK_SRCS, korberWorkbook, ordinal, packingListWorkbook, uploadPickFile,
+  PICK_SRCS, korberWorkbook, ordinal, packingListWorkbook, saveWorkbook, uploadPickFile,
   type Candidate, type Candidates, type KorberRow, type ManualRoll, type PickHistory, type PickSrc,
 } from '@/lib/pick';
 
@@ -320,8 +319,8 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
           <select className="as-search" value={day} onChange={(e) => setDay(e.target.value)} aria-label="Day">
             {days.map((d) => { const x = h?.days.find((y) => y.day === d); return <option key={d} value={d}>{fmtDate(d)}{d === today() ? ' (today)' : ''}{x ? ` · ${x.open} pick${x.open === 1 ? '' : 's'}` : ''}</option>; })}
           </select>
-          <button className="btn primary" disabled={!live.length || !h} onClick={() => XLSX.writeFile(packingListWorkbook(h!), `Packing_List_${day}.xlsx`)}>Download Packing List</button>
-          <button className="btn" disabled={!live.length || !h?.korberHeader} onClick={() => XLSX.writeFile(korberWorkbook(h!), `Korber_Picked_${day}.xlsx`)} title="The picked rolls in the Korber Inventory format">Korber lines</button>
+          <button className="btn primary" disabled={!live.length || !h} onClick={() => saveWorkbook(packingListWorkbook(h!), `Packing_List_${day}.xlsx`)}>Download Packing List</button>
+          <button className="btn" disabled={!live.length || !h?.korberHeader} onClick={() => saveWorkbook(korberWorkbook(h!), `Korber_Picked_${day}.xlsx`)} title="The picked rolls in the Korber Inventory format">Korber lines</button>
         </div>
       </div>
       {!h?.requests.length ? <p className="muted">No picks on {fmtDate(day)}.</p> : (
