@@ -21,7 +21,7 @@ export interface Candidates {
   line: { so: string; li: string; item: string; qty: number; plant: string | null; key: string; week: string; date: string };
   need: number; picked: number; stock: { batch: string; ur: number; sloc: string }[]; lots: LotInfo[]; rolls: Candidate[]; steps: string[];
 }
-export interface PickReq { id: number; day: string; seq: number; pick_no: string | null; week: string; line: string; so: string; li: string; item: string; plant: string | null; need: number; qty: number; rolls: number; by_user: string; at: string; cancelled_at: string | null; cancelled_by: string | null }
+export interface PickReq { id: number; day: string; seq: number; pick_no: string | null; week: string; line: string; so: string; li: string; item: string; plant: string | null; need: number; qty: number; rolls: number; by_user: string; at: string; cancelled_at: string | null; cancelled_by: string | null; match?: string | null }
 export interface PickRoll { id: number; req_id: number; day: string; week: string; line: string; so: string; li: string; item: string; pallet: string; qty: number; roll_qty: number; partial: number; shade: string | null; lot: string | null; insp_lot: string | null; batch: string | null; note: string | null; by_user: string; at: string; cancelled_at: string | null; korber: string | null }
 export interface PickHistory { day: string | null; requests: PickReq[]; picks: PickRoll[]; days: { day: string; n: number; open: number }[]; korberHeader: unknown[] | null }
 
@@ -104,6 +104,7 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
       [`${r.so} / ${r.li} / ${r.item}`, null, null, null, null, null, null, null, `Plan QTY ${r.need}`, `Picked ${qty}`, `${r.day} · ${r.by_user}`],
       [], [],
       PL_HEAD, ...lines,
+      ...matchRows(r.match),
     ];
     const ws = XLSX.utils.aoa_to_sheet(aoa);
     if (lines.length) { ws.A2 = { t: 'n', v: qty, f: `SUM(M7:M${last})` }; ws.B2 = { t: 'n', v: rolls.length, f: `COUNTA(A7:A${last})` }; }
@@ -125,6 +126,33 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
   }
   // Summary first, like the template's tab order is 1st, 2nd … Summary: keep the template order
   return wb;
+}
+
+/** Under the rolls: the ZMMBE stock rows and ZINR inspection lots the rolls were matched through. */
+function matchRows(match: string | null | undefined): (string | number | null)[][] {
+  if (!match) return [];
+  let m: { zmmbe?: Record<string, unknown>[]; zinr?: Record<string, unknown>[]; lots?: { lot: string; rolls: number; roll_sum: number; qty_ok: boolean }[] };
+  try { m = JSON.parse(match); } catch { return []; }
+  const v = (x: unknown) => (x === null || x === undefined ? '' : typeof x === 'number' ? x : String(x));
+  // SAP form: storage location 4 digits, batch 10 digits (they are compared without leading zeros)
+  const sap = (x: unknown, len: number) => { const t = String(x ?? ''); return /^\d+$/.test(t) && t.length < len ? t.padStart(len, '0') : t; };
+  const out: (string | number | null)[][] = [[], []];
+  if (m.zmmbe?.length) {
+    out.push(['MATCHED ZMMBE']);
+    out.push(['Plant', 'St Location', 'SO Plant', 'SO', 'LI', 'Material', 'Batch', 'Style', 'UR', 'QI', 'Block', 'Assigned', 'Total']);
+    for (const z of m.zmmbe) out.push(['plant', 'sloc', 'so_plant', 'so', 'li', 'material', 'batch', 'style', 'ur', 'qi', 'block', 'assigned', 'total'].map((k) => (k === 'sloc' ? sap(z[k], 4) : k === 'batch' ? sap(z[k], 10) : v(z[k]))));
+    out.push([]);
+  }
+  if (m.zinr?.length) {
+    const lots = new Map((m.lots || []).map((l) => [String(l.lot), l]));
+    out.push(['MATCHED ZINR']);
+    out.push(['Inspection Lot', 'Plant', 'Storage Location', 'Batch', 'Material', 'Insp. Lot Quantity', 'Base UoM', 'Sales Order', 'Line Item', 'Vendor Batch', 'Vendor Invoice No', 'Lot Creation Date', 'Shade rolls', 'Roll qty sum', 'Lot qty = ZMMBE UR']);
+    for (const z of m.zinr) {
+      const l = lots.get(String(z.lot));
+      out.push([...['lot', 'plant', 'sloc', 'batch', 'material', 'qty', 'uom', 'so', 'li', 'vendor_batch', 'invoice', 'created'].map((k) => (k === 'sloc' ? sap(z[k], 4) : k === 'batch' ? sap(z[k], 10) : v(z[k]))), l ? l.rolls : '', l ? l.roll_sum : '', l ? (l.qty_ok ? 'Yes' : 'No') : '']);
+    }
+  }
+  return out;
 }
 
 /** The picked rolls only, in the Korber Inventory format (same columns as the uploaded file). */

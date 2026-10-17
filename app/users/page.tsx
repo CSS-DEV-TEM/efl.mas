@@ -93,6 +93,53 @@ function Users() {
           </table>
         </div>
       </section>
+      <ClearDatabase toast={toast} />
     </main>
+  );
+}
+
+const GROUPS: { id: string; label: string; hint: string }[] = [
+  { id: 'plan', label: 'Weekly plans', hint: 'all weeks, with Status / Comment edits, received times, releases' },
+  { id: 'stock', label: 'Stock reports', hint: 'ZMMBE, ZMMBE KFC, ZMMBE PFC, PLANT, TRR' },
+  { id: 'pickdata', label: 'Pick data', hint: 'ZINR, ZCOMENT VIEW, Korber Inventory' },
+  { id: 'picks', label: 'Pick history', hint: 'all picks and packing lists (rolls become pickable again)' },
+  { id: 'dispatch', label: 'Old dispatch uploads', hint: 'dispatch files uploaded before picking' },
+  { id: 'settings', label: 'Plant settings', hint: 'plant names, responsible, target times' },
+  { id: 'history', label: 'Upload history & activity log', hint: 'the "Recent uploads" lists' },
+];
+
+/** Admin: empty chosen parts of the database. Users and passwords are never removed. */
+function ClearDatabase({ toast }: { toast: (m: string) => void }) {
+  const [sel, setSel] = useState<Set<string>>(new Set());
+  const [confirm, setConfirm] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const all = sel.size === GROUPS.length;
+  const run = async () => {
+    setBusy(true); setErr('');
+    try {
+      const r = await api<{ cleared: Record<string, number> }>('/api/admin/clear', { method: 'POST', body: { groups: Array.from(sel), confirm } });
+      const n = Object.values(r.cleared).reduce((t, x) => t + x, 0);
+      toast(`Database cleared: ${n.toLocaleString()} rows removed`);
+      setSel(new Set()); setConfirm('');
+    } catch (e) { setErr(e instanceof Error ? e.message : 'Could not clear.'); } finally { setBusy(false); }
+  };
+  return (
+    <section className="card danger-zone" aria-labelledby="db-title">
+      <h2 id="db-title">Clear database</h2>
+      <p className="sub">Removes the chosen data for everyone, permanently. Users and passwords stay. Download anything you need first (Export, Packing Lists).</p>
+      <label className="db-all"><input type="checkbox" checked={all} onChange={() => setSel(all ? new Set() : new Set(GROUPS.map((g) => g.id)))} /> <b>Everything</b> (except users)</label>
+      <div className="db-groups">
+        {GROUPS.map((g) => (
+          <label key={g.id}><input type="checkbox" checked={sel.has(g.id)} onChange={() => setSel((s) => { const n = new Set(s); if (n.has(g.id)) n.delete(g.id); else n.add(g.id); return n; })} />
+            <span><b>{g.label}</b><small>{g.hint}</small></span></label>
+        ))}
+      </div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 12 }}>
+        <label style={{ fontSize: 13 }}>Type <b>CLEAR</b> to confirm <input value={confirm} onChange={(e) => setConfirm(e.target.value)} className="db-confirm" aria-label="Type CLEAR" /></label>
+        <button className="btn danger" disabled={busy || !sel.size || confirm.trim().toUpperCase() !== 'CLEAR'} onClick={run}>{busy ? 'Clearing…' : `Clear ${sel.size || ''} selected`}</button>
+      </div>
+      {err && <div className="notice bad" style={{ marginTop: 10 }}>{err}</div>}
+    </section>
   );
 }

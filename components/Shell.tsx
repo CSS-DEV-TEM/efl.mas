@@ -75,7 +75,7 @@ export default function Shell({ children, admin, allowGuest }: { children: React
   const nav = guest ? [{ href: '/', label: 'Dashboard' }] : [
     { href: '/', label: 'Dashboard' },
     { href: '/upload/', label: 'Uploads' },
-    { href: '/dispatch/', label: 'Dispatch' },
+    { href: '/dispatch/', label: 'Pick & Dispatch' },
     ...(user.role === 'admin' ? [{ href: '/users/', label: 'Users' }] : []),
   ];
   const liveText = state === 'live' ? 'Live' : state === 'connecting' ? 'Connecting…' : 'Updates on activity';

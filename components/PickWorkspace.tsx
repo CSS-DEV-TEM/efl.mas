@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { api } from '@/lib/api';
-import { ago, avail, fmt, fmtDate, fmtQty, need, type Line } from '@/lib/calc';
+import { ago, avail, fmt, fmtDate, fmtQty, isDispatched, need, type Line } from '@/lib/calc';
 import { action } from '@/lib/smart';
 import {
   PICK_SRCS, korberWorkbook, ordinal, packingListWorkbook, uploadPickFile,
@@ -16,7 +16,7 @@ const today = () => new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice
 export default function PickWorkspace({ week, rows, canEdit, toast, reload }: { week: string; rows: LineP[]; canEdit: boolean; toast: (m: string) => void; reload: () => void }) {
   const [status, setStatus] = useState<{ counts: { src: string; n: number }[]; uploads: { src: string; file_name: string | null; row_count: number; uploaded_by: string; uploaded_at: string }[] } | null>(null);
   const [busy, setBusy] = useState<PickSrc | null>(null);
-  const [scope, setScope] = useState<'ready' | 'open'>('ready');
+  const [scope, setScope] = useState<'ready' | 'open' | 'picked'>('ready');
   const [q, setQ] = useState('');
   const [picking, setPicking] = useState<LineP | null>(null);
   const [histKey, setHistKey] = useState(0);
@@ -37,7 +37,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload }: { 
 
   const list = useMemo(() => {
     const s = q.trim().toLowerCase();
-    return rows.filter((l) => need(l) > 1e-9 && (scope === 'open' ? avail(l) > 0 : action(l) === 'Ready to pull'))
+    return rows.filter((l) => (scope === 'picked' ? (l.picked ?? 0) > 0 : need(l) > 1e-9 && (scope === 'open' ? avail(l) > 0 : action(l) === 'Ready to pull')))
       .filter((l) => !s || [l.so, l.li, l.item, l.plant].join(' ').toLowerCase().includes(s))
       .sort((a, b) => String(a.date ?? '').localeCompare(String(b.date ?? '')) || a.row_no - b.row_no);
   }, [rows, scope, q]);
@@ -69,29 +69,31 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload }: { 
         <div className="sheet-top">
           <div>
             <h2 id="rp-title">Ready to pull → Pick <span className="pill ok" style={{ marginLeft: 6 }}>{fmt(list.length)}</span></h2>
-            <p className="sub" style={{ margin: 0 }}>Plan lines whose UR covers the balance. Pick opens the matched Korber rolls for the line.</p>
+            <p className="sub" style={{ margin: 0 }}>Plan lines whose UR covers the balance — they appear here as soon as a ZMMBE upload makes them ready. Picked QTY counts as Dispatched; fully picked lines move to “Picked”.</p>
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
             <input type="search" className="as-search" placeholder="Search SO, item…" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search lines" />
             <div className="seg" role="group">
               <button className={scope === 'ready' ? 'on' : ''} onClick={() => setScope('ready')}>Ready to pull</button>
               <button className={scope === 'open' ? 'on' : ''} onClick={() => setScope('open')}>All with UR</button>
+              <button className={scope === 'picked' ? 'on' : ''} onClick={() => setScope('picked')}>Picked</button>
             </div>
           </div>
         </div>
-        {!list.length ? <p className="muted">No lines {scope === 'ready' ? 'are ready to pull' : 'with UR stock'} in {week}.</p> : (
+        {!list.length ? <p className="muted">No lines {scope === 'ready' ? 'are ready to pull' : scope === 'picked' ? 'picked yet' : 'with UR stock'} in {week}.</p> : (
           <div className="table-wrap" style={{ maxHeight: 460 }}>
             <table className="mini">
-              <thead><tr><th>SO</th><th>LI</th><th>Item</th><th>Date</th><th>Plant</th><th className="n">QTY</th><th className="n">Balance</th><th className="n">UR left</th><th className="n">Picked</th><th>State</th><th /></tr></thead>
+              <thead><tr><th>SO</th><th>LI</th><th>Item</th><th>Date</th><th>Plant</th><th className="n">QTY</th><th className="n">Picked = Dispatched</th><th className="n">Balance</th><th className="n">UR left</th><th>State</th><th /></tr></thead>
               <tbody>{list.map((l) => {
-                const pk = l.picked ?? 0, done = pk >= need(l) - 1e-6;
+                const pk = l.picked ?? 0, done = isDispatched(l);
                 return (
                   <tr key={l.id}>
                     <td>{l.so}</td><td>{l.li}</td><td>{l.item}</td><td>{fmtDate(l.date)}</td><td>{l.plant}</td>
-                    <td className="n">{fmtQty(l.qty)}</td><td className="n"><b>{fmtQty(need(l))}</b></td><td className="n">{fmtQty(avail(l))}</td>
-                    <td className="n">{pk ? <>{fmtQty(pk)} <span className="muted">({l.picked_rolls})</span></> : '–'}</td>
-                    <td>{done ? <span className="pill ok">Picked ✓</span> : pk ? <span className="pill accent">Part picked</span> : <span className="pill mute">To pick</span>}</td>
-                    <td>{canEdit && <button className="btn sm primary" onClick={() => setPicking(l)}>{pk ? 'Pick more' : 'Pick'}</button>}</td>
+                    <td className="n">{fmtQty(l.qty)}</td>
+                    <td className="n">{pk ? <>{fmtQty(pk)} <span className="muted">({l.picked_rolls} roll{l.picked_rolls === 1 ? '' : 's'})</span></> : '–'}</td>
+                    <td className="n"><b>{fmtQty(need(l))}</b></td><td className="n">{fmtQty(avail(l))}</td>
+                    <td>{done ? <span className="pill ok">Picked ✓ · Dispatched</span> : pk ? <span className="pill accent">Part picked</span> : <span className="pill mute">To pick</span>}</td>
+                    <td>{canEdit && !done && <button className="btn sm primary" onClick={() => setPicking(l)}>{pk ? 'Pick more' : 'Pick'}</button>}</td>
                   </tr>
                 );
               })}</tbody>

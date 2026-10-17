@@ -3,7 +3,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import Shell, { useShell } from '@/components/Shell';
-import { isDispatchGrid, setPendingDispatch } from '@/lib/handoff';
+import { isDispatchGrid } from '@/lib/handoff';
+import { action } from '@/lib/smart';
+import type { Line } from '@/lib/calc';
 import { api } from '@/lib/api';
 import { useRefreshOnActivity } from '@/lib/freshness';
 import { ago, fmt, fmtDate, type Upload, type WeekInfo } from '@/lib/calc';
@@ -47,13 +49,15 @@ function Uploads() {
   useEffect(() => { api<{ user: { plant?: string | null } }>('/api/me').then((m) => setMyPlant(m.user.plant || '')).catch(() => {}); }, []);
   const input = useRef<HTMLInputElement>(null);
   const router = useRouter();
-  const [dispFiles, setDispFiles] = useState<File[]>([]);
-  const openDispatch = (f: File) => { setPendingDispatch(f); router.push('/dispatch/'); };
+  // after a ZMMBE upload: how many lines of the latest week are now Ready to pull (they show on the Pick page)
+  const [readyNow, setReadyNow] = useState<{ week: string; n: number } | null>(null);
+  const [showReady, setShowReady] = useState(false);
   const canEdit = user.role !== 'viewer';
 
   const loadStatus = useCallback(async () => {
     try {
-      const p = await api<{ rev?: string | null; uploads: Upload[]; counts: { src: string; n: number }[]; weeks: WeekInfo[]; rows: { plant: string | null }[] }>('/api/pullplan');
+      const p = await api<{ week: string | null; rev?: string | null; uploads: Upload[]; counts: { src: string; n: number }[]; weeks: WeekInfo[]; rows: Line[] }>('/api/pullplan');
+      if (p.week) setReadyNow({ week: p.week, n: p.rows.filter((l) => action(l) === 'Ready to pull').length });
       setPlants(Array.from(new Set(p.rows.map((r) => r.plant || '').filter(Boolean))).sort());
       setUploads(p.uploads);
       setRev(p.rev ?? null);
@@ -74,6 +78,7 @@ function Uploads() {
       try {
         const sheets = readWorkbook(await f.arrayBuffer());
         // a dispatch / pick file (Display Item Number + Actual Qty) belongs on the Dispatch page
+        // dispatch files are no longer uploaded: picks count as dispatched
         if (sheets.some((s) => isDispatchGrid(s.grid)) && !sheets.some((s) => guessSrc(s.name))) { disp.push(f); continue; }
         const dataSheets = sheets.filter((s) => s.grid.length && !isHelpSheet(s.name));
         for (const s of dataSheets) {
@@ -89,8 +94,7 @@ function Uploads() {
     }
     setJobs((j) => [...j, ...next]);
     setReading(false);
-    if (disp.length === 1 && !next.length && !jobs.length) { toast(`${disp[0].name} is a dispatch file — opening it on the Dispatch page`); openDispatch(disp[0]); return; }
-    if (disp.length) setDispFiles((d) => [...d, ...disp]);
+    if (disp.length) toast(`${disp.map((f) => f.name).join(', ')}: dispatch files are no longer uploaded — picked QTY on the Pick page counts as dispatched.`);
   }
 
   const setJob = (id: string, patch: Partial<SheetJob>) => setJobs((js) => js.map((j) => (j.id === id ? { ...j, ...patch } : j)));
@@ -102,7 +106,8 @@ function Uploads() {
       const rows = applyMapping(j.src, j.grid, j.map);
       const r = await api<PlanPreview & { accepted: number; skipped: number; weeks?: string[]; stockDups?: number }>('/api/upload', { method: 'POST', body: { src: j.src, fileName: j.file, sheetName: j.sheet, rows, ...planOpts(j, myPlant) } });
       const wk = r.weeks?.length ? ` to ${r.weeks.map((w) => 'Week ' + Number(w.slice(-2))).join(', ')}` : '';
-      loadStatus();
+      await loadStatus();
+      if (j.src === 'zmmbe' || j.src === 'plan') setShowReady(true);
       const plan = j.src === 'plan' && r.added !== undefined ? `${fmt(r.added)} new, ${fmt(r.updated)} updated${r.removed ? `, ${fmt(r.removed)} removed` : ''}${r.inFileDups ? `, ${fmt(r.inFileDups)} repeated rows in the file merged` : ''}` : `${fmt(r.accepted)} rows saved — ${j.stockMode === 'add' ? 'added to the current report' : 'whole report replaced, no duplicates'}${r.stockDups ? ` · ${fmt(r.stockDups)} repeated rows counted once` : ''}`;
       setJob(j.id, { state: 'done', msg: `${plan}${wk}${r.skipped > 0 ? ` · ${fmt(r.skipped)} rows without SO/LI/Material skipped` : ''}. Every open dashboard has updated.` });
     } catch (e) {
@@ -224,13 +229,12 @@ function Uploads() {
             <input ref={input} type="file" hidden multiple accept=".xlsx,.xlsm,.xls,.csv" onChange={(e) => { if (e.target.files?.length) addFiles(e.target.files); e.target.value = ''; }} />
           </div>
 
-          {dispFiles.map((f, i) => (
-            <div key={f.name + i} className="notice info" style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-              <span><b>{f.name}</b> is a dispatch / pick file (Display Item Number + Actual Qty). Dispatch is uploaded on the Dispatch page.</span>
-              <button className="btn sm primary" onClick={() => openDispatch(f)}>Open in Dispatch →</button>
-              <button className="btn sm" onClick={() => setDispFiles((d) => d.filter((x) => x !== f))}>✕</button>
+          {showReady && readyNow && (
+            <div className="notice ok" style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+              <span>ZMMBE updated: <b>{fmt(readyNow.n)}</b> line{readyNow.n === 1 ? ' is' : 's are'} Ready to pull in Week {Number(readyNow.week.slice(-2))} — they are on the Pick list now.</span>
+              <Link className="btn sm primary" href="/dispatch/">Open Pick list →</Link>
             </div>
-          ))}
+          )}
           {jobs.length > 0 && (
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
               <button className="btn primary" disabled={!ready} onClick={sendAll}>Upload {ready} sheet{ready === 1 ? '' : 's'}</button>
