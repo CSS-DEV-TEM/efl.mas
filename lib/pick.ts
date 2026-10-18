@@ -129,12 +129,10 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
     const lines: (string | number | null)[][] = [];
     let qty = 0, nRolls = 0, cut = 0;
     const pickNos: (string | number)[] = [];
-    const matchAll: string[] = [];
     for (const r of group) {
       const rolls = rollsOf(r);
       const pickNo = pickNoOf(r);
       if (pickNo !== '') pickNos.push(pickNo);
-      if (r.match) matchAll.push(r.match);
       rolls.forEach((p, i) => {
         const raw = (p.korber ? JSON.parse(p.korber) : []) as unknown[];
         korberRows.push(pickedRow(raw, header, p.qty));
@@ -152,7 +150,7 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
     }
     qty = Math.round(qty * 1000) / 1000;
     const last = 6 + lines.length;
-    const matched = matchRows(matchAll);
+    const matched = matchRows(group, rollsOf);
     const hj: string | number = pickNos.length === 1 ? pickNos[0] : pickNos.join(', ');
     const aoa: (string | number | null)[][] = [
       ['TOTAL QTY', 'TOTAL ROLLS', 'HJ PICK', null, null, 'TOTAL PICK', 'CUT ROLLS'],
@@ -210,24 +208,41 @@ export function saveWorkbook(wb: XLSX.WorkBook, file: string) {
 }
 
 /**
- * Under the rolls, like the template: one line per matched stock row —
- * SO | Line Item | Qty (ZMMBE UR = ZINR Insp. Lot Quantity) | Material | Batch.
- * ZMMBE rows are used; when the pick has none (an older pick), the ZINR lots.
+ * Under the rolls, like the template: one line per batch the picks took QTY from —
+ * SO | Line Item | Qty (the QTY picked from that batch) | Material | Batch.
+ * A new pick carries its split per batch (`alloc`). For an older pick it is worked out here: a roll in one batch
+ * gives all its QTY to that batch; a roll in two batches fills the batch with the smaller UR first.
  */
-function matchRows(matches: string[]): (string | number)[][] {
-  const src: { so: unknown; li: unknown; qty: unknown; material: unknown; batch: unknown }[] = [];
-  for (const match of matches) {
-    let m: { zmmbe?: Record<string, unknown>[]; zinr?: Record<string, unknown>[] };
-    try { m = JSON.parse(match); } catch { continue; }
-    src.push(...(m.zmmbe?.length ? m.zmmbe.map((z) => ({ so: z.so, li: z.li, qty: z.ur, material: z.material, batch: z.batch }))
-      : (m.zinr || []).map((z) => ({ so: z.so, li: z.li, qty: z.qty, material: z.material, batch: z.batch }))));
-  }
+function matchRows(reqs: PickReq[], rollsOf: (r: PickReq) => PickRoll[]): (string | number)[][] {
   const by = new Map<string, (string | number)[]>();
-  for (const z of src) {
-    const row = [String(z.so ?? ''), num(z.li), Number(z.qty) || 0, num(z.material), num(String(z.batch ?? '').replace(/^0+(?=\d)/, ''))];
+  const add = (so: unknown, li: unknown, material: unknown, batch: unknown, qty: number) => {
+    if (!(qty > 1e-9)) return;
+    const row = [String(so ?? ''), num(li), Math.round(qty * 1000) / 1000, num(material), num(String(batch ?? '').replace(/^0+(?=\d)/, ''))];
     const k = row.filter((_, i) => i !== 2).join('|');
     const had = by.get(k);
-    if (had) had[2] = Math.round(((had[2] as number) + (row[2] as number)) * 1000) / 1000; else by.set(k, row);
+    if (had) had[2] = Math.round(((had[2] as number) + qty) * 1000) / 1000; else by.set(k, row);
+  };
+  for (const r of reqs) {
+    let m: { zmmbe?: Record<string, unknown>[]; zinr?: Record<string, unknown>[]; alloc?: { pallet: string; batch: string; qty: number }[] } = {};
+    try { if (r.match) m = JSON.parse(r.match); } catch { /* */ }
+    const rolls = rollsOf(r);
+    const live = new Set(rolls.map((p) => p.pallet));
+    if (m.alloc?.length) { for (const a of m.alloc) if (live.has(a.pallet)) add(r.so, r.li, r.item, a.batch, Number(a.qty)); continue; }
+    // older pick: each batch's UR (ZMMBE, else the ZINR lots) caps what it can give
+    const ur = new Map<string, number>();
+    for (const z of m.zmmbe?.length ? m.zmmbe : m.zinr || []) { const bt = String(z.batch ?? ''); ur.set(bt, (ur.get(bt) ?? 0) + (Number(m.zmmbe?.length ? z.ur : z.qty) || 0)); }
+    const key = (bt: string) => [...ur.keys()].find((k) => k.replace(/^0+/, '') === bt.replace(/^0+/, '')) ?? bt;
+    for (const p of rolls) {
+      const bts = String(p.batch ?? '').split(',').map((x) => x.trim()).filter(Boolean).map(key);
+      if (!bts.length) continue;
+      let q = Number(p.qty);
+      for (const bt of [...bts].sort((x, y) => (ur.get(x) ?? Infinity) - (ur.get(y) ?? Infinity))) {
+        const t = bts.length === 1 ? q : Math.min(q, Math.max(0, ur.get(bt) ?? Infinity));
+        add(r.so, r.li, r.item, bt, t); ur.set(bt, (ur.get(bt) ?? 0) - t); q -= t;
+        if (q <= 1e-9) break;
+      }
+      if (q > 1e-9) add(r.so, r.li, r.item, bts[0], q);
+    }
   }
   return Array.from(by.values());
 }

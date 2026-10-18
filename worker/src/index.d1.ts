@@ -283,7 +283,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 24; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 25; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1151,7 +1151,26 @@ async function handlePick(env: Env, req: Request, p: string) {
     const zinrUsed = (await env.DB.prepare('SELECT * FROM zinr WHERE so = ? AND li = ? AND material = ?').bind(line.so, line.li, line.item).all<Row>()).results.filter((z) => usedLots.has(String(z.lot)));
     // the ZMMBE rows of those lots: same batch and the lot's storage location
     const used = new Set(zinrUsed.map((z) => `${z.batch}|${normId(z.sloc)}`));
-    const match = JSON.stringify({ zmmbe: cand.stock.filter((x) => used.has(`${x.batch}|${normId(x.sloc)}`)), zinr: zinrUsed, lots: cand.lots.filter((l) => usedLots.has(String(l.lot))) });
+    // what this pick took from each batch (for the packing list): a roll in two batches gives first to the batch
+    // that still needs QTY (the smallest part first), then to its other parts
+    const need = new Map((cand.batchNeed || []).map((x) => [String(x.batch), Number(x.need)]));
+    const alloc: { pallet: string; batch: string; qty: number }[] = [];
+    for (const x of picks) {
+      const r = byPallet.get(String(x.pallet));
+      const parts = (r?.parts?.length ? r.parts : String(x.batch || '').split(',').filter(Boolean).map((bt) => ({ batch: bt, lot: '', qty: Infinity })))
+        .map((pt) => ({ ...pt, left: Number(pt.qty) })).sort((p1, p2) => p1.left - p2.left);
+      let q = Number(x.qty);
+      const give = (pt: { batch: string; left: number }, t: number) => {
+        if (t <= 1e-9) return;
+        const had = alloc.find((y) => y.pallet === x.pallet && y.batch === pt.batch);
+        if (had) had.qty = r3(had.qty + t); else alloc.push({ pallet: String(x.pallet), batch: pt.batch, qty: r3(t) });
+        pt.left -= t; q = r3(q - t); need.set(pt.batch, r3((need.get(pt.batch) ?? 0) - t));
+      };
+      for (const pt of parts) give(pt, Math.min(q, pt.left, Math.max(0, need.get(pt.batch) ?? 0)));
+      for (const pt of parts) give(pt, Math.min(q, pt.left));
+      if (q > 1e-9 && parts.length) give({ ...parts[0], left: Infinity }, q);
+    }
+    const match = JSON.stringify({ zmmbe: cand.stock.filter((x) => used.has(`${x.batch}|${normId(x.sloc)}`)), zinr: zinrUsed, lots: cand.lots.filter((l) => usedLots.has(String(l.lot))), alloc });
     const reqRow = await env.DB.prepare(`INSERT INTO pick_req (day, seq, pick_no, week, line, so, li, item, plant, need, qty, rolls, by_user, at, match, kind, closed, short) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`)
       .bind(day, seq, txt(b.pickNo), b.week, lineId, line.so, line.li, line.item, line.plant ?? null, cand.need, total, picks.length, s.u, at, match, kind, closed, short).first<{ id: number }>();
     const reqId = Number(reqRow!.id);
