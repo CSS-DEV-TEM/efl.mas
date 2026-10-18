@@ -120,7 +120,7 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
     const pickNo = r.pick_no && /^\d+$/.test(r.pick_no) ? Number(r.pick_no) : (r.pick_no ?? '');
     const lines = rolls.map((p, i) => {
       const raw = (p.korber ? JSON.parse(p.korber) : []) as unknown[];
-      korberRows.push(raw);
+      korberRows.push(pickedRow(raw, header, p.qty));
       return PL_HEAD.map((c) => {
         if (c === 'Actual Qty') return p.qty;
         if (c === 'Pick No') return i === 0 ? pickNo : null;
@@ -205,8 +205,20 @@ function matchRows(match: string | null | undefined): (string | number)[][] {
 }
 
 /** The picked rolls only, in the Korber Inventory format (same columns as the uploaded file). */
+/**
+ * The Korber row as picked: a cut roll's Actual Qty becomes the QTY taken from it (a full roll keeps its own).
+ * `header` = the Korber header in `hn` form.
+ */
+function pickedRow(raw: unknown[], header: string[], qty: number): unknown[] {
+  const row = [...raw];
+  const i = header.indexOf('actual qty');
+  if (i >= 0) row[i] = Math.round(qty * 1000) / 1000;
+  return row;
+}
+
 export function korberWorkbook(h: PickHistory) {
-  const rows = h.picks.filter((p) => !p.cancelled_at && h.requests.some((r) => r.id === p.req_id && !r.cancelled_at)).map((p) => (p.korber ? JSON.parse(p.korber) : []) as (string | number)[]);
+  const header = (h.korberHeader || []).map(hn);
+  const rows = h.picks.filter((p) => !p.cancelled_at && h.requests.some((r) => r.id === p.req_id && !r.cancelled_at)).map((p) => pickedRow((p.korber ? JSON.parse(p.korber) : []) as unknown[], header, p.qty) as (string | number)[]);
   const ws = XLSX.utils.aoa_to_sheet([(h.korberHeader || []) as (string | number)[], ...rows]);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');

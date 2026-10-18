@@ -1,8 +1,14 @@
 name = "shade-tracker-api"
 main = "src/index.ts"
 compatibility_date = "2025-06-01"
+# postgres.js (Supabase) gets small pure-JS stand-ins for the Node APIs it imports,
+# so the Worker needs no "nodejs_compat" compatibility flag.
+[alias]
+"node:buffer" = "./node_modules/buffer/index.js"
+"node:events" = "./node_modules/events/events.js"
+"node:stream" = "./shims/stream.js"
 
-# Paste the database_id that `npx wrangler d1 create shade-tracker` prints.
+# Optional: the old D1 database. Kept bound only so the first sign-in can copy its data into Supabase.
 [[d1_databases]]
 binding = "DB"
 database_name = "shade-tracker"
