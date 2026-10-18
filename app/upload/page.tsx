@@ -1,5 +1,6 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Loader } from '@/components/Loader';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import Shell, { useShell } from '@/components/Shell';
@@ -237,7 +238,7 @@ function Uploads() {
             onDragLeave={() => setOver(false)}
             onDrop={(e) => { e.preventDefault(); setOver(false); if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files); }}
           >
-            <strong>{reading ? 'Reading…' : 'Drop Excel files here, or click to choose'}</strong>
+            <strong>{reading ? <Loader inline label="Reading the file…" /> : 'Drop Excel files here, or click to choose'}</strong>
             <span className="muted">One workbook with all sheets (Weekly plan, ZMMBE, ZMMBE KFC, ZMMBE PFC, PLANT, TRR) or separate files. .xlsx, .xls, .csv</span>
             <input ref={input} type="file" hidden multiple accept=".xlsx,.xlsm,.xls,.csv" onChange={(e) => { if (e.target.files?.length) addFiles(e.target.files); e.target.value = ''; }} />
           </div>
@@ -367,7 +368,7 @@ function SheetCard({ job, myPlant, plants, owners, me, onChange, onSend, onRemov
             <option value="">Skip this sheet</option>
             {SRC_ORDER.map((s) => <option key={s} value={s}>{SRC_INFO[s].title}</option>)}
           </select>
-          <button className="btn primary" disabled={!job.src || !usable || missing.length > 0 || job.state === 'sending'} onClick={onSend}>
+          <button className="btn primary" aria-busy={job.state === 'sending' || undefined} disabled={!job.src || !usable || missing.length > 0 || job.state === 'sending'} onClick={onSend}>
             {job.state === 'sending' ? 'Uploading…' : job.state === 'done' ? 'Upload again' : 'Upload'}
           </button>
           <button className="btn sm" onClick={onRemove} aria-label="Remove">✕</button>
@@ -445,7 +446,7 @@ function SheetCard({ job, myPlant, plants, owners, me, onChange, onSend, onRemov
                 {preview.owner && preview.owner !== me ? <span className="pc">Plan of <b>{preview.owner}</b></span> : null}
                 <span className="muted">No line is ever added twice: a line with the same week, SO, LI, Item and date is updated.</span>
               </>
-            ) : 'Checking what this upload will change…'}
+            ) : <Loader inline label="Checking what this upload will change…" />}
           </div>
         </div>
       )}

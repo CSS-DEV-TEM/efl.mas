@@ -50,7 +50,7 @@ export default function CompleteLine({ line, onDone, small = true }: { line: L; 
             <p className="sub" style={{ margin: 0 }}>The line counts as complete on the dashboards and leaves the pending lists. A note is added to its Comment. You can reopen it later.</p>
             {err && <div className="notice bad">{err}</div>}
             <div className="modal-foot"><span style={{ flex: 1 }} /><button type="button" className="btn" onClick={() => setOpen(false)}>Cancel</button>
-              <button type="button" className="btn primary" disabled={busy} onClick={() => set(true)}>{busy ? 'Saving…' : 'Mark complete'}</button></div>
+              <button type="button" className="btn primary" aria-busy={!!busy || undefined} disabled={busy} onClick={() => set(true)}>{busy ? 'Saving…' : 'Mark complete'}</button></div>
           </div>
         </div>,
         document.body,

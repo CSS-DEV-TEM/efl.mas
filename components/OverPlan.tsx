@@ -47,7 +47,7 @@ export default function OverPlan({ week, items, rows, canEdit, onDone }: { week:
           <h2 id="op-title">Over plan → Dispatch <span className="pill accent" style={{ marginLeft: 6 }}>{over.length}</span></h2>
           <p className="sub" style={{ margin: 0 }}>Only the QTY dispatched above each item&apos;s plan (the &quot;Over plan&quot; column). Pick the plan line it belongs to — same SO first, then lines with UR left — and add it to that line&apos;s Dispatched. Undo it under &quot;Assigned by hand&quot;.</p>
         </div>
-        {canEdit && <button className="btn primary" disabled={busy} onClick={() => add(over)}>{busy ? 'Adding…' : `Add all (${fmt(over.reduce((t, i) => t + amount(i), 0), 2)})`}</button>}
+        {canEdit && <button className="btn primary" aria-busy={!!busy || undefined} disabled={busy} onClick={() => add(over)}>{busy ? 'Adding…' : `Add all (${fmt(over.reduce((t, i) => t + amount(i), 0), 2)})`}</button>}
       </div>
       <div className="table-wrap" style={{ maxHeight: 'none', marginTop: 10 }}>
         <table className="mini">
@@ -62,7 +62,7 @@ export default function OverPlan({ week, items, rows, canEdit, onDone }: { week:
                     {c.map((l) => <option key={l.id} value={l.id}>{l.so} / {l.li} / {l.item} · {fmtDate(l.date)} · balance {fmtQty(need(l))} · UR left {fmtQty(avail(l))}</option>)}
                   </select>) : <span className="muted">No open plan line</span>}</td>
                 <td className="n">{canEdit && t ? <input className="as-search" type="number" step="0.01" min="0.01" max={Math.min(i.over, need(t))} style={{ width: 100 }} value={qty[i.item] ?? amount(i)} onChange={(e) => setQty((q) => ({ ...q, [i.item]: e.target.value }))} aria-label="QTY" /> : fmtQty(amount(i))}</td>
-                {canEdit && <td><button className="btn sm primary" disabled={busy || !t || !(amount(i) > 0)} onClick={() => add([i])}>+ Add</button></td>}
+                {canEdit && <td><button className="btn sm primary" aria-busy={!!busy || undefined} disabled={busy || !t || !(amount(i) > 0)} onClick={() => add([i])}>+ Add</button></td>}
               </tr>
             );
           })}</tbody>

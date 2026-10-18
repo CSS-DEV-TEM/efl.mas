@@ -36,7 +36,20 @@ export function userParam(first = false): string { const u = getViewUser(); retu
 
 export class ApiError extends Error { constructor(public status: number, msg: string) { super(msg); } }
 
+/** How many requests are in flight: the header shows a thin loading bar while any is (see useApiBusy). */
+let inflight = 0;
+const busyListeners = new Set<(n: number) => void>();
+const setInflight = (d: number) => { inflight = Math.max(0, inflight + d); busyListeners.forEach((f) => f(inflight)); };
+export function onApiBusy(f: (n: number) => void) { busyListeners.add(f); return () => { busyListeners.delete(f); }; }
+
 export async function api<T = unknown>(path: string, opts: { method?: string; body?: unknown } = {}): Promise<T> {
+  // the cheap "anything changed?" check runs quietly
+  const quiet = path.startsWith('/api/changes');
+  if (!quiet) setInflight(1);
+  try { return await apiCall<T>(path, opts); } finally { if (!quiet) setInflight(-1); }
+}
+
+async function apiCall<T>(path: string, opts: { method?: string; body?: unknown }): Promise<T> {
   const s = getSession();
   let res: Response;
   try {

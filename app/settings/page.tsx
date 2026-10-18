@@ -1,5 +1,6 @@
 'use client';
 import { useCallback, useEffect, useState } from 'react';
+import { Loader } from '@/components/Loader';
 import Shell, { useShell } from '@/components/Shell';
 import { ClearDatabase, UsersAdmin } from '@/components/AdminUsers';
 import { api } from '@/lib/api';
@@ -53,7 +54,7 @@ function PickRules({ toast }: { toast: (m: string) => void }) {
     try { const r = await api<{ settings: SystemSettings }>('/api/settings', { method: 'POST', body: s }); setS(r.settings); toast('Pick rules saved'); }
     catch (e) { setErr(e instanceof Error ? e.message : 'Could not save.'); } finally { setBusy(false); }
   };
-  if (!s) return <section className="card">{err ? <div className="notice bad">{err}</div> : <p className="muted">Loading…</p>}</section>;
+  if (!s) return <section className="card">{err ? <div className="notice bad">{err}</div> : <Loader />}</section>;
   const set = <K extends keyof SystemSettings>(k: K, v: SystemSettings[K]) => setS({ ...s, [k]: v });
   return (
     <section className="card set-card">
@@ -84,7 +85,7 @@ function PickRules({ toast }: { toast: (m: string) => void }) {
         </label>
       </div>
       {err && <div className="notice bad">{err}</div>}
-      <div style={{ marginTop: 12 }}><button className="btn primary" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save pick rules'}</button></div>
+      <div style={{ marginTop: 12 }}><button className="btn primary" aria-busy={!!busy || undefined} disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save pick rules'}</button></div>
     </section>
   );
 }
@@ -107,7 +108,7 @@ function PlantsSettings({ toast }: { toast: (m: string) => void }) {
     <form className="card set-card" onSubmit={save}>
       <h2>Plants &amp; target times</h2>
       <p className="sub">The plant code from the plan → the name in the Plant summary, who is responsible and the target time (e.g. 10:00 AM, or Weekly). A plan received after the target time shows red. Users type the received time on the dashboard.</p>
-      {!list ? <p className="muted">Loading…</p> : (
+      {!list ? <Loader /> : (
         <div className="ps-grid">
           <span>Plant code</span><span>Name</span><span>Responsible</span><span>Target time</span><span>Order</span><span />
           {list.map((p, i) => (
@@ -126,7 +127,7 @@ function PlantsSettings({ toast }: { toast: (m: string) => void }) {
       <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
         <button type="button" className="btn sm" onClick={() => setList((l) => [...(l || []), { code: '', name: '', responsible: '', target: '', sort: (l?.length ?? 0) + 1 }])}>+ Add plant</button>
         <span style={{ flex: 1 }} />
-        <button className="btn primary" disabled={busy || !list}>{busy ? 'Saving…' : 'Save plants'}</button>
+        <button className="btn primary" aria-busy={!!busy || undefined} disabled={busy || !list}>{busy ? 'Saving…' : 'Save plants'}</button>
       </div>
       {err && <div className="notice bad" style={{ marginTop: 10 }}>{err}</div>}
     </form>
@@ -147,7 +148,7 @@ function ReportRules({ toast }: { toast: (m: string) => void }) {
       setS(r.settings); setPfc(r.settings.pfcSlocs.join(', ')); setPlant(r.settings.plantSlocs.join(', ')); toast('Report rules saved — they apply from the next ZMMBE upload');
     } catch (e) { setErr(e instanceof Error ? e.message : 'Could not save.'); } finally { setBusy(false); }
   };
-  if (!s) return <section className="card">{err ? <div className="notice bad">{err}</div> : <p className="muted">Loading…</p>}</section>;
+  if (!s) return <section className="card">{err ? <div className="notice bad">{err}</div> : <Loader />}</section>;
   return (
     <section className="card set-card">
       <h2>Locations: reports from ZMMBE</h2>
@@ -170,7 +171,7 @@ function ReportRules({ toast }: { toast: (m: string) => void }) {
         </label>
       </div>
       {err && <div className="notice bad">{err}</div>}
-      <div style={{ marginTop: 12 }}><button className="btn primary" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save report rules'}</button></div>
+      <div style={{ marginTop: 12 }}><button className="btn primary" aria-busy={!!busy || undefined} disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save report rules'}</button></div>
     </section>
   );
 }
@@ -186,7 +187,7 @@ function TimeSetup({ toast }: { toast: (m: string) => void }) {
     try { const r = await api<{ settings: SystemSettings }>('/api/settings', { method: 'POST', body: { soliPerHour: s.soliPerHour, lateGraceMin: s.lateGraceMin, defaultTarget: s.defaultTarget } }); setS(r.settings); toast('Time setup saved'); }
     catch (e) { setErr(e instanceof Error ? e.message : 'Could not save.'); } finally { setBusy(false); }
   };
-  if (!s) return <section className="card">{err ? <div className="notice bad">{err}</div> : <p className="muted">Loading…</p>}</section>;
+  if (!s) return <section className="card">{err ? <div className="notice bad">{err}</div> : <Loader />}</section>;
   return (
     <section className="card set-card">
       <h2>Time setup</h2>
@@ -206,7 +207,7 @@ function TimeSetup({ toast }: { toast: (m: string) => void }) {
         </label>
       </div>
       {err && <div className="notice bad">{err}</div>}
-      <div style={{ marginTop: 12 }}><button className="btn primary" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save time setup'}</button></div>
+      <div style={{ marginTop: 12 }}><button className="btn primary" aria-busy={!!busy || undefined} disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save time setup'}</button></div>
     </section>
   );
 }
@@ -237,7 +238,7 @@ function PlansAdmin({ toast }: { toast: (m: string) => void }) {
         <div><h2>Plans (data change)</h2><p className="sub" style={{ margin: 0 }}>Every uploaded plan by user. Move a plan to another user (e.g. uploaded under the wrong account) or delete it.</p></div>
         <input type="search" className="as-search" placeholder="Search user, week, day…" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search plans" />
       </div>
-      {!plans ? <p className="muted">Loading…</p> : !list.length ? <p className="muted">No plans.</p> : (
+      {!plans ? <Loader /> : !list.length ? <p className="muted">No plans.</p> : (
         <div className="table-wrap" style={{ maxHeight: 520 }}>
           <table className="mini">
             <thead><tr><th>User</th><th>Plan</th><th>Week / day</th><th>Dates</th><th className="n">Lines</th><th className="n">QTY</th><th>Done</th><th>Uploaded</th><th>Move to</th><th /></tr></thead>

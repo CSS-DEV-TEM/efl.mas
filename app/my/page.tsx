@@ -1,5 +1,6 @@
 'use client';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { PageLoading } from '@/components/Loader';
 import Link from 'next/link';
 import Shell, { useShell } from '@/components/Shell';
 import CompleteLine from '@/components/CompleteLine';
@@ -72,7 +73,7 @@ function MyWork() {
         </div>
       </div>
       {err && <div className="notice bad">{err}</div>}
-      {!week && !err && <p className="muted">Loading…</p>}
+      {!week && !err && <PageLoading label="Loading your plans and what to do first…" />}
       {week && (
         <>
           <section className="kpis compact" aria-label="My figures">

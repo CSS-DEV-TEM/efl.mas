@@ -38,7 +38,7 @@ export default function LoginPage() {
           <label htmlFor="u">Username<input id="u" autoComplete="username" value={username} onChange={(e) => setU(e.target.value)} required /></label>
           <label htmlFor="p">Password<input id="p" type="password" autoComplete="current-password" value={password} onChange={(e) => setP(e.target.value)} required /></label>
           {err && <div className="notice bad" role="alert">{err}</div>}
-          <button className="btn primary login-btn" type="submit" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
+          <button className="btn primary login-btn" type="submit" aria-busy={!!busy || undefined} disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
         </div>
         <a className="login-guest" href="/">View the dashboard without signing in →</a>
         <div className="login-credit"><Credit /></div>

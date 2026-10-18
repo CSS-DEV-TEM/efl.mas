@@ -86,8 +86,8 @@ export default function EditLine({ line, week, planType = 'week', onClose, onSav
         {!adding && (canRelease(line) || (line.released ?? 0) > 0) && (
           <div className="rel-box">
             {(line.released ?? 0) > 0
-              ? <><span><b>{fmtQty(line.released ?? 0)}</b> QI / Block released to UR (counts until the next ZMMBE upload).</span><button type="button" className="btn sm" disabled={busy} onClick={() => release(true)}>Undo release</button></>
-              : <><span>UR is short by {fmtQty(releaseFor(line).qi + releaseFor(line).block)}. QI {fmtQty(line.qi)} · Block {fmtQty(line.block)} can cover it.</span><button type="button" className="btn sm ok-btn" disabled={busy} onClick={() => release()}>Release QI / Block → UR</button></>}
+              ? <><span><b>{fmtQty(line.released ?? 0)}</b> QI / Block released to UR (counts until the next ZMMBE upload).</span><button type="button" className="btn sm" aria-busy={!!busy || undefined} disabled={busy} onClick={() => release(true)}>Undo release</button></>
+              : <><span>UR is short by {fmtQty(releaseFor(line).qi + releaseFor(line).block)}. QI {fmtQty(line.qi)} · Block {fmtQty(line.block)} can cover it.</span><button type="button" className="btn sm ok-btn" aria-busy={!!busy || undefined} disabled={busy} onClick={() => release()}>Release QI / Block → UR</button></>}
           </div>
         )}
         <fieldset className="mgrid">
@@ -113,11 +113,11 @@ export default function EditLine({ line, week, planType = 'week', onClose, onSav
 
         <div className="modal-foot">
           {!adding && (confirmDel
-            ? <span className="del-confirm">Delete this line? <button type="button" className="btn sm danger" onClick={del} disabled={busy}>Yes, delete</button> <button type="button" className="btn sm" onClick={() => setConfirmDel(false)}>No</button></span>
+            ? <span className="del-confirm">Delete this line? <button type="button" className="btn sm danger" onClick={del} aria-busy={!!busy || undefined} disabled={busy}>Yes, delete</button> <button type="button" className="btn sm" onClick={() => setConfirmDel(false)}>No</button></span>
             : <button type="button" className="btn danger" onClick={() => setConfirmDel(true)}>Delete line</button>)}
           <span style={{ flex: 1 }} />
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
-          <button type="submit" className="btn primary" disabled={busy}>{busy ? 'Saving…' : adding ? 'Add line' : 'Save changes'}</button>
+          <button type="submit" className="btn primary" aria-busy={!!busy || undefined} disabled={busy}>{busy ? 'Saving…' : adding ? 'Add line' : 'Save changes'}</button>
         </div>
       </form>
     </div>

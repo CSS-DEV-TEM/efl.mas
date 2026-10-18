@@ -1,5 +1,6 @@
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { PageLoading } from '@/components/Loader';
 import Shell, { useShell } from '@/components/Shell';
 import { api, userParam } from '@/lib/api';
 import { useRefreshOnActivity } from '@/lib/freshness';
@@ -68,6 +69,7 @@ function Dispatch() {
         </div>
       </div>
       {err && <div className="notice bad">{err}</div>}
+      {!plan && !err && <PageLoading label="Loading the plan lines to pick…" tiles={3} rows={6} />}
       {plan && !(ptype === 'day' ? plan.days?.length : plan.weeks.length) && <div className="notice warn">There is no {ptype === 'day' ? 'day' : 'week'} plan yet. Upload a plan and ZMMBE first.</div>}
       {week && plan && plan.week && <PickWorkspace week={plan.week} rows={plan.rows} canEdit={canEdit} toast={toast} reload={load} />}
     </main>

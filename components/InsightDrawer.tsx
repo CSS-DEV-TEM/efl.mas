@@ -60,7 +60,7 @@ export default function InsightDrawer({ insight, rows, week, canEdit, onEdit, on
         <div className="drawer-tools">
           <input type="search" placeholder="Search these lines…" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search these lines" />
           {canEdit && releasable.length > 0 && (
-            <button type="button" className="btn ok-btn" disabled={busy} onClick={release} title="QI first, then Block, only what each line is short of">
+            <button type="button" className="btn ok-btn" aria-busy={!!busy || undefined} disabled={busy} onClick={release} title="QI first, then Block, only what each line is short of">
               {busy ? 'Releasing…' : `Release to UR · ${fmt(releasable.length)} line${releasable.length === 1 ? '' : 's'} · ${fmt(relQty, 2)}`}
             </button>
           )}

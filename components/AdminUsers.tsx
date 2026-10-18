@@ -56,7 +56,7 @@ export function UsersAdmin() {
               <option value="editor">User (own plan)</option><option value="head">Head</option><option value="viewer">Viewer</option><option value="admin">Admin</option>
             </select>
           </label>
-          <button className="btn primary" type="submit" disabled={busy}>Save user</button>
+          <button className="btn primary" type="submit" aria-busy={!!busy || undefined} disabled={busy}>Save user</button>
         </form>
         <p className="sub" style={{ marginTop: 10 }}>{ROLE_HELP[form.role]}.</p>
         {err && <div className="notice bad">{err}</div>}
@@ -127,7 +127,7 @@ export function ClearDatabase({ toast }: { toast: (m: string) => void }) {
       </div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 12 }}>
         <label style={{ fontSize: 13 }}>Type <b>CLEAR</b> to confirm <input value={confirm} onChange={(e) => setConfirm(e.target.value)} className="db-confirm" aria-label="Type CLEAR" /></label>
-        <button className="btn danger" disabled={busy || !sel.size || confirm.trim().toUpperCase() !== 'CLEAR'} onClick={run}>{busy ? 'Clearing…' : `Clear ${sel.size || ''} selected`}</button>
+        <button className="btn danger" aria-busy={!!busy || undefined} disabled={busy || !sel.size || confirm.trim().toUpperCase() !== 'CLEAR'} onClick={run}>{busy ? 'Clearing…' : `Clear ${sel.size || ''} selected`}</button>
       </div>
       {err && <div className="notice bad" style={{ marginTop: 10 }}>{err}</div>}
     </section>

@@ -117,7 +117,7 @@ export function PlantSetup({ rows, plants, onClose, onSaved }: { rows: Line[]; p
         </div>
         <button type="button" className="btn sm" style={{ justifySelf: 'start' }} onClick={() => setList((l) => [...l, { code: '', name: '', responsible: '', target: '', sort: l.length + 1 }])}>+ Add plant</button>
         {err && <div className="notice bad">{err}</div>}
-        <div className="modal-foot"><span /><button type="button" className="btn" onClick={onClose}>Cancel</button><button className="btn primary" disabled={busy}>{busy ? 'Saving…' : 'Save'}</button></div>
+        <div className="modal-foot"><span /><button type="button" className="btn" onClick={onClose}>Cancel</button><button className="btn primary" aria-busy={!!busy || undefined} disabled={busy}>{busy ? 'Saving…' : 'Save'}</button></div>
       </form>
     </div>
   );

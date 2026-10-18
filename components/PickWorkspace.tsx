@@ -1,5 +1,6 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Loader, Skeleton } from '@/components/Loader';
 import { api, getSession, isBossRole } from '@/lib/api';
 import CompleteLine from '@/components/CompleteLine';
 import { ago, avail, fmt, fmtDate, fmtQty, isDispatched, isDone, need, type Line } from '@/lib/calc';
@@ -79,7 +80,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload }: { 
                 <div><b>{p.title}</b> <span className="pill mute">{fmt(cnt(p.src))} rows</span></div>
                 <span className="muted small">{u ? `${u.file_name || ''} · ${u.uploaded_by} · ${ago(u.uploaded_at)}` : p.hint}</span>
                 {canEdit && <>
-                  <button className="btn sm primary" disabled={!!busy} onClick={() => inputs.current[p.src]?.click()}>{busy === p.src ? 'Uploading…' : `Upload ${p.title}`}</button>
+                  <button className="btn sm primary" aria-busy={busy === p.src || undefined} disabled={!!busy} onClick={() => inputs.current[p.src]?.click()}>{busy === p.src ? 'Uploading…' : `Upload ${p.title}`}</button>
                   <input ref={(el) => { inputs.current[p.src] = el; }} type="file" hidden accept=".xlsx,.xls,.xlsm,.csv" onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(p.src, f); e.target.value = ''; }} />
                 </>}
               </div>
@@ -345,7 +346,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
           </div>
         </div>
 
-        {!c && !err && <p className="muted">Matching ZMMBE → ZINR → ZCOMENT → Korber…</p>}
+        {!c && !err && <><Loader label="Matching ZMMBE → ZINR → ZCOMENT → Korber…" /><Skeleton rows={6} title={false} /></>}
         {c && (
           <>
             <div className="pk-chain">
@@ -479,7 +480,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
           <label className="pk-no">HJ Pick No <input className="as-search" value={pickNo} onChange={(e) => setPickNo(e.target.value)} placeholder="e.g. 21204655" style={{ width: 130 }} /></label>
           <span style={{ flex: 1 }} />
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
-          <button type="button" className="btn primary" disabled={busy || blocked} onClick={save}
+          <button type="button" className="btn primary" aria-busy={!!busy || undefined} disabled={busy || blocked} onClick={save}
             title={blocked && nSel ? (flagged.length && !checkedOk ? 'Tick “I checked” first' : needOverOk && !overOk ? 'Confirm the over-plan QTY first' : '') : undefined}>
             {busy ? 'Saving…' : `${kind === 'offsite' ? 'Offsite' : 'Normal'} pick · ${nSel} roll${nSel === 1 ? '' : 's'} · ${fmt(total, 2)}`}
           </button>
@@ -507,7 +508,7 @@ function KorberChooser({ item, roll, taken, onUse, onClose }: { item: string; ro
         <button className="btn sm" onClick={onClose}>Close</button>
       </div>
       <div className="table-wrap" style={{ maxHeight: 220, marginTop: 6 }}>
-        {rows === null ? <p className="muted">Searching…</p> : !rows.length ? <p className="muted">No Korber roll found{q ? ` for “${q}”` : ''}.</p> : (
+        {rows === null ? <Loader label="Searching Korber…" /> : !rows.length ? <p className="muted">No Korber roll found{q ? ` for “${q}”` : ''}.</p> : (
           <table className="mini">
             <thead><tr><th>Pallet</th><th>Item</th><th>Location</th><th>Lot</th><th>Supplier HU</th><th className="n">Actual qty</th><th className="n">Available</th><th /></tr></thead>
             <tbody>{rows.map((k) => {
@@ -562,7 +563,7 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
           <button className="btn" disabled={!live.length || !h?.korberHeader} onClick={() => saveWorkbook(korberWorkbook(h!), `Korber_Picked_${day}.xlsx`)} title="The picked rolls in the Korber Inventory format">Korber lines</button>
         </div>
       </div>
-      {!h?.requests.length ? <p className="muted">No picks on {fmtDate(day)}.</p> : (
+      {!h ? <Loader label="Loading the pick history…" /> : !h.requests.length ? <p className="muted">No picks on {fmtDate(day)}.</p> : (
         <div className="table-wrap" style={{ maxHeight: 'none' }}>
           <table className="mini">
             <thead><tr><th>Req</th><th>Type</th><th>SO / LI / Item</th><th>Plant</th><th className="n">Plan QTY</th><th className="n">Picked</th><th className="n">Rolls</th><th>HJ Pick No</th><th>By</th><th /></tr></thead>

@@ -2,7 +2,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { NEEDS_API, ROLE_NAME, api, clearSession, getSession, getViewUser, setViewUser, type User } from '@/lib/api';
+import { NEEDS_API, ROLE_NAME, api, clearSession, getSession, getViewUser, onApiBusy, setViewUser, type User } from '@/lib/api';
 import { useLive, type LiveMessage, type LiveState } from '@/lib/live';
 import { Credit, Logo } from '@/components/Brand';
 
@@ -56,6 +56,14 @@ export default function Shell({ children, admin, allowGuest }: { children: React
     api<{ owners: string[] }>('/api/owners').then((r) => setOwners(r.owners)).catch(() => {});
   }, [user, guest]);
 
+  // a thin bar under the header while data loads (shown only if it takes more than a moment)
+  const [netBusy, setNetBusy] = useState(false);
+  useEffect(() => {
+    let t: ReturnType<typeof setTimeout> | undefined;
+    const off = onApiBusy((n) => { clearTimeout(t); if (n > 0) t = setTimeout(() => setNetBusy(true), 180); else setNetBusy(false); });
+    return () => { off(); clearTimeout(t); };
+  }, []);
+
   const toast = useCallback((text: string) => {
     const id = Date.now() + Math.random();
     setToasts((t) => [...t.slice(-3), { id, text }]);
@@ -93,6 +101,7 @@ export default function Shell({ children, admin, allowGuest }: { children: React
 
   return (
     <ShellCtx.Provider value={{ user, guest, live: state, online, subscribe, toast }}>
+      {netBusy && <div className="net-bar" role="progressbar" aria-label="Loading" />}
       <header className="bar">
         <div className="bar-in">
           <Link href="/" className="brand"><Logo size={30} /><span className="brand-text">MAS Weekly Plan <small>Tracker</small></span></Link>

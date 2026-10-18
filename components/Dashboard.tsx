@@ -1,5 +1,6 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { PageLoading } from '@/components/Loader';
 import Link from 'next/link';
 import { useShell } from '@/components/Shell';
 import Ledger, { STATUS_OPTIONS } from '@/components/Ledger';
@@ -287,7 +288,7 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
         </div>
       )}
 
-      {tab === 'summary' && <div className="fresh" aria-label="Report freshness">
+      {tab === 'summary' && data && <div className="fresh" aria-label="Report freshness">
         {SRC_ORDER.map((s) => {
           const u = up.get(s);
           const stale = u && Date.now() - new Date(u.uploaded_at).getTime() > 12 * 3600 * 1000;
@@ -308,6 +309,7 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
       )}
 
 
+      {!data && !err && <PageLoading label={isDay ? 'Loading the day plan…' : 'Calculating the week plan from the latest uploads…'} tiles={8} rows={8} />}
       {data && rows.length === 0 ? (
         <div className="card empty">
           <strong>No weekly plan yet</strong>
