@@ -147,7 +147,7 @@ const thisWeek = () => weekId(new Date(Date.now() + 5.5 * 3600 * 1000).toISOStri
  * adds plan.week, fills it from the dates, and moves dashboard edits to week-scoped keys ("2026-W42#SO|LI|Item").
  */
 let schemaReady = false;
-const SCHEMA_V = '18';
+const SCHEMA_V = '19';
 async function ensureSchema(env: Env) {
   if (schemaReady || !env.DB) return;
   try {
@@ -230,6 +230,10 @@ async function ensureSchema(env: Env) {
       WHERE pallet IN (SELECT json_extract(value, '$.p') FROM json_each(?1))`).bind(JSON.stringify(cores.slice(i, i + 2000))).run();
   }
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS korber_pcore ON korber(pcore)').run();
+  // v19: a week plan line's status is per date ("<week>#key@<date>"); the old shared "<week>#key" is copied to each of its lines
+  await env.DB.prepare(`INSERT OR IGNORE INTO line_status (key, status, comment, vehicle, qi_note, updated_by, updated_at)
+    SELECT DISTINCT p.week || '#' || p.key || '@' || COALESCE(p.date, ''), ls.status, ls.comment, ls.vehicle, ls.qi_note, ls.updated_by, ls.updated_at
+    FROM plan p JOIN line_status ls ON ls.key = p.week || '#' || p.key WHERE COALESCE(p.plan_type, 'week') = 'week'`).run();
   await env.DB.prepare("INSERT INTO config (k, v) VALUES ('schema_v', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(SCHEMA_V).run();
   schemaReady = true;
 }
@@ -283,7 +287,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 25; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 26; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -378,7 +382,7 @@ async function handleUpload(env: Env, req: Request) {
   const body = (await req.json()) as { src: Src; fileName?: string; sheetName?: string; rows: Row[]; week?: string; forceWeek?: boolean; mode?: PlanMode | 'add'; plant?: string; dryRun?: boolean; planType?: string; owner?: string };
   let stockDups = 0;
   let stockDiff: { added: number; removed: number; unchanged: number } | null = null;
-  let derived: { kfc: number; pfc: number; plant: number | null } | null = null;
+  let derived: { kfc: number; pfc: number; plant: number | null; plantKept?: number } | null = null;
   if (!ALL_SRCS.includes(body.src)) throw new HttpError(400, 'Unknown report type.');
   if (!Array.isArray(body.rows)) throw new HttpError(400, 'No rows in the upload.');
 
@@ -413,7 +417,13 @@ async function handleUpload(env: Env, req: Request) {
     for (const r of mapped) { r.plant = cleanPlant(r.plant) || plant; r.src_user = s.u; r.src_at = now(); r.owner = owner; r.plan_type = planType; }
     // the same line twice in one file: keep the last one
     const byId = new Map<string, Row>();
-    for (const r of mapped) byId.set(lineId(r), r);
+    // repeats whose QTY differs: the last row wins — listed so the person can check
+    const dupQty: { so: unknown; li: unknown; item: unknown; date: unknown; was: number; now: number }[] = [];
+    for (const r of mapped) {
+      const had = byId.get(lineId(r));
+      if (had && Math.abs(Number(had.qty) - Number(r.qty)) > 0.0005) dupQty.push({ so: r.so, li: r.li, item: r.item, date: r.date, was: Number(had.qty), now: Number(r.qty) });
+      byId.set(lineId(r), r);
+    }
     const inFileDups = mapped.length - byId.size;
     mapped = Array.from(byId.values());
     weeks = Array.from(new Set(mapped.map((r) => String(r.week)))).sort();
@@ -427,7 +437,7 @@ async function handleUpload(env: Env, req: Request) {
     const added = mapped.length - updated;
     const removedRows = existing.filter((r) => !incomingIds.has(lineId(r)) && (mode === 'replace-week' || (mode === 'replace-plant' && cleanPlant(r.plant) === plant) || (mode === 'replace-day' && days.includes(String(r.date ?? '')))));
     const kept = existing.length - updated - removedRows.length;
-    const preview = { mode, plant, weeks, days: days.sort(), owner, planType, added, updated, removed: removedRows.length, kept, inFileDups, lines: mapped.length };
+    const preview = { mode, plant, weeks, days: days.sort(), owner, planType, added, updated, removed: removedRows.length, kept, inFileDups, dupQty: dupQty.slice(0, 30), dupQtyCount: dupQty.length, lines: mapped.length };
     if (body.dryRun) return json({ ok: true, dryRun: true, ...preview });
 
     const ids = JSON.stringify(mapped.map(lineId));
@@ -440,7 +450,7 @@ async function handleUpload(env: Env, req: Request) {
     planSummary = preview;
     // Status/comment columns that came with the file seed the dashboard, without overwriting edits made on it.
     const seed = mapped.filter((r) => r._status || r._comment || r._qi_note || r._vehicle)
-      .map((r) => ({ key: `${planType === 'day' ? r.date : r.week}#${r.key}`, status: r._status, comment: r._comment, vehicle: r._vehicle, qi_note: r._qi_note, updated_by: s.u, updated_at: now() }));
+      .map((r) => ({ key: statusKey({ plan_type: planType, week: r.week, date: r.date, key: r.key }), status: r._status, comment: r._comment, vehicle: r._vehicle, qi_note: r._qi_note, updated_by: s.u, updated_at: now() }));
     for (let i = 0; i < seed.length; i += 400) {
       stmts.push(env.DB.prepare(
         `INSERT OR IGNORE INTO line_status (key, status, comment, vehicle, qi_note, updated_by, updated_at)
@@ -475,10 +485,14 @@ async function handleUpload(env: Env, req: Request) {
       const pfcRows = zRows.filter((r) => pfcSet.has(loc(r)));
       const kfcRows = zRows.filter((r) => !pfcSet.has(loc(r)));
       const dz = await write('zmmbe', zRows), dk = await write('kfc', kfcRows), dp = await write('pfc', pfcRows);
-      const dpl = plantRows.length ? await write('plant', plantRows) : null;
+      // PLANT comes from ZMMBE only while no PLANT report of its own was uploaded: a few plant-location rows in a ZMMBE
+      // must never replace the full PLANT report (they are still kept out of ZMMBE / KFC / PFC)
+      const lastPlant = await env.DB.prepare("SELECT file_name FROM uploads WHERE src = 'plant' ORDER BY id DESC LIMIT 1").first<{ file_name: string | null }>();
+      const ownPlant = !!lastPlant && !/\(from ZMMBE\)$/.test(String(lastPlant.file_name ?? ''));
+      const dpl = plantRows.length && !ownPlant ? await write('plant', plantRows) : null;
       stmts.push(...dz.stmts, ...dk.stmts, ...dp.stmts, ...(dpl ? dpl.stmts : []));
       stockDiff = dz;
-      derived = { kfc: kfcRows.length, pfc: pfcRows.length, plant: dpl ? plantRows.length : null };
+      derived = { kfc: kfcRows.length, pfc: pfcRows.length, plant: dpl ? plantRows.length : null, ...(plantRows.length && !dpl ? { plantKept: plantRows.length } : {}) };
       const from = `${body.fileName || 'ZMMBE'} (from ZMMBE)`;
       for (const [src, n] of [['kfc', kfcRows.length], ['pfc', pfcRows.length], ...(dpl ? [['plant', plantRows.length]] : [])] as [string, number][]) {
         stmts.push(env.DB.prepare('INSERT INTO uploads (src, file_name, sheet_name, row_count, uploaded_by, uploaded_at, mode) VALUES (?,?,?,?,?,?,?)')
@@ -513,6 +527,14 @@ async function handleUpload(env: Env, req: Request) {
  *   Plant / St Location   = from ZMMBE (all distinct values, not only the first)
  *   TN QTY / TN number    = SUMIF / lookup on TRR
  */
+/**
+ * The line_status key of a plan line: a day plan line is "<day>#SO|LI|Item"; a week plan line is
+ * "<week>#SO|LI|Item@<date>", so the same SO / LI / Item on two days of one week keeps its own status.
+ */
+const SK = (a: string) => `(CASE WHEN ${a}.plan_type = 'day' THEN ${a}.date || '#' || ${a}.key ELSE ${a}.week || '#' || ${a}.key || '@' || COALESCE(${a}.date, '') END)`;
+const statusKey = (r: { plan_type?: unknown; week?: unknown; date?: unknown; key?: unknown }) =>
+  r.plan_type === 'day' ? `${r.date}#${r.key}` : `${r.week}#${r.key}@${r.date ?? ''}`;
+
 const PULL_PLAN_SQL = `
 WITH s AS (
   SELECT key,
@@ -542,7 +564,7 @@ SELECT p.rowid AS id, p.row_no, p.key, p.week, p.owner, p.plan_type, p.src_user,
   COALESCE(s.plant_qty,0) AS plant_qty, s.stock_plant, s.stock_sloc, s.at_plant,
   COALESCE(t.tn_qty,0) AS tn_qty, t.tn_number, d.dup,
   CASE WHEN ?2 IS NOT NULL AND EXISTS (
-    SELECT 1 FROM plan pp LEFT JOIN line_status pls ON pls.key = (CASE WHEN pp.plan_type = 'day' THEN pp.date ELSE pp.week END) || '#' || pp.key
+    SELECT 1 FROM plan pp LEFT JOIN line_status pls ON pls.key = ${SK('pp')}
     WHERE pp.week = ?2 AND pp.key = p.key AND (?3 IS NULL OR pp.owner = ?3) AND pp.plan_type = ?4 AND lower(COALESCE(pls.status, '')) NOT LIKE '%done%'
   ) THEN 1 ELSE 0 END AS carried,
   ls.status, ls.comment, ls.vehicle, ls.qi_note, ls.updated_by, ls.updated_at
@@ -550,14 +572,14 @@ FROM plan p
 LEFT JOIN s  ON s.key = p.key
 LEFT JOIN t  ON t.key = p.key
 LEFT JOIN d  ON d.key = p.key
-LEFT JOIN line_status ls ON ls.key = (CASE WHEN p.plan_type = 'day' THEN p.date ELSE p.week END) || '#' || p.key
+LEFT JOIN line_status ls ON ls.key = ${SK('p')}
 WHERE p.week = ?1 AND (?3 IS NULL OR p.owner = ?3) AND p.plan_type = ?4 AND (?5 IS NULL OR p.date = ?5)
 ORDER BY p.date, p.row_no`;
 
 const WEEKS_SQL = `
 SELECT p.week, COUNT(*) AS lines, MIN(p.date) AS start, MAX(p.date) AS end, SUM(p.qty) AS qty,
   SUM(CASE WHEN lower(COALESCE(ls.status, '')) LIKE '%done%' THEN 1 ELSE 0 END) AS done
-FROM plan p LEFT JOIN line_status ls ON ls.key = (CASE WHEN p.plan_type = 'day' THEN p.date ELSE p.week END) || '#' || p.key
+FROM plan p LEFT JOIN line_status ls ON ls.key = ${SK('p')}
 WHERE (?1 IS NULL OR p.owner = ?1) AND p.plan_type = ?2
 GROUP BY p.week ORDER BY p.week DESC`;
 
@@ -565,7 +587,7 @@ GROUP BY p.week ORDER BY p.week DESC`;
 const DAYS_SQL = `
 SELECT p.date AS day, p.week, COUNT(*) AS lines, SUM(p.qty) AS qty,
   SUM(CASE WHEN lower(COALESCE(ls.status, '')) LIKE '%done%' THEN 1 ELSE 0 END) AS done
-FROM plan p LEFT JOIN line_status ls ON ls.key = (CASE WHEN p.plan_type = 'day' THEN p.date ELSE p.week END) || '#' || p.key
+FROM plan p LEFT JOIN line_status ls ON ls.key = ${SK('p')}
 WHERE (?1 IS NULL OR p.owner = ?1) AND p.plan_type = 'day' AND p.date IS NOT NULL
 GROUP BY p.date ORDER BY p.date DESC LIMIT 90`;
 
@@ -686,6 +708,15 @@ async function handlePullPlan(env: Env, req: Request) {
   } catch { /* pick tables not created yet */ }
   const picksOf = (w: string | null) => pickAll.filter((x) => x.week === w);
   applyPicks(plan, picksOf(week));
+  // UR is stock of the SO / LI / Item, not of one plan line: every pick after the latest ZMMBE takes from it —
+  // also picks of its other lines (another date, another week). The full picked QTY counts (a full roll over the plan is gone too).
+  const takenAfter = new Map<string, number>();
+  for (const x of pickAll) { const k = String(x.line).slice(0, String(x.line).lastIndexOf('|')); takenAfter.set(k, r3((takenAfter.get(k) ?? 0) + Number(x.qty_after))); }
+  for (const r of plan) {
+    const t = takenAfter.get(String(r.key)) ?? 0;
+    r.ur_take_key = t;
+    r.ur_left = Math.max(0, r3(Number(r.ur ?? 0) - t));
+  }
   dispatch.total = r3(plan.reduce((t, x) => t + Number(x.dispatched || 0), 0));
   // other weeks with picks: work out which of their lines are complete, so the week list and "carried over" agree with the dashboard
   const otherWeeks = Array.from(new Set(pickAll.map((d) => d.week))).filter((w) => w !== week && weeks.some((x) => x.week === w));
@@ -693,7 +724,7 @@ async function handlePullPlan(env: Env, req: Request) {
   complete.set(String(week), plan);
   if (otherWeeks.length) {
     const light = (await env.DB.prepare(`SELECT p.row_no, p.key, p.week, p.item, p.date, p.qty, 0 AS ur, ls.status FROM plan p
-      LEFT JOIN line_status ls ON ls.key = (CASE WHEN p.plan_type = 'day' THEN p.date ELSE p.week END) || '#' || p.key WHERE p.week IN (SELECT value FROM json_each(?1)) AND (?2 IS NULL OR p.owner = ?2) AND p.plan_type = ?3`).bind(JSON.stringify(otherWeeks), owner, ptype).all<Row>()).results;
+      LEFT JOIN line_status ls ON ls.key = ${SK('p')} WHERE p.week IN (SELECT value FROM json_each(?1)) AND (?2 IS NULL OR p.owner = ?2) AND p.plan_type = ?3`).bind(JSON.stringify(otherWeeks), owner, ptype).all<Row>()).results;
     for (const w of otherWeeks) { const r = light.filter((x) => x.week === w); allocateDispatch(r, [], []); applyPicks(r, picksOf(w)); complete.set(w, r); }
   }
   const isDoneRow = (r: Row) => /done/i.test(String(r.status ?? '')) || (Number(r.dispatched) > 0 && Number(r.balance) <= 1e-9);
@@ -1395,12 +1426,16 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
   const lots: Row[] = [];
   for (const st of stock) {
     if (!(Number(st.ur) > 0)) continue;
-    const z = (await env.DB.prepare('SELECT * FROM zinr WHERE so = ? AND li = ? AND material = ? AND batch = ?').bind(st.so, st.li, st.material, st.batch).all<Row>()).results;
+    const zAll = (await env.DB.prepare('SELECT * FROM zinr WHERE so = ? AND li = ? AND material = ? AND batch = ?').bind(st.so, st.li, st.material, st.batch).all<Row>()).results;
+    // a batch can be in two storage locations (0202 + 0203): the lots of this row's location (when ZINR has one)
+    const inLoc = zAll.filter((x) => x.sloc && normId(x.sloc) === normId(st.sloc));
+    const z = inLoc.length ? inLoc : zAll.filter((x) => !x.sloc || !stock.some((o) => o !== st && o.batch === st.batch && normId(o.sloc) === normId(x.sloc)));
     // UR = Insp. Lot Quantity (when several lots share the batch, keep the one with the same quantity)
     const same = z.filter((x) => Math.abs(Number(x.qty) - Number(st.ur)) < 0.0005);
-    if (!z.length) steps.push(`Batch ${st.batch}: no ZINR inspection lot.`);
-    else if (!same.length) steps.push(`Batch ${st.batch}: ZINR lot qty ${z.map((x) => x.qty).join(', ')} ≠ ZMMBE UR ${st.ur}.`);
-    for (const x of same.length ? same : z) lots.push({ ...x, zmmbe_ur: st.ur, zmmbe_sloc: st.sloc, qty_ok: same.includes(x) });
+    if (!zAll.length) steps.push(`Batch ${st.batch}: no ZINR inspection lot.`);
+    else if (!same.length) steps.push(`Batch ${st.batch}${st.sloc ? ` (St Loc ${st.sloc})` : ''}: ZINR lot qty ${(z.length ? z : zAll).map((x) => x.qty).join(', ')} ≠ ZMMBE UR ${st.ur}.`);
+    // each inspection lot once, even when its batch is in several rows
+    for (const x of same.length ? same : z) if (!lots.some((l) => l.lot === x.lot)) lots.push({ ...x, zmmbe_ur: st.ur, zmmbe_sloc: st.sloc, qty_ok: same.includes(x) });
   }
   const rolls = new Map<string, Candidate>();
   const lotInfo: Row[] = [];
@@ -1605,26 +1640,35 @@ async function handleDispatch(env: Env, req: Request) {
 
 async function handleStatus(env: Env, req: Request) {
   const s = await requireUser(env, req, 'editor');
-  const b = (await req.json()) as { key: string; week?: string; status?: string | null; comment?: string | null; vehicle?: string | null; qi_note?: string | null };
+  const b = (await req.json()) as { key: string; week?: string; date?: string | null; status?: string | null; comment?: string | null; vehicle?: string | null; qi_note?: string | null };
   if (!b.key) throw new HttpError(400, 'Missing line key.');
   // the plan the status belongs to: a week (2026-W47) or, for a day plan, the day (2026-11-17)
   const week = b.week && /^(\d{4}-W\d{2}|\d{4}-\d{2}-\d{2})$/.test(b.week) ? b.week
     : (await env.DB.prepare('SELECT MAX(week) w FROM plan WHERE key = ?').bind(b.key).first<{ w: string | null }>())?.w || thisWeek();
-  const sKey = `${week}#${b.key}`;
+  const isDay = /^\d{4}-\d{2}-\d{2}$/.test(week);
+  // a week plan line is one date of the week ("date" in the body); without it (an older page) every line of that SO / LI / Item in the week
+  let sKeys = [`${week}#${b.key}`];
+  if (!isDay) {
+    sKeys = 'date' in b ? [`${week}#${b.key}@${normDate(b.date) ?? ''}`]
+      : (await env.DB.prepare("SELECT DISTINCT COALESCE(date, '') d FROM plan WHERE week = ? AND key = ? AND COALESCE(plan_type, 'week') = 'week'").bind(week, b.key).all<{ d: string }>()).results.map((r) => `${week}#${b.key}@${r.d}`);
+    if (!sKeys.length) sKeys = [`${week}#${b.key}@`];
+  }
   const fields = (['status', 'comment', 'vehicle', 'qi_note'] as const).filter((f) => f in b);
   if (!fields.length) throw new HttpError(400, 'Nothing to change.');
-  const cur = await env.DB.prepare('SELECT status, comment, vehicle, qi_note FROM line_status WHERE key = ?').bind(sKey).first<Row>();
+  const cur = await env.DB.prepare('SELECT status, comment, vehicle, qi_note FROM line_status WHERE key = ?').bind(sKeys[0]).first<Row>();
   const next: Row = { status: null, comment: null, vehicle: null, qi_note: null, ...(cur || {}) };
   for (const f of fields) next[f] = txt(b[f]);
+  const date = isDay ? week : 'date' in b ? normDate(b.date) : undefined;
   await env.DB.batch([
-    env.DB.prepare(`INSERT INTO line_status (key, status, comment, vehicle, qi_note, updated_by, updated_at) VALUES (?,?,?,?,?,?,?)
+    ...sKeys.map((k) => env.DB.prepare(`INSERT INTO line_status (key, status, comment, vehicle, qi_note, updated_by, updated_at) VALUES (?,?,?,?,?,?,?)
                     ON CONFLICT(key) DO UPDATE SET status=excluded.status, comment=excluded.comment, vehicle=excluded.vehicle,
                     qi_note=excluded.qi_note, updated_by=excluded.updated_by, updated_at=excluded.updated_at`)
-      .bind(sKey, next.status, next.comment, next.vehicle, next.qi_note, s.u, now()),
+      .bind(k, next.status, next.comment, next.vehicle, next.qi_note, s.u, now())),
     env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)')
-      .bind(now(), s.u, 'edit', `${week.includes('W') ? 'W' + week.slice(-2) : week} ${b.key.replace(/\|/g, ' / ')}: ${fields.map((f) => `${f} → ${next[f] ?? '(blank)'}`).join(', ')}`),
+      .bind(now(), s.u, 'edit', `${week.includes('W') ? 'W' + week.slice(-2) : week} ${b.key.replace(/\|/g, ' / ')}${!isDay && date ? ' ' + date : ''}: ${fields.map((f) => `${f} → ${next[f] ?? '(blank)'}`).join(', ')}`),
   ]);
-  const line = { key: b.key, week, status: next.status, comment: next.comment, vehicle: next.vehicle, qi_note: next.qi_note, updated_by: s.u, updated_at: now() };
+  // period = the week or the day; date = the line's date (undefined: every line of the key in that week)
+  const line = { key: b.key, period: week, ...(date !== undefined ? { date } : {}), status: next.status, comment: next.comment, vehicle: next.vehicle, qi_note: next.qi_note, updated_by: s.u, updated_at: now() };
   await broadcast(env, { type: 'status', line, by: s.u });
   return json({ ok: true, line });
 }
@@ -1679,8 +1723,20 @@ async function handlePlanLine(env: Env, req: Request, idPart: string) {
     }
     const changes = (['qty', 'date', 'plant', 'remarks'] as const).filter((f) => String(next[f] ?? '') !== String(cur[f] ?? '')).map((f) => `${f} ${cur[f] ?? '–'} → ${next[f] ?? '–'}`);
     if (!changes.length) return json({ ok: true, unchanged: true });
+    // a new date: the line's status and its picks move with it (they are kept per date)
+    const moved: D1PreparedStatement[] = [];
+    if ((next.date ?? '') !== (cur.date ?? '')) {
+      const oldK = statusKey(cur), newK = statusKey({ ...cur, date: next.date });
+      moved.push(
+        env.DB.prepare('INSERT OR REPLACE INTO line_status (key, status, comment, vehicle, qi_note, updated_by, updated_at) SELECT ?2, status, comment, vehicle, qi_note, updated_by, updated_at FROM line_status WHERE key = ?1').bind(oldK, newK),
+        env.DB.prepare('DELETE FROM line_status WHERE key = ?').bind(oldK),
+        env.DB.prepare('UPDATE picks SET line = ?3 WHERE week = ?1 AND line = ?2').bind(cur.week, `${cur.key}|${cur.date ?? ''}`, `${cur.key}|${next.date ?? ''}`),
+        env.DB.prepare('UPDATE pick_req SET line = ?3 WHERE week = ?1 AND line = ?2').bind(cur.week, `${cur.key}|${cur.date ?? ''}`, `${cur.key}|${next.date ?? ''}`),
+      );
+    }
     await env.DB.batch([
       env.DB.prepare('UPDATE plan SET qty = ?, date = ?, plant = ?, remarks = ?, src_user = ?, src_at = ? WHERE rowid = ?').bind(next.qty, next.date, next.plant, next.remarks, s.u, now(), id),
+      ...moved,
       env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'line', `Edited ${label}: ${changes.join(', ')}`),
     ]);
     await broadcast(env, { type: 'data', src: 'plan', by: s.u, rows: 1, weeks: [cur.week] });
@@ -1768,7 +1824,15 @@ async function handleClear(env: Env, req: Request, src: string) {
     return json({ ok: true });
   }
   const stmt = src === 'plan' ? 'DELETE FROM plan' : src === 'trr' ? 'DELETE FROM trr' : 'DELETE FROM stock WHERE src = ?';
+  // ZMMBE KFC / PFC (and PLANT, when it came from ZMMBE) are built from ZMMBE: they go with it
+  const alsoClear: D1PreparedStatement[] = [];
+  if (src === 'zmmbe' && (await getSettings(env)).deriveFromZmmbe) {
+    alsoClear.push(env.DB.prepare("DELETE FROM stock WHERE src IN ('kfc', 'pfc')"));
+    const lastPlant = await env.DB.prepare("SELECT file_name FROM uploads WHERE src = 'plant' ORDER BY id DESC LIMIT 1").first<{ file_name: string | null }>();
+    if (lastPlant && /\(from ZMMBE\)$/.test(String(lastPlant.file_name ?? ''))) alsoClear.push(env.DB.prepare("DELETE FROM stock WHERE src = 'plant'"));
+  }
   await env.DB.batch([
+    ...alsoClear,
     src === 'plan' || src === 'trr' ? env.DB.prepare(stmt) : env.DB.prepare(stmt).bind(src),
     env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'clear', `Cleared ${SRC_LABEL[src as Src]}`),
   ]);
@@ -1788,7 +1852,7 @@ async function handleAdminPlans(env: Env, req: Request) {
     const r = await env.DB.prepare(`SELECT p.owner, p.plan_type AS type, p.week, CASE WHEN p.plan_type = 'day' THEN p.date END AS day,
         COUNT(*) lines, ROUND(SUM(p.qty), 3) qty, MIN(p.date) start, MAX(p.date) end, MAX(p.src_at) uploaded,
         SUM(CASE WHEN lower(COALESCE(ls.status, '')) LIKE '%done%' THEN 1 ELSE 0 END) done
-      FROM plan p LEFT JOIN line_status ls ON ls.key = (CASE WHEN p.plan_type = 'day' THEN p.date ELSE p.week END) || '#' || p.key
+      FROM plan p LEFT JOIN line_status ls ON ls.key = ${SK('p')}
       GROUP BY p.owner, p.plan_type, p.week, CASE WHEN p.plan_type = 'day' THEN p.date END
       ORDER BY p.week DESC, day DESC, p.owner LIMIT 400`).all();
     return json({ plans: r.results });

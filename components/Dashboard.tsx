@@ -9,7 +9,7 @@ import PlantSummary from '@/components/PlantSummary';
 import type { PlantInfo } from '@/lib/summary';
 import { api, userParam } from '@/lib/api';
 import { useRefreshOnActivity } from '@/lib/freshness';
-import { COVERAGES, type DispatchSummary, ago, compact, coverage, fmt, fmtDate, isDone, totals, type Coverage, type Line, type Upload, type WeekInfo } from '@/lib/calc';
+import { COVERAGES, type DispatchSummary, ago, compact, coverage, fmt, fmtDate, isDone, lineRef, totals, type Coverage, type Line, type Upload, type WeekInfo } from '@/lib/calc';
 import { exportPullPlan } from '@/lib/export';
 import { CountUp } from '@/components/Brand';
 import InsightDrawer from '@/components/InsightDrawer';
@@ -93,8 +93,11 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
   useEffect(() => subscribe((m) => {
     if (m.type === 'data') { clearTimeout(reloadTimer.current); reloadTimer.current = setTimeout(load, 400); }
     if (m.type === 'status') {
-      const line = m.line as Partial<Line> & { key: string };
-      setData((d) => d && { ...d, rows: d.rows.map((r) => (r.key === line.key && (!line.week || r.week === line.week) ? { ...r, ...line } : r)) });
+      // period = the week (or the day of a day plan); date = the one line (none: every line of that SO / LI / Item in the week)
+      const { period, ...line } = m.line as Partial<Line> & { key: string; period?: string; week?: string };
+      const per = period ?? line.week;
+      setData((d) => d && { ...d, rows: d.rows.map((r) => (r.key === line.key && (!per || periodOf(r) === per) && (!('date' in line) || (r.date ?? null) === (line.date ?? null))
+        ? { ...r, status: line.status ?? null, comment: line.comment ?? null, vehicle: line.vehicle ?? null, qi_note: line.qi_note ?? null, updated_by: line.updated_by ?? null, updated_at: line.updated_at ?? null } : r)) });
       setFlash((f) => new Set(f).add(line.key));
       setTimeout(() => setFlash((f) => { const n = new Set(f); n.delete(line.key); return n; }), 2300);
     }
@@ -138,10 +141,12 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
     return <span className={`delta ${goodUp ? 'good-up' : ''} ${cls}`}>{cls === 'flat' ? '=' : txt}</span>;
   };
 
-  const save = useCallback(async (key: string, field: 'status' | 'comment' | 'vehicle', value: string) => {
-    setData((d) => d && { ...d, rows: d.rows.map((r) => (r.key === key ? { ...r, [field]: value || null, updated_by: user.username } : r)) });
-    const line = data?.rows.find((r) => r.key === key);
-    try { await api('/api/status', { method: 'PATCH', body: { key, week: line ? periodOf(line) : data?.week, [field]: value || null } }); }
+  // ref = lineRef(line): the status belongs to that one line (the same SO / LI / Item on another date keeps its own)
+  const save = useCallback(async (ref: string, field: 'status' | 'comment' | 'vehicle', value: string) => {
+    setData((d) => d && { ...d, rows: d.rows.map((r) => (lineRef(r) === ref ? { ...r, [field]: value || null, updated_by: user.username } : r)) });
+    const line = data?.rows.find((r) => lineRef(r) === ref);
+    if (!line) return;
+    try { await api('/api/status', { method: 'PATCH', body: { key: line.key, week: periodOf(line), date: line.date ?? null, [field]: value || null } }); }
     catch (e) { toast(e instanceof Error ? e.message : 'Save failed.'); load(); throw e; }
   }, [user.username, toast, load, data?.week, data?.rows]);
 

@@ -15,6 +15,8 @@ export interface Line {
   dispatched?: number; balance?: number; ur_left?: number;
   /** part of the dispatch that comes off UR: what was uploaded after the latest ZMMBE */
   ur_take?: number;
+  /** UR taken by every pick of this SO / LI / Item after the latest ZMMBE (all its lines, all weeks) */
+  ur_take_key?: number;
   /** QI / Block released to UR by hand (until the next ZMMBE) */
   released?: number;
   /** dispatch item whose left-over QTY was assigned to this line */
@@ -25,6 +27,8 @@ export interface DispatchItem { item: string; dispatched: number; allocated: num
 export interface DispatchAssign { id: number; week: string; item: string; line: string; qty: number; by_user?: string; at?: string; applied?: number }
 export interface DispatchSummary { total: number; items: DispatchItem[]; unmatched: DispatchItem[]; leftover?: DispatchItem[]; assigns?: DispatchAssign[]; planLines?: number; elsewhere?: Record<string, string[]> }
 
+/** One plan line: the same SO / LI / Item can be on several dates of a week. */
+export const lineRef = (l: Pick<Line, 'key' | 'date'>) => `${l.key}@${l.date ?? ''}`;
 /** QTY still to send (plan QTY − dispatched). */
 export const need = (l: Line) => (l.balance ?? l.qty);
 /** UR stock still available after the dispatch (UR − dispatched). */

@@ -118,11 +118,11 @@ function Uploads() {
     setJob(j.id, { state: 'sending', msg: undefined });
     try {
       const rows = applyMapping(j.src, j.grid, j.map);
-      const r = await api<PlanPreview & { accepted: number; skipped: number; weeks?: string[]; stockDups?: number; changes?: { added: number; removed: number; unchanged: number }; derived?: { kfc: number; pfc: number; plant: number | null } }>('/api/upload', { method: 'POST', body: { src: j.src, fileName: j.file, sheetName: j.sheet, rows, ...planOpts(j, myPlant) } });
+      const r = await api<PlanPreview & { accepted: number; skipped: number; weeks?: string[]; stockDups?: number; changes?: { added: number; removed: number; unchanged: number }; derived?: { kfc: number; pfc: number; plant: number | null; plantKept?: number } }>('/api/upload', { method: 'POST', body: { src: j.src, fileName: j.file, sheetName: j.sheet, rows, ...planOpts(j, myPlant) } });
       const wk = r.weeks?.length ? ` to ${r.weeks.map((w) => 'Week ' + Number(w.slice(-2))).join(', ')}` : '';
       await loadStatus();
       if (j.src === 'zmmbe' || j.src === 'plan') setShowReady(true);
-      const plan = j.src === 'plan' && r.added !== undefined ? `${fmt(r.added)} new, ${fmt(r.updated)} updated${r.removed ? `, ${fmt(r.removed)} removed` : ''}${r.inFileDups ? `, ${fmt(r.inFileDups)} repeated rows in the file merged` : ''}` : `${fmt(r.accepted)} rows saved — ${j.stockMode === 'add' ? 'added to the current report' : 'whole report replaced, no duplicates'}${r.stockDups ? ` · ${fmt(r.stockDups)} repeated rows counted once` : ''}${r.changes ? ` · ${fmt(r.changes.unchanged)} unchanged, ${fmt(r.changes.added)} new or changed, ${fmt(r.changes.removed)} removed` : ''}${r.derived ? ` · also built ZMMBE KFC (${fmt(r.derived.kfc)}) and PFC (${fmt(r.derived.pfc)})${r.derived.plant !== null ? ` and PLANT (${fmt(r.derived.plant)})` : ''}` : ''}`;
+      const plan = j.src === 'plan' && r.added !== undefined ? `${fmt(r.added)} new, ${fmt(r.updated)} updated${r.removed ? `, ${fmt(r.removed)} removed` : ''}${r.inFileDups ? `, ${fmt(r.inFileDups)} repeated rows (last row kept${r.dupQtyCount ? `; ${fmt(r.dupQtyCount)} had a different QTY` : ''})` : ''}` : `${fmt(r.accepted)} rows saved — ${j.stockMode === 'add' ? 'added to the current report' : 'whole report replaced, no duplicates'}${r.stockDups ? ` · ${fmt(r.stockDups)} repeated rows counted once` : ''}${r.changes ? ` · ${fmt(r.changes.unchanged)} unchanged, ${fmt(r.changes.added)} new or changed, ${fmt(r.changes.removed)} removed` : ''}${r.derived ? ` · also built ZMMBE KFC (${fmt(r.derived.kfc)}) and PFC (${fmt(r.derived.pfc)})${r.derived.plant !== null ? ` and PLANT (${fmt(r.derived.plant)})` : ''}${r.derived.plantKept ? ` · ${fmt(r.derived.plantKept)} plant-location row${r.derived.plantKept === 1 ? '' : 's'} left out (your PLANT upload is kept)` : ''}` : ''}`;
       setJob(j.id, { state: 'done', msg: `${plan}${wk}${r.skipped > 0 ? ` · ${fmt(r.skipped)} rows without SO/LI/Material skipped` : ''}. Every open dashboard has updated.` });
     } catch (e) {
       setJob(j.id, { state: 'error', msg: e instanceof Error ? e.message : 'Upload failed.' });
@@ -318,7 +318,7 @@ function show(v: unknown, id: string) {
   return String(v);
 }
 
-interface PlanPreview { owner?: string; planType?: string; days?: string[]; added: number; updated: number; removed: number; kept: number; inFileDups: number; lines: number; plant: string | null; mode: string }
+interface PlanPreview { owner?: string; planType?: string; days?: string[]; added: number; updated: number; removed: number; kept: number; inFileDups: number; dupQty?: { so: string; li: string; item: string; date: string | null; was: number; now: number }[]; dupQtyCount?: number; lines: number; plant: string | null; mode: string }
 function planOpts(j: SheetJob, myPlant: string) {
   if (j.src !== 'plan') return j.stockMode === 'add' ? { mode: 'add' } : {};
   const plant = (j.plant ?? myPlant).trim();
@@ -441,10 +441,17 @@ function SheetCard({ job, myPlant, plants, owners, me, onChange, onSend, onRemov
                 <span className="pc upd"><b>{fmt(preview.updated)}</b> updated</span>
                 <span className="pc del"><b>{fmt(preview.removed)}</b> removed</span>
                 <span className="pc keep"><b>{fmt(preview.kept)}</b> other lines kept</span>
-                {preview.inFileDups > 0 && <span className="pc">{fmt(preview.inFileDups)} repeated rows in the file merged</span>}
+                {preview.inFileDups > 0 && <span className="pc">{fmt(preview.inFileDups)} line{preview.inFileDups === 1 ? ' is' : 's are'} in the file twice — the last row is kept</span>}
                 {(job.planType || 'week') === 'day' && preview.days?.length ? <span className="pc">Day plan for {preview.days.map((d) => fmtDate(d)).join(', ')}</span> : null}
                 {preview.owner && preview.owner !== me ? <span className="pc">Plan of <b>{preview.owner}</b></span> : null}
                 <span className="muted">No line is ever added twice: a line with the same week, SO, LI, Item and date is updated.</span>
+                {!!preview.dupQtyCount && (
+                  <div className="notice warn dup-qty" style={{ width: '100%' }}>
+                    <b>{preview.dupQtyCount} repeated line{preview.dupQtyCount === 1 ? '' : 's'} with a different QTY</b> — the last row&apos;s QTY is used. Check these in the file:
+                    <ul>{(preview.dupQty || []).map((d, i) => <li key={i}>{d.so} / {d.li} / {d.item} · {fmtDate(d.date)}: {fmt(d.was, 3)} → <b>{fmt(d.now, 3)}</b></li>)}</ul>
+                    {preview.dupQtyCount > (preview.dupQty?.length || 0) && <span className="muted">… and {preview.dupQtyCount - (preview.dupQty?.length || 0)} more</span>}
+                  </div>
+                )}
               </>
             ) : <Loader inline label="Checking what this upload will change…" />}
           </div>

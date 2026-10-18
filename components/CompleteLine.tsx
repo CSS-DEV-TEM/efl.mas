@@ -23,7 +23,7 @@ export default function CompleteLine({ line, onDone, small = true }: { line: L; 
     setBusy(true); setErr('');
     try {
       const note = complete ? `Completed by hand: ${fmt(sent, 2)} of ${fmt(Number(line.qty), 2)}${Math.abs(diff) > 0.0005 ? ` (${diff > 0 ? '+' : ''}${fmt(diff, 2)})` : ''}` : null;
-      await api('/api/status', { method: 'PATCH', body: { key: line.key, week: periodOf(line), status: complete ? 'Done' : null, ...(note ? { comment: [line.comment, note].filter(Boolean).join(' · ') } : {}) } });
+      await api('/api/status', { method: 'PATCH', body: { key: line.key, week: periodOf(line), date: line.date ?? null, status: complete ? 'Done' : null, ...(note ? { comment: [line.comment, note].filter(Boolean).join(' · ') } : {}) } });
       setOpen(false);
       onDone(complete ? `${line.so} / ${line.li} marked complete` : `${line.so} / ${line.li} reopened`);
     } catch (e) { setErr(e instanceof Error ? e.message : 'Could not save.'); } finally { setBusy(false); }

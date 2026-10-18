@@ -1,6 +1,6 @@
 'use client';
 import { memo, useEffect, useMemo, useState } from 'react';
-import { avail, coverage, fmtDate, fmtQty, isDispatched, isDone, need, shortBy, type Line } from '@/lib/calc';
+import { avail, coverage, fmtDate, fmtQty, isDispatched, isDone, lineRef, need, shortBy, type Line } from '@/lib/calc';
 import { ACTION_HELP, ACTION_PILL, DUE_PILL, action, due, priority, todayLocal } from '@/lib/smart';
 
 const TODAY = todayLocal();
@@ -23,7 +23,7 @@ const COLS: Col[] = [
   { id: 'dispatched', label: 'Dispatched', grp: 'Dispatch', n: true, get: (l) => l.dispatched ?? 0, render: (l) => (l.dispatched ? <span className="disp-q">{q(l.dispatched)}{isDispatched(l) && <span className="tick" title="Fully dispatched — complete">✓</span>}</span> : '–') },
   { id: 'balance', label: 'Balance', grp: 'Dispatch', n: true, get: (l) => need(l), render: (l) => (l.dispatched ? <b className={need(l) > 0 ? '' : 'pos'}>{need(l) > 0 ? q(need(l)) : '0'}</b> : q(need(l))) },
   { id: 'ur', label: 'UR', grp: 'Full', n: true, get: (l) => l.ur, render: (l) => (l.released ? <span title={`Includes ${q(l.released)} QI / Block released to UR`}>{q(l.ur)}<span className="rel-tag">+rel</span></span> : q(l.ur)) },
-  { id: 'ur_left', label: 'UR left', grp: 'Full', n: true, full: true, get: (l) => avail(l), render: (l) => <span title={l.dispatched ? `UR − ${q(l.ur_take ?? 0)} dispatched after the latest ZMMBE (${q((l.dispatched ?? 0) - (l.ur_take ?? 0))} dispatched before it is already out of ZMMBE)` : ''}>{q(avail(l))}</span> },
+  { id: 'ur_left', label: 'UR left', grp: 'Full', n: true, full: true, get: (l) => avail(l), render: (l) => <span title={(l.ur_take_key ?? l.ur_take ?? 0) > 0 ? `UR − ${q(l.ur_take_key ?? l.ur_take ?? 0)} picked after the latest ZMMBE (every line of this SO / LI / Item; picks before that ZMMBE are already out of its UR)` : ''}>{q(avail(l))}</span> },
   { id: 'qi', label: 'QI', grp: 'Full', n: true, get: (l) => l.qi, render: (l) => q(l.qi) },
   { id: 'block', label: 'Block', grp: 'Full', n: true, get: (l) => l.block, render: (l) => q(l.block) },
   { id: 'assigned', label: 'Assigned', n: true, full: true, get: (l) => l.assigned, render: (l) => q(l.assigned) },
@@ -50,6 +50,7 @@ export interface LedgerProps {
   canEdit: boolean;
   full: boolean;
   flash: Set<string>;
+  /** `key` = lineRef(line): SO|LI|Item@date */
   onSave: (key: string, field: 'status' | 'comment' | 'vehicle', value: string) => Promise<void>;
   onEdit?: (l: Line) => void;
 }
@@ -115,15 +116,15 @@ const Row = memo(function Row({ l, cols, canEdit, flash, onSave, onEdit }: { l: 
   const done = isDone(l);
   return (
     <tr className={`${done ? 'done' : ''} ${flash ? 'flash' : ''}`}>
-      <td className="first">{isDispatched(l) && !l.status ? <span className="pill ok" title={`Dispatched ${fmtQty(l.dispatched ?? 0)} — complete from the dispatch upload`}>Dispatched ✓</span> : <EditCell value={l.status} field="status" k={l.key} canEdit={canEdit} onSave={onSave} list="status-options" />}</td>
+      <td className="first">{isDispatched(l) && !l.status ? <span className="pill ok" title={`Dispatched ${fmtQty(l.dispatched ?? 0)} — complete from the dispatch upload`}>Dispatched ✓</span> : <EditCell value={l.status} field="status" k={lineRef(l)} canEdit={canEdit} onSave={onSave} list="status-options" />}</td>
       {cols.map((c) => {
         const v = c.get(l);
         const zero = c.n && typeof v === 'number' && Math.abs(v) < 0.0005;
         const neg = c.id === 'short' && typeof v === 'number' && v > 0.0005 && !done;
         return <td key={c.id} className={`${c.n ? 'n' : ''} ${zero ? 'z' : ''} ${neg ? 'neg' : ''} ${c.id === 'so' ? 'so mono' : c.id === 'item' ? 'mono' : ''}`}>{c.render ? c.render(l) : v}</td>;
       })}
-      <td><EditCell value={l.comment} field="comment" k={l.key} canEdit={canEdit} onSave={onSave} /></td>
-      <td><EditCell value={l.vehicle} field="vehicle" k={l.key} canEdit={canEdit} onSave={onSave} list="vehicle-options" /></td>
+      <td><EditCell value={l.comment} field="comment" k={lineRef(l)} canEdit={canEdit} onSave={onSave} /></td>
+      <td><EditCell value={l.vehicle} field="vehicle" k={lineRef(l)} canEdit={canEdit} onSave={onSave} list="vehicle-options" /></td>
       <td className="muted" title={l.updated_at || ''}>{l.updated_by || ''}</td>
       {canEdit && onEdit && <td><button type="button" className="btn sm" onClick={() => onEdit(l)} aria-label={`Edit ${l.so} / ${l.li}`}>✎ Edit</button></td>}
     </tr>

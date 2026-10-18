@@ -55,6 +55,10 @@ export function plantSummary(rows: Line[], plants: PlantInfo[], received: { code
   // plants set up in settings show even with no lines this week, like the sheet
   for (const p of plants) if (!by.has(p.code.toUpperCase())) by.set(p.code.toUpperCase(), []);
 
+  // UR / QI / Block are stock of the SO / LI / Item: lines of the same one (other dates) share it, earliest date first
+  const stockLeft = new Map<string, { ur: number; qi: number; block: number }>();
+  const stockOf = (l: Line) => { let x = stockLeft.get(l.key); if (!x) { x = { ur: avail(l), qi: l.qi, block: l.block }; stockLeft.set(l.key, x); } return x; };
+  const byDate = (a: Line, b: Line) => String(a.date ?? '9999').localeCompare(String(b.date ?? '9999')) || (a.row_no ?? 0) - (b.row_no ?? 0);
   const make = (code: string, ls: Line[]): PlantRow => {
     const p = info.get(code);
     const r: PlantRow = {
@@ -62,7 +66,7 @@ export function plantSummary(rows: Line[], plants: PlantInfo[], received: { code
       plan: b0(), ur: b0(), wh: 0, qi: b0(), block: b0(), nih: b0(), adhoc: b0(), sameDay: b0(), released: b0(), dispatched: b0(), total: 0, pending: b0(),
     };
     const relKeys = new Set<string>();
-    for (const l of ls) {
+    for (const l of [...ls].sort(byDate)) {
       add(r.plan, l.qty);
       if (l.src_at && (!r.received || l.src_at > r.received)) r.received = l.src_at;
       add(r.dispatched, l.dispatched ?? 0);
@@ -70,9 +74,10 @@ export function plantSummary(rows: Line[], plants: PlantInfo[], received: { code
       if (l.src_at && l.date && colombo(l.src_at).toISOString().slice(0, 10) === l.date) add(r.sameDay, need(l));
       let left = need(l);
       if (isAdhoc(l)) { add(r.adhoc, left); left = 0; }
-      const u = Math.min(left, avail(l)); add(r.ur, u); left -= u;
-      const q = Math.min(left, l.qi); add(r.qi, q); left -= q;
-      const k = Math.min(left, l.block); add(r.block, k); left -= k;
+      const st = stockOf(l);
+      const u = Math.min(left, st.ur); add(r.ur, u); left -= u; st.ur -= u;
+      const q = Math.min(left, st.qi); add(r.qi, q); left -= q; st.qi -= q;
+      const k = Math.min(left, st.block); add(r.block, k); left -= k; st.block -= k;
       add(r.nih, left);
       if (!isDone(l)) add(r.pending, need(l));
     }

@@ -38,7 +38,7 @@ export default function EditLine({ line, week, planType = 'week', onClose, onSav
       if (adding) {
         await api('/api/plan', { method: 'POST', body: { week, planType, so: f.so, li: f.li, item: f.item, date: f.date || null, qty: f.qty, plant: f.plant, remarks: f.remarks } });
         if (f.status || f.comment || f.vehicle) {
-          await api('/api/status', { method: 'PATCH', body: { key: `${f.so.trim().toUpperCase().replace(/^0+/, '')}|${f.li.trim().replace(/^0+(?=\d)/, '')}|${f.item.trim().replace(/^0+/, '')}`, week: planType === 'day' && f.date ? f.date : week, status: f.status || null, comment: f.comment || null, vehicle: f.vehicle || null } });
+          await api('/api/status', { method: 'PATCH', body: { key: `${f.so.trim().toUpperCase().replace(/^0+/, '')}|${f.li.trim().replace(/^0+(?=\d)/, '')}|${f.item.trim().replace(/^0+/, '')}`, week: planType === 'day' && f.date ? f.date : week, date: f.date || null, status: f.status || null, comment: f.comment || null, vehicle: f.vehicle || null } });
         }
         onSaved(`Added ${f.so} / ${f.li}`);
       } else {
@@ -48,7 +48,7 @@ export default function EditLine({ line, week, planType = 'week', onClose, onSav
         if ((f.status || '') !== (line.status || '')) st.status = f.status || null;
         if ((f.comment || '') !== (line.comment || '')) st.comment = f.comment || null;
         if ((f.vehicle || '') !== (line.vehicle || '')) st.vehicle = f.vehicle || null;
-        if (Object.keys(st).length) await api('/api/status', { method: 'PATCH', body: { key: line.key, week: (line as Line & { plan_type?: string }).plan_type === 'day' && line.date ? line.date : line.week, ...st } });
+        if (Object.keys(st).length) await api('/api/status', { method: 'PATCH', body: { key: line.key, week: (line as Line & { plan_type?: string }).plan_type === 'day' && (f.date || line.date) ? f.date || line.date : line.week, date: f.date || null, ...st } });
         onSaved(planChanged || Object.keys(st).length ? `Saved ${line.so} / ${line.li}` : 'No changes');
       }
       onClose();
