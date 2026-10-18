@@ -40,7 +40,10 @@ export const fmtTime = (iso: string | null) => {
   return `${((h + 11) % 12) + 1}:${String(m).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`;
 };
 
-export function plantSummary(rows: Line[], plants: PlantInfo[], received: { code: string; received: string | null }[] = []): { rows: PlantRow[]; total: PlantRow } {
+/** Time setup (Admin → Settings): SO/LI lines per hour for W/H, grace minutes before "late", target when a plant has none. */
+export interface TimeSetup { soliPerHour?: number; lateGraceMin?: number; defaultTarget?: string }
+export function plantSummary(rows: Line[], plants: PlantInfo[], received: { code: string; received: string | null }[] = [], time: TimeSetup = {}): { rows: PlantRow[]; total: PlantRow } {
+  const perHour = time.soliPerHour && time.soliPerHour > 0 ? time.soliPerHour : SOLI_PER_HOUR;
   const rec = new Map(received.map((r) => [r.code.toUpperCase(), r.received || '']));
   const info = new Map(plants.map((p) => [p.code.toUpperCase(), p]));
   const by = new Map<string, Line[]>();
@@ -55,7 +58,7 @@ export function plantSummary(rows: Line[], plants: PlantInfo[], received: { code
   const make = (code: string, ls: Line[]): PlantRow => {
     const p = info.get(code);
     const r: PlantRow = {
-      code, name: p?.name || code, responsible: p?.responsible || '', target: p?.target || '', received: null, receivedText: '', receivedManual: false, late: null,
+      code, name: p?.name || code, responsible: p?.responsible || '', target: p?.target || time.defaultTarget || '', received: null, receivedText: '', receivedManual: false, late: null,
       plan: b0(), ur: b0(), wh: 0, qi: b0(), block: b0(), nih: b0(), adhoc: b0(), sameDay: b0(), released: b0(), dispatched: b0(), total: 0, pending: b0(),
     };
     const relKeys = new Set<string>();
@@ -73,13 +76,13 @@ export function plantSummary(rows: Line[], plants: PlantInfo[], received: { code
       add(r.nih, left);
       if (!isDone(l)) add(r.pending, need(l));
     }
-    r.wh = r.ur.soli / SOLI_PER_HOUR;
+    r.wh = r.ur.soli / perHour;
     r.total = r.ur.qty + r.adhoc.qty;
     const typed = rec.get(code);
     r.receivedManual = !!typed;
     r.receivedText = typed || fmtTime(r.received);
     const tm = timeMinutes(r.target), rm = timeMinutes(r.receivedText);
-    if (tm !== null && rm !== null) r.late = rm > tm;
+    if (tm !== null && rm !== null) r.late = rm > tm + (time.lateGraceMin || 0);
     return r;
   };
   const out = Array.from(by.entries()).map(([c, ls]) => make(c, ls))

@@ -6,7 +6,7 @@ import { ACTIONS, action, due, priority, todayLocal } from './smart';
 export function exportPullPlan(rows: Line[], name = 'MAS_Weekly_Plan') {
   const today = todayLocal();
   const data = rows.map((l) => ({
-    Week: l.week, Priority: priority(l, today), 'Next action': action(l), Due: due(l, today), 'Carried over': l.carried ? 'Yes' : '',
+    Week: l.week, User: (l as Line & { owner?: string }).owner ?? '', Plan: (l as Line & { plan_type?: string }).plan_type === 'day' ? 'Day plan' : 'Week plan', Picked: (l as Line & { picked?: number }).picked ?? 0, Priority: priority(l, today), 'Next action': action(l), Due: due(l, today), 'Carried over': l.carried ? 'Yes' : '',
     SO: Number(l.so) || l.so, LI: Number(l.li) || l.li, 'Item Code': Number(l.item) || l.item, Date: l.date, QTY: l.qty, Dispatched: l.dispatched ?? 0, Balance: need(l),
     Plant: l.plant, Remarks: l.remarks, Comment: l.comment, 'QI note': l.qi_note, Status: l.status, Vehicle: l.vehicle,
     'UR (Full)': l.ur, 'UR left': avail(l), 'QI (Full)': l.qi, 'Block (Full)': l.block, Assigned: l.assigned, Variance: l.variance,
@@ -29,6 +29,11 @@ export function exportPullPlan(rows: Line[], name = 'MAS_Weekly_Plan') {
     ...dates.map((d) => [d || 'No date', n((l) => (l.date || '') === d), n((l) => (l.date || '') === d && isDone(l)), n((l) => (l.date || '') === d && !isDone(l)), q((l) => (l.date || '') === d),
       Math.round(rows.filter((l) => (l.date || '') === d && !isDone(l)).reduce((s, l) => s + shortBy(l), 0) * 1000) / 1000]),
     [], ['Carried over from last week (open)', n((l) => !!l.carried && !isDone(l))],
+    [], ['User', 'Lines', 'Done', 'Open', 'QTY', 'Picked'],
+    ...Array.from(new Set(rows.map((l) => (l as Line & { owner?: string }).owner || ''))).sort().map((u) => {
+      const ur = rows.filter((l) => ((l as Line & { owner?: string }).owner || '') === u);
+      return [u || '–', ur.length, ur.filter(isDone).length, ur.filter((l) => !isDone(l)).length, Math.round(ur.reduce((t, l) => t + l.qty, 0) * 1000) / 1000, Math.round(ur.reduce((t, l) => t + Number((l as Line & { picked?: number }).picked ?? 0), 0) * 1000) / 1000];
+    }),
   ];
   const sum = XLSX.utils.aoa_to_sheet(summary);
   sum['!cols'] = [{ wch: 34 }, { wch: 14 }, { wch: 10 }, { wch: 10 }, { wch: 14 }, { wch: 14 }];

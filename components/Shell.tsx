@@ -81,8 +81,10 @@ export default function Shell({ children, admin, allowGuest }: { children: React
 
   if (!user) return null;
 
-  const nav = guest ? [{ href: '/', label: 'Dashboard' }] : [
-    { href: '/', label: 'Dashboard' },
+  const nav = guest ? [{ href: '/', label: 'Week plan' }, { href: '/day/', label: 'Day plan' }] : [
+    { href: '/', label: 'Week plan' },
+    { href: '/day/', label: 'Day plan' },
+    ...(user.role !== 'viewer' ? [{ href: '/my/', label: 'My work' }] : []),
     { href: '/upload/', label: 'Uploads' },
     { href: '/dispatch/', label: 'Pick & Dispatch' },
     ...(user.role === 'admin' ? [{ href: '/settings/', label: 'Settings' }] : []),

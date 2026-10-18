@@ -1,7 +1,8 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, userParam } from '@/lib/api';
-import { ago, avail, fmt, fmtDate, fmtQty, isDispatched, need, type Line } from '@/lib/calc';
+import { api, getSession, isBossRole } from '@/lib/api';
+import CompleteLine from '@/components/CompleteLine';
+import { ago, avail, fmt, fmtDate, fmtQty, isDispatched, isDone, need, type Line } from '@/lib/calc';
 import { action } from '@/lib/smart';
 import {
   PICK_SRCS, korberWorkbook, ordinal, packingListWorkbook, saveWorkbook, uploadPickFile,
@@ -24,7 +25,7 @@ function pendingWhy(l: LineP): string {
 export default function PickWorkspace({ week, rows, canEdit, toast, reload }: { week: string; rows: LineP[]; canEdit: boolean; toast: (m: string) => void; reload: () => void }) {
   const [status, setStatus] = useState<{ counts: { src: string; n: number }[]; uploads: { src: string; file_name: string | null; row_count: number; uploaded_by: string; uploaded_at: string }[] } | null>(null);
   const [busy, setBusy] = useState<PickSrc | null>(null);
-  const [scope, setScope] = useState<'pending' | 'ready' | 'open' | 'picked'>('pending');
+  const [scope, setScope] = useState<'pending' | 'ready' | 'open' | 'picked' | 'done'>('pending');
   const [why, setWhy] = useState('');
   const [q, setQ] = useState('');
   const [picking, setPicking] = useState<LineP | null>(null);
@@ -47,8 +48,9 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload }: { 
   const list = useMemo(() => {
     const s = q.trim().toLowerCase();
     return rows.filter((l) => (scope === 'picked' ? (l.picked ?? 0) > 0
-      : scope === 'pending' ? !isDispatched(l) && need(l) > 1e-9 && (!why || pendingWhy(l) === why)
-      : need(l) > 1e-9 && (scope === 'open' ? avail(l) > 0 : action(l) === 'Ready to pull')))
+      : scope === 'done' ? isDone(l)
+      : scope === 'pending' ? !isDone(l) && need(l) > 1e-9 && (!why || pendingWhy(l) === why)
+      : !isDone(l) && need(l) > 1e-9 && (scope === 'open' ? avail(l) > 0 : action(l) === 'Ready to pull')))
       .filter((l) => !s || [l.so, l.li, l.item, l.plant].join(' ').toLowerCase().includes(s))
       .sort((a, b) => String(a.date ?? '').localeCompare(String(b.date ?? '')) || a.row_no - b.row_no);
   }, [rows, scope, q, why]);
@@ -56,7 +58,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload }: { 
   const pending = useMemo(() => {
     const m = new Map<string, { n: number; qty: number }>();
     for (const l of rows) {
-      if (isDispatched(l) || need(l) <= 1e-9) continue;
+      if (isDone(l) || need(l) <= 1e-9) continue;
       const k = pendingWhy(l); const x = m.get(k) || { n: 0, qty: 0 };
       x.n++; x.qty += need(l); m.set(k, x);
     }
@@ -99,6 +101,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload }: { 
               <button className={scope === 'ready' ? 'on' : ''} onClick={() => setScope('ready')}>Ready to pull</button>
               <button className={scope === 'open' ? 'on' : ''} onClick={() => setScope('open')}>All with UR</button>
               <button className={scope === 'picked' ? 'on' : ''} onClick={() => setScope('picked')}>Picked</button>
+              <button className={scope === 'done' ? 'on' : ''} onClick={() => setScope('done')}>Completed</button>
             </div>
           </div>
         </div>
@@ -127,8 +130,9 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload }: { 
                     <td className="n">{fmtQty(l.qty)}</td>
                     <td className="n">{pk ? <>{fmtQty(pk)} <span className="muted">({l.picked_rolls} roll{l.picked_rolls === 1 ? '' : 's'})</span></> : '–'}</td>
                     <td className="n"><b>{fmtQty(need(l))}</b></td><td className="n">{fmtQty(avail(l))}</td>
-                    <td>{scope === 'pending' && !done ? <span className={`pill ${PENDING_TONE[pendingWhy(l)] || 'mute'}`}>{pendingWhy(l)}</span> : done && Number((l as LineP & { closed_short?: number }).closed_short) > 0 ? <span className="pill ok" title="Closed short by a Normal pick">Picked ✓ · {fmtQty(Number((l as LineP & { closed_short?: number }).closed_short))} short</span> : done ? <span className="pill ok">Picked ✓ · Dispatched</span> : pk ? <span className="pill accent">Part picked</span> : <span className="pill mute">To pick</span>}</td>
-                    <td>{canEdit && !done && <button className="btn sm primary" onClick={() => setPicking(l)}>{pk ? 'Pick more' : 'Pick'}</button>}</td>
+                    <td>{isDone(l) && !done ? <span className="pill ok" title={l.comment || ''}>Completed ✓</span> : scope === 'pending' && !done ? <span className={`pill ${PENDING_TONE[pendingWhy(l)] || 'mute'}`}>{pendingWhy(l)}</span> : done && Number((l as LineP & { closed_short?: number }).closed_short) > 0 ? <span className="pill ok" title="Closed short by a Normal pick">Picked ✓ · {fmtQty(Number((l as LineP & { closed_short?: number }).closed_short))} short</span> : done ? <span className="pill ok">Picked ✓ · Dispatched</span> : pk ? <span className="pill accent">Part picked</span> : <span className="pill mute">To pick</span>}</td>
+                    <td style={{ whiteSpace: 'nowrap' }}>{canEdit && !isDone(l) && <button className="btn sm primary" onClick={() => setPicking(l)}>{pk ? 'Pick more' : 'Pick'}</button>}
+                      {canEdit && <> <CompleteLine line={l} onDone={(m) => { toast(m); reload(); }} /></>}</td>
                   </tr>
                 );
               })}</tbody>
@@ -210,7 +214,7 @@ function autoPlan(c: Candidates): { sel: Sel; last: LastRoll | null } {
   return { sel, last };
 }
 
-function PickModal({ week, line, onClose, onDone }: { week: string; line: LineP; onClose: () => void; onDone: (m: string) => void }) {
+export function PickModal({ week, line, onClose, onDone }: { week: string; line: LineP; onClose: () => void; onDone: (m: string) => void }) {
   const [c, setC] = useState<Candidates | null>(null);
   const [err, setErr] = useState('');
   const [sel, setSel] = useState<Sel>({});
@@ -527,7 +531,11 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
   const [day, setDay] = useState(today());
   const [h, setH] = useState<PickHistory | null>(null);
   const [open, setOpen] = useState<number | null>(null);
-  const load = useCallback(() => { api<PickHistory>('/api/pick/history?day=' + day + userParam()).then(setH).catch(() => {}); }, [day]);
+  // the history is everyone's: who picked what, so nobody picks a roll twice. "Mine" narrows it.
+  const me = getSession()?.user.username || '';
+  const boss = isBossRole(getSession()?.user.role);
+  const [mine, setMine] = useState(false);
+  const load = useCallback(() => { api<PickHistory>('/api/pick/history?day=' + day + (mine && me ? '&user=' + encodeURIComponent(me) : '')).then(setH).catch(() => {}); }, [day, mine, me]);
   useEffect(() => { load(); }, [load]);
   const live = (h?.requests || []).filter((r) => !r.cancelled_at);
   const cancel = async (path: string, what: string) => {
@@ -540,9 +548,13 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
       <div className="sheet-top">
         <div>
           <h2 id="ph-title">Pick history &amp; Packing List</h2>
-          <p className="sub" style={{ margin: 0 }}>Your picks of the day and your Packing List. A picked roll can't be picked again by anyone; a part-picked roll keeps only its balance. Cancel deletes the pick and frees its rolls.</p>
+          <p className="sub" style={{ margin: 0 }}>Everyone&apos;s picks of the day. A fully picked roll can&apos;t be picked again by anyone; a part-picked roll keeps only its balance for the next pick. Cancel deletes a pick and frees its rolls.</p>
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <div className="seg" role="group" aria-label="Whose picks">
+            <button className={!mine ? 'on' : ''} onClick={() => setMine(false)}>Everyone</button>
+            <button className={mine ? 'on' : ''} onClick={() => setMine(true)}>Mine</button>
+          </div>
           <select className="as-search" value={day} onChange={(e) => setDay(e.target.value)} aria-label="Day">
             {days.map((d) => { const x = h?.days.find((y) => y.day === d); return <option key={d} value={d}>{fmtDate(d)}{d === today() ? ' (today)' : ''}{x ? ` · ${x.open} pick${x.open === 1 ? '' : 's'}` : ''}</option>; })}
           </select>
@@ -563,7 +575,7 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
                   <td>{r.so} / {r.li} / {r.item}</td><td>{r.plant}</td><td className="n">{fmtQty(r.need)}</td>
                   <td className="n"><b>{fmtQty(r.qty)}</b>{r.closed ? <span className="pill warn" style={{ marginLeft: 4 }} title="Line closed short">−{fmtQty(r.short ?? 0)}</span> : ''}</td><td className="n">{r.rolls}</td>
                   <td>{r.pick_no}</td><td className="muted">{r.by_user} · {ago(r.at)}</td>
-                  <td>{canEdit && <button className="btn sm" onClick={(e) => { e.stopPropagation(); cancel(`/api/pick/req/${r.id}`, `${ordinal(r.seq)} pick`); }}>Cancel</button>}</td>
+                  <td>{canEdit && (boss || r.by_user === me) && <button className="btn sm" onClick={(e) => { e.stopPropagation(); cancel(`/api/pick/req/${r.id}`, `${ordinal(r.seq)} pick`); }}>Cancel</button>}</td>
                 </tr>,
                 open === r.id && (
                   <tr key={r.id + 'd'}><td colSpan={10} style={{ background: 'var(--panel-2)' }}>
@@ -573,7 +585,7 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
                         <tr key={p.id} className={p.cancelled_at ? 'gone' : ''}>
                           <td className="mono">{p.pallet}</td><td>{p.lot}</td><td>{p.shade}</td><td className="n">{fmtQty(p.roll_qty)}</td>
                           <td className="n">{fmtQty(p.qty)}{p.partial ? <span className="pill accent" style={{ marginLeft: 4 }}>cut</span> : ''}</td><td>{p.insp_lot}</td><td className="muted">{p.note}</td>
-                          <td>{canEdit && <button className="btn sm" onClick={() => cancel(`/api/pick/roll/${p.id}`, `roll ${p.pallet}`)}>Remove</button>}</td>
+                          <td>{canEdit && (boss || r.by_user === me) && <button className="btn sm" onClick={() => cancel(`/api/pick/roll/${p.id}`, `roll ${p.pallet}`)}>Remove</button>}</td>
                         </tr>
                       ))}</tbody>
                     </table>

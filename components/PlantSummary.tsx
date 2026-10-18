@@ -3,7 +3,7 @@ import { useMemo, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { api } from '@/lib/api';
 import { fmt, type Line } from '@/lib/calc';
-import { SOLI_PER_HOUR, plantSummary, timeMinutes, type Bucket, type PlantInfo, type PlantRow } from '@/lib/summary';
+import { SOLI_PER_HOUR, plantSummary, timeMinutes, type Bucket, type PlantInfo, type PlantRow, type TimeSetup } from '@/lib/summary';
 
 const q = (n: number) => (Math.abs(n) < 0.0005 ? '' : fmt(n, 2));
 const c = (n: number) => (n ? fmt(n) : '');
@@ -13,10 +13,10 @@ const c = (n: number) => (n ? fmt(n) : '');
  * `week` is the period the received times belong to: the week (2026-W47), or the day for a day plan (2026-11-17).
  * Target times are system settings (admin only); received times are typed by the users.
  */
-export default function PlantSummary({ rows, plants, received = [], week, day, canTarget, canEdit, onPlant, onSaved }: {
-  rows: Line[]; plants: PlantInfo[]; received?: { code: string; received: string | null }[]; week: string; day?: string | null; canTarget: boolean; canEdit: boolean; onPlant: (code: string) => void; onSaved: (msg: string) => void;
+export default function PlantSummary({ rows, plants, received = [], week, day, canTarget, canEdit, time, onPlant, onSaved }: {
+  rows: Line[]; plants: PlantInfo[]; received?: { code: string; received: string | null }[]; week: string; day?: string | null; canTarget: boolean; canEdit: boolean; time?: TimeSetup; onPlant: (code: string) => void; onSaved: (msg: string) => void;
 }) {
-  const s = useMemo(() => plantSummary(rows, plants, received), [rows, plants, received]);
+  const s = useMemo(() => plantSummary(rows, plants, received, time), [rows, plants, received, time]);
   const saveTarget = async (code: string, v: string) => {
     const p = plants.find((x) => x.code.toUpperCase() === code) || { code, name: '', responsible: '', target: '', sort: 0 };
     await api('/api/plants', { method: 'POST', body: { plants: [{ ...p, target: v }] } });
@@ -57,7 +57,7 @@ export default function PlantSummary({ rows, plants, received = [], week, day, c
       <div className="table-head">
         <div>
           <h2 id="psum-title">Plant summary{day ? <span className="pill accent" style={{ marginLeft: 8, fontSize: 12 }}>Day plan · {day}</span> : ''}</h2>
-          <p className="sub" style={{ margin: 0 }}>QTY still to send split by what covers it: UR → QI → Block → NIH (not in house). SOLI = SO/LI lines. W/H = UR SOLI ÷ {SOLI_PER_HOUR} per hour. Total = UR + Adhoc. Click a plant to see its lines.</p>
+          <p className="sub" style={{ margin: 0 }}>QTY still to send split by what covers it: UR → QI → Block → NIH (not in house). SOLI = SO/LI lines. W/H = UR SOLI ÷ {time?.soliPerHour || SOLI_PER_HOUR} per hour. Total = UR + Adhoc. Click a plant to see its lines.</p>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           {canTarget && <button className="btn sm" onClick={() => setSetup(true)}>Plant settings</button>}

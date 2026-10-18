@@ -6,7 +6,7 @@ import Shell, { useShell } from '@/components/Shell';
 import { isDispatchGrid } from '@/lib/handoff';
 import { action } from '@/lib/smart';
 import type { Line } from '@/lib/calc';
-import { api, userParam } from '@/lib/api';
+import { api, isBossRole, userParam } from '@/lib/api';
 import { useRefreshOnActivity } from '@/lib/freshness';
 import { ago, fmt, fmtDate, type Upload, type WeekInfo } from '@/lib/calc';
 import { TEMPLATES, downloadTemplate } from '@/lib/templates';
@@ -32,6 +32,10 @@ interface SheetJob {
   plant?: string;
   /** stock reports: 'replace' the whole report (default) or 'add' this file to what is there (another part of the same report) */
   stockMode?: 'replace' | 'add';
+  /** plan only: a week plan or a day plan (separate dashboards) */
+  planType?: 'week' | 'day';
+  /** plan only: Admin / Head upload a plan for a user ('' = own plan) */
+  owner?: string;
 }
 
 function Uploads() {
@@ -45,6 +49,9 @@ function Uploads() {
   const [rev, setRev] = useState<string | null | undefined>(undefined);
   const [history, setHistory] = useState<{ at: string; username: string; detail: string }[]>([]);
   const [myPlant, setMyPlant] = useState<string>('');
+  // Admin / Head can upload a plan for a user
+  const [owners, setOwners] = useState<string[] | null>(null);
+  useEffect(() => { if (isBossRole(user.role)) api<{ owners: string[] }>('/api/owners').then((r) => setOwners(r.owners)).catch(() => {}); }, [user.role]);
   const [plants, setPlants] = useState<string[]>([]);
   useEffect(() => { api<{ user: { plant?: string | null } }>('/api/me').then((m) => setMyPlant(m.user.plant || '')).catch(() => {}); }, []);
   const input = useRef<HTMLInputElement>(null);
@@ -74,6 +81,7 @@ function Uploads() {
     setReading(true);
     const next: SheetJob[] = [];
     const disp: File[] = [];
+    const skipped: string[] = [];
     for (const f of Array.from(files)) {
       try {
         const sheets = readWorkbook(await f.arrayBuffer());
@@ -82,11 +90,15 @@ function Uploads() {
         if (sheets.some((s) => isDispatchGrid(s.grid)) && !sheets.some((s) => guessSrc(s.name))) { disp.push(f); continue; }
         const dataSheets = sheets.filter((s) => s.grid.length && !isHelpSheet(s.name));
         for (const s of dataSheets) {
+          // KFC / PFC are built from the ZMMBE upload; TRR is not used any more
+          const named = guessSrc(s.name) ?? (dataSheets.length === 1 ? guessSrc(f.name.replace(/\.\w+$/, '').replace(/\(\d+\)/g, '')) : null);
+          if (named === 'kfc' || named === 'pfc' || named === 'trr') { skipped.push(`${f.name}${dataSheets.length > 1 ? ' › ' + s.name : ''}`); continue; }
           // sheet name first ("ZMMBE KFC"), then the file name ("ZMMBE_PFC.xlsx" with a "Data" sheet), then the headers
           const byName = guessSrc(s.name);
           const byFile = dataSheets.filter((x) => !guessSrc(x.name)).length === 1 ? guessSrc(f.name.replace(/\.\w+$/, '').replace(/\(\d+\)/g, '')) : null;
           const src = byName ?? byFile ?? guessSrcFromGrid(s.grid) ?? '';
-          next.push({ id: f.name + '::' + s.name + '::' + Math.random(), file: f.name, sheet: s.name, grid: s.grid, src, map: src ? detectMapping(src, s.grid) : null, state: 'ready' });
+          if (src === 'kfc' || src === 'pfc' || src === 'trr') { skipped.push(f.name); continue; }
+          next.push({ id: f.name + '::' + s.name + '::' + Math.random(), file: f.name, sheet: s.name, grid: s.grid, src, map: src ? detectMapping(src, s.grid) : null, state: 'ready', planType: /day/i.test(f.name + ' ' + s.name) ? 'day' : 'week' });
         }
       } catch {
         toast(`Could not read ${f.name}. Save it as .xlsx and try again.`);
@@ -94,6 +106,7 @@ function Uploads() {
     }
     setJobs((j) => [...j, ...next]);
     setReading(false);
+    if (skipped.length) toast(`Skipped ${skipped.join(', ')}: ZMMBE KFC and PFC are built from the ZMMBE upload (TRR is not used).`);
     if (disp.length) toast(`${disp.map((f) => f.name).join(', ')}: dispatch files are no longer uploaded — picked QTY on the Pick page counts as dispatched.`);
   }
 
@@ -243,7 +256,7 @@ function Uploads() {
             </div>
           )}
 
-          {jobs.map((j) => <SheetCard key={j.id} job={j} myPlant={myPlant} plants={plants} onChange={(p) => setJob(j.id, p)} onSend={() => send(j)} onRemove={() => setJobs((js) => js.filter((x) => x.id !== j.id))} />)}
+          {jobs.map((j) => <SheetCard key={j.id} job={j} myPlant={myPlant} plants={plants} owners={owners} me={user.username} onChange={(p) => setJob(j.id, p)} onSend={() => send(j)} onRemove={() => setJobs((js) => js.filter((x) => x.id !== j.id))} />)}
         </>
       )}
     </main>
@@ -304,14 +317,17 @@ function show(v: unknown, id: string) {
   return String(v);
 }
 
-interface PlanPreview { days?: string[]; added: number; updated: number; removed: number; kept: number; inFileDups: number; lines: number; plant: string | null; mode: string }
+interface PlanPreview { owner?: string; planType?: string; days?: string[]; added: number; updated: number; removed: number; kept: number; inFileDups: number; lines: number; plant: string | null; mode: string }
 function planOpts(j: SheetJob, myPlant: string) {
   if (j.src !== 'plan') return j.stockMode === 'add' ? { mode: 'add' } : {};
   const plant = (j.plant ?? myPlant).trim();
-  return { ...(j.week ? { week: j.week, forceWeek: true } : {}), mode: j.mode || 'merge', ...(plant ? { plant } : {}) };
+  const planType = j.planType || 'week';
+  // a day plan only adds / replaces its own days; the week modes do not apply to it
+  const mode = planType === 'day' ? (j.mode === 'replace-day' ? 'replace-day' : 'merge') : j.mode === 'replace-day' ? 'merge' : j.mode || 'merge';
+  return { ...(j.week ? { week: j.week, forceWeek: true } : {}), mode, planType, ...(j.owner ? { owner: j.owner } : {}), ...(plant ? { plant } : {}) };
 }
 
-function SheetCard({ job, myPlant, plants, onChange, onSend, onRemove }: { job: SheetJob; myPlant: string; plants: string[]; onChange: (p: Partial<SheetJob>) => void; onSend: () => void; onRemove: () => void }) {
+function SheetCard({ job, myPlant, plants, owners, me, onChange, onSend, onRemove }: { job: SheetJob; myPlant: string; plants: string[]; owners: string[] | null; me: string; onChange: (p: Partial<SheetJob>) => void; onSend: () => void; onRemove: () => void }) {
   const fields = job.src ? FIELDS[job.src] : [];
   const width = Math.max(0, ...job.grid.slice(0, 50).map((r) => r?.length || 0));
   const header = job.map?.how === 'header' && job.map.headerRow !== undefined ? job.grid[job.map.headerRow] : null;
@@ -334,7 +350,7 @@ function SheetCard({ job, myPlant, plants, onChange, onSend, onRemove }: { job: 
       } catch (e) { if (!stop) { setPreview(null); setPreviewErr(e instanceof Error ? e.message : ''); } }
     }, 350);
     return () => { stop = true; clearTimeout(t); };
-  }, [job.src, job.state, job.week, job.mode, plantVal, rows, usable, myPlant]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [job.src, job.state, job.week, job.mode, job.planType, job.owner, plantVal, rows, usable, myPlant]); // eslint-disable-line react-hooks/exhaustive-deps
   const missing = fields.filter((f) => f.required && (job.map?.cols[f.id] ?? -1) < 0);
   const how = job.map?.how === 'header' ? `header row ${(job.map.headerRow ?? 0) + 1}` : job.map?.how === 'keyed' ? 'your workbook layout (key in column A)' : 'SAP layout without key column';
 
@@ -381,16 +397,36 @@ function SheetCard({ job, myPlant, plants, onChange, onSend, onRemove }: { job: 
       )}
       {job.src === 'plan' && job.state !== 'done' && (
         <div className="plan-opts">
-          <div className="mode-pick" role="radiogroup" aria-label="How to add this file">
-            {([['merge', 'Merge', 'Add new lines and update matching ones. Nothing else is touched. Use this when each plant uploads its own file.'],
-              ['replace-day', 'Day plan', 'Replace only the day(s) in this file: your lines on those dates are removed, then the file is added. Other days of the week stay.'],
-              ['replace-plant', 'Replace my plant', 'Remove this plant\'s lines for the week, then add the file. Other plants stay.'],
-              ['replace-week', 'Replace whole week', 'Remove every line of the week, then add the file.']] as const).map(([v, label, help]) => (
-              <label key={v} className={`mode ${ (job.mode || 'merge') === v ? 'on' : ''}`}>
-                <input type="radio" name={`mode-${job.id}`} value={v} checked={(job.mode || 'merge') === v} onChange={() => onChange({ mode: v, state: 'ready', msg: undefined })} />
-                <b>{label}</b><span>{help}</span>
-              </label>
+          <div className="ptype" role="radiogroup" aria-label="Plan type">
+            {([['week', 'Week plan', 'Goes to the Week plan dashboard'], ['day', 'Day plan', 'Goes to the Day plan dashboard — every line needs a date']] as const).map(([v, label, help]) => (
+              <button key={v} type="button" role="radio" aria-checked={(job.planType || 'week') === v} className={(job.planType || 'week') === v ? 'on' : ''}
+                onClick={() => onChange({ planType: v, mode: v === 'day' ? 'replace-day' : 'merge', state: 'ready', msg: undefined })}><b>{label}</b><span>{help}</span></button>
             ))}
+          </div>
+          {owners && (
+            <label className="plant-pick">Plan of
+              <select value={job.owner || ''} onChange={(e) => onChange({ owner: e.target.value, state: 'ready', msg: undefined })}>
+                <option value="">Me ({me})</option>
+                {owners.filter((o) => o !== me).map((o) => <option key={o} value={o}>{o}</option>)}
+              </select>
+              <span className="muted">Admin / Head: upload this plan for a user. It becomes that user&apos;s plan.</span>
+            </label>
+          )}
+          <div className="mode-pick" role="radiogroup" aria-label="How to add this file">
+            {((job.planType || 'week') === 'day'
+              ? [['replace-day', 'Replace the day(s)', 'The plan\'s lines on the dates in this file are removed, then the file is added. Other days stay.'],
+                ['merge', 'Merge', 'Add new lines and update matching ones. Nothing else is touched.']] as const
+              : [['merge', 'Merge', 'Add new lines and update matching ones. Nothing else is touched. Use this when each plant uploads its own file.'],
+                ['replace-plant', 'Replace my plant', 'Remove this plant\'s lines for the week, then add the file. Other plants stay.'],
+                ['replace-week', 'Replace whole week', 'Remove every line of the week plan, then add the file.']] as const).map(([v, label, help]) => {
+              const cur = (job.planType || 'week') === 'day' ? (job.mode === 'merge' ? 'merge' : 'replace-day') : job.mode === 'replace-day' ? 'merge' : job.mode || 'merge';
+              return (
+                <label key={v} className={`mode ${cur === v ? 'on' : ''}`}>
+                  <input type="radio" name={`mode-${job.id}`} value={v} checked={cur === v} onChange={() => onChange({ mode: v, state: 'ready', msg: undefined })} />
+                  <b>{label}</b><span>{help}</span>
+                </label>
+              );
+            })}
           </div>
           <label className="plant-pick">Plant
             <input list={`plants-${job.id}`} value={plantVal} placeholder="e.g. C051" onChange={(e) => onChange({ plant: e.target.value.toUpperCase(), state: 'ready', msg: undefined })} />
@@ -405,7 +441,8 @@ function SheetCard({ job, myPlant, plants, onChange, onSend, onRemove }: { job: 
                 <span className="pc del"><b>{fmt(preview.removed)}</b> removed</span>
                 <span className="pc keep"><b>{fmt(preview.kept)}</b> other lines kept</span>
                 {preview.inFileDups > 0 && <span className="pc">{fmt(preview.inFileDups)} repeated rows in the file merged</span>}
-                {(job.mode || 'merge') === 'replace-day' && preview.days?.length ? <span className="pc">Day plan for {preview.days.map((d) => fmtDate(d)).join(', ')}</span> : null}
+                {(job.planType || 'week') === 'day' && preview.days?.length ? <span className="pc">Day plan for {preview.days.map((d) => fmtDate(d)).join(', ')}</span> : null}
+                {preview.owner && preview.owner !== me ? <span className="pc">Plan of <b>{preview.owner}</b></span> : null}
                 <span className="muted">No line is ever added twice: a line with the same week, SO, LI, Item and date is updated.</span>
               </>
             ) : 'Checking what this upload will change…'}

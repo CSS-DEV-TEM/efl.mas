@@ -11,7 +11,8 @@ import * as XLSX from 'xlsx';
 
 export type Src = 'plan' | 'zmmbe' | 'kfc' | 'pfc' | 'plant' | 'trr';
 /** Reports offered on the Uploads page (TRR is no longer uploaded). */
-export const SRC_ORDER: Src[] = ['plan', 'zmmbe', 'kfc', 'pfc', 'plant'];
+/** What is uploaded: the plan, ZMMBE (KFC and PFC are built from it) and PLANT. */
+export const SRC_ORDER: Src[] = ['plan', 'zmmbe', 'plant'];
 
 export interface FieldDef {
   id: string;
@@ -76,7 +77,7 @@ export const FIELDS: Record<Src, FieldDef[]> = {
 
 export const SRC_INFO: Record<Src, { title: string; hint: string }> = {
   plan: { title: 'Weekly plan', hint: 'SO / LI / Item Code / Date / QTY / Plant' },
-  zmmbe: { title: 'ZMMBE', hint: 'Full stock: UR, QI, Block, Assigned' },
+  zmmbe: { title: 'ZMMBE', hint: 'Full stock: UR, QI, Block, Assigned — KFC and PFC are built from it' },
   kfc: { title: 'ZMMBE KFC', hint: 'KFC stock: UR, QI, Block' },
   pfc: { title: 'ZMMBE PFC', hint: 'PFC stock: UR, QI, Block' },
   plant: { title: 'PLANT report', hint: 'Stock at plant (Total column)' },

@@ -9,15 +9,15 @@ export default function Page() {
   return <Shell admin><Settings /></Shell>;
 }
 
-export interface SystemSettings { fullRollPct: number; defaultPickKind: 'normal' | 'offsite'; allowOffsite: boolean; allowNormalShort: boolean; allowNormalFull: boolean; deriveFromZmmbe: boolean; pfcSlocs: string[]; plantSlocs: string[] }
+export interface SystemSettings { fullRollPct: number; defaultPickKind: 'normal' | 'offsite'; allowOffsite: boolean; allowNormalShort: boolean; allowNormalFull: boolean; deriveFromZmmbe: boolean; pfcSlocs: string[]; plantSlocs: string[]; soliPerHour: number; lateGraceMin: number; defaultTarget: string }
 
-const TABS = [['pick', 'Pick rules'], ['reports', 'Reports from ZMMBE'], ['plants', 'Plants & target times'], ['users', 'Users & roles'], ['database', 'Database']] as const;
+const TABS = [['plants', 'Plants'], ['reports', 'Locations'], ['time', 'Time setup'], ['plans', 'Plans (data change)'], ['pick', 'Pick rules'], ['users', 'Users & roles'], ['database', 'Database']] as const;
 type Tab = (typeof TABS)[number][0];
 
 /** Admin only: the system settings. Head accounts can do everything else but cannot open this page. */
 function Settings() {
   const { toast } = useShell();
-  const [tab, setTabS] = useState<Tab>('pick');
+  const [tab, setTabS] = useState<Tab>('plants');
   useEffect(() => { const h = location.hash.slice(1); if (TABS.some(([t]) => t === h)) setTabS(h as Tab); }, []);
   const setTab = (t: Tab) => { setTabS(t); try { history.replaceState(null, '', '#' + t); } catch { /* ignore */ } };
   return (
@@ -34,6 +34,8 @@ function Settings() {
       {tab === 'pick' && <PickRules toast={toast} />}
       {tab === 'reports' && <ReportRules toast={toast} />}
       {tab === 'plants' && <PlantsSettings toast={toast} />}
+      {tab === 'time' && <TimeSetup toast={toast} />}
+      {tab === 'plans' && <PlansAdmin toast={toast} />}
       {tab === 'users' && <UsersAdmin />}
       {tab === 'database' && <ClearDatabase toast={toast} />}
     </main>
@@ -148,7 +150,7 @@ function ReportRules({ toast }: { toast: (m: string) => void }) {
   if (!s) return <section className="card">{err ? <div className="notice bad">{err}</div> : <p className="muted">Loading…</p>}</section>;
   return (
     <section className="card set-card">
-      <h2>Reports from ZMMBE</h2>
+      <h2>Locations: reports from ZMMBE</h2>
       <p className="sub">Like the Pull Plan workbook: one ZMMBE upload also fills ZMMBE KFC and ZMMBE PFC, split by storage location. A KFC / PFC / PLANT file uploaded on its own still replaces that report until the next ZMMBE upload.</p>
       <div className="set-grid">
         <label className="set-row">
@@ -169,6 +171,97 @@ function ReportRules({ toast }: { toast: (m: string) => void }) {
       </div>
       {err && <div className="notice bad">{err}</div>}
       <div style={{ marginTop: 12 }}><button className="btn primary" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save report rules'}</button></div>
+    </section>
+  );
+}
+
+/** Time setup: targets and how the Plant summary counts time. */
+function TimeSetup({ toast }: { toast: (m: string) => void }) {
+  const [s, setS] = useState<SystemSettings | null>(null);
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
+  useEffect(() => { api<{ settings: SystemSettings }>('/api/settings').then((r) => setS(r.settings)).catch((e) => setErr(e instanceof Error ? e.message : 'Could not load.')); }, []);
+  const save = async () => {
+    if (!s) return;
+    setBusy(true); setErr('');
+    try { const r = await api<{ settings: SystemSettings }>('/api/settings', { method: 'POST', body: { soliPerHour: s.soliPerHour, lateGraceMin: s.lateGraceMin, defaultTarget: s.defaultTarget } }); setS(r.settings); toast('Time setup saved'); }
+    catch (e) { setErr(e instanceof Error ? e.message : 'Could not save.'); } finally { setBusy(false); }
+  };
+  if (!s) return <section className="card">{err ? <div className="notice bad">{err}</div> : <p className="muted">Loading…</p>}</section>;
+  return (
+    <section className="card set-card">
+      <h2>Time setup</h2>
+      <p className="sub">Each plant&apos;s own target time is set under Plants. These apply to every plant.</p>
+      <div className="set-grid">
+        <label className="set-row">
+          <span><b>Default target time</b><small>Used for a plant without its own target time (e.g. 10:00 AM). Empty = none.</small></span>
+          <input className="set-text" value={s.defaultTarget} onChange={(e) => setS({ ...s, defaultTarget: e.target.value })} placeholder="10:00 AM" />
+        </label>
+        <label className="set-row">
+          <span><b>Late after the target by</b><small>Minutes of grace before a received plan shows red.</small></span>
+          <span className="set-num"><input type="number" min={0} max={600} value={s.lateGraceMin} onChange={(e) => setS({ ...s, lateGraceMin: Number(e.target.value) })} />min</span>
+        </label>
+        <label className="set-row">
+          <span><b>SO/LI lines per hour (W/H)</b><small>Plant summary W/H = UR SOLI ÷ this number.</small></span>
+          <span className="set-num"><input type="number" min={1} max={1000} value={s.soliPerHour} onChange={(e) => setS({ ...s, soliPerHour: Number(e.target.value) })} /></span>
+        </label>
+      </div>
+      {err && <div className="notice bad">{err}</div>}
+      <div style={{ marginTop: 12 }}><button className="btn primary" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save time setup'}</button></div>
+    </section>
+  );
+}
+
+interface PlanRow { owner: string; type: 'week' | 'day'; week: string; day: string | null; lines: number; qty: number; start: string | null; end: string | null; uploaded: string | null; done: number }
+/** Data change: every uploaded plan (user × week plan / day plan) — move it to another user or delete it. */
+function PlansAdmin({ toast }: { toast: (m: string) => void }) {
+  const [plans, setPlans] = useState<PlanRow[] | null>(null);
+  const [users, setUsers] = useState<string[]>([]);
+  const [busy, setBusy] = useState('');
+  const [q, setQ] = useState('');
+  const load = useCallback(() => {
+    api<{ plans: PlanRow[] }>('/api/admin/plans').then((r) => setPlans(r.plans)).catch((e) => toast(e instanceof Error ? e.message : 'Could not load plans.'));
+    api<{ users: { username: string }[] }>('/api/users').then((r) => setUsers(r.users.map((u) => u.username))).catch(() => {});
+  }, [toast]);
+  useEffect(() => { load(); }, [load]);
+  const act = async (p: PlanRow, action: 'reassign' | 'delete', to?: string) => {
+    const label = `${p.type === 'day' ? 'day plan ' + p.day : 'week plan ' + p.week} of ${p.owner}`;
+    if (action === 'delete' && !confirm(`Delete the ${label} (${p.lines} lines)? Picks already made stay in the pick history.`)) return;
+    setBusy(`${p.owner}${p.type}${p.week}${p.day}`);
+    try { const r = await api<{ lines: number }>('/api/admin/plans', { method: 'POST', body: { action, owner: p.owner, type: p.type, week: p.week, day: p.day, to } }); toast(`${action === 'delete' ? 'Deleted' : 'Moved'} ${label}: ${r.lines} lines`); load(); }
+    catch (e) { toast(e instanceof Error ? e.message : 'Failed.'); } finally { setBusy(''); }
+  };
+  const list = (plans || []).filter((p) => !q || `${p.owner} ${p.week} ${p.day ?? ''} ${p.type}`.toLowerCase().includes(q.toLowerCase()));
+  return (
+    <section className="card set-card">
+      <div className="sheet-top">
+        <div><h2>Plans (data change)</h2><p className="sub" style={{ margin: 0 }}>Every uploaded plan by user. Move a plan to another user (e.g. uploaded under the wrong account) or delete it.</p></div>
+        <input type="search" className="as-search" placeholder="Search user, week, day…" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search plans" />
+      </div>
+      {!plans ? <p className="muted">Loading…</p> : !list.length ? <p className="muted">No plans.</p> : (
+        <div className="table-wrap" style={{ maxHeight: 520 }}>
+          <table className="mini">
+            <thead><tr><th>User</th><th>Plan</th><th>Week / day</th><th>Dates</th><th className="n">Lines</th><th className="n">QTY</th><th>Done</th><th>Uploaded</th><th>Move to</th><th /></tr></thead>
+            <tbody>{list.map((p) => {
+              const id = `${p.owner}${p.type}${p.week}${p.day}`;
+              return (
+                <tr key={id}>
+                  <td className="mono">{p.owner}</td>
+                  <td><span className={`pill ${p.type === 'day' ? 'accent' : 'mute'}`}>{p.type === 'day' ? 'Day plan' : 'Week plan'}</span></td>
+                  <td>{p.type === 'day' ? p.day : `Week ${Number(p.week.slice(-2))}`}</td>
+                  <td className="muted small">{p.start}{p.end && p.end !== p.start ? ` – ${p.end}` : ''}</td>
+                  <td className="n">{p.lines}</td><td className="n">{Number(p.qty).toLocaleString()}</td>
+                  <td>{p.done >= p.lines ? <span className="pill ok">Completed</span> : `${p.done} / ${p.lines}`}</td>
+                  <td className="muted small">{p.uploaded ? p.uploaded.slice(0, 16).replace('T', ' ') : ''}</td>
+                  <td><select disabled={busy === id} value="" onChange={(e) => e.target.value && act(p, 'reassign', e.target.value)} aria-label="Move to user">
+                    <option value="">Move…</option>{users.filter((u) => u !== p.owner).map((u) => <option key={u} value={u}>{u}</option>)}
+                  </select></td>
+                  <td><button className="btn sm danger" disabled={busy === id} onClick={() => act(p, 'delete')}>Delete</button></td>
+                </tr>
+              );
+            })}</tbody>
+          </table>
+        </div>
+      )}
     </section>
   );
 }
