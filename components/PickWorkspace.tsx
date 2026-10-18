@@ -539,6 +539,18 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
   const load = useCallback(() => { api<PickHistory>('/api/pick/history?day=' + day + (mine && me ? '&user=' + encodeURIComponent(me) : '')).then(setH).catch(() => {}); }, [day, mine, me]);
   useEffect(() => { load(); }, [load]);
   const live = (h?.requests || []).filter((r) => !r.cancelled_at);
+  // the picks marked for the download (none marked = all of the day)
+  const [sel, setSel] = useState<Set<number>>(new Set());
+  useEffect(() => { setSel(new Set()); }, [day, mine]);
+  const marked = live.filter((r) => sel.has(r.id));
+  const allOn = live.length > 0 && marked.length === live.length;
+  const flip = (id: number) => setSel((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const [oneSheet, setOneSheet] = useState(() => { try { return localStorage.getItem('pl_one_sheet') !== '0'; } catch { return true; } });
+  const setOne = (v: boolean) => { setOneSheet(v); try { localStorage.setItem('pl_one_sheet', v ? '1' : '0'); } catch { /* */ } };
+  const tag = marked.length ? `_${marked.length}picks` : '';
+  const downloadPL = () => saveWorkbook(packingListWorkbook(h!, { ids: sel, combined: oneSheet }), `Packing_List_${day}${tag}.xlsx`);
+  const downloadKorber = () => saveWorkbook(korberWorkbook(h!, sel), `Korber_Picked_${day}${tag}.xlsx`);
+  const markedQty = marked.reduce((t, r) => t + r.qty, 0);
   const cancel = async (path: string, what: string) => {
     if (!confirm(`Cancel ${what}? It is deleted from the pick history and the roll${path.includes('/req/') ? 's become' : ' becomes'} pickable again.`)) return;
     try { await api(path, { method: 'DELETE' }); toast(`${what} cancelled and deleted from the history`); load(); onChanged(); } catch (e) { toast(e instanceof Error ? e.message : 'Failed.'); }
@@ -559,18 +571,31 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
           <select className="as-search" value={day} onChange={(e) => setDay(e.target.value)} aria-label="Day">
             {days.map((d) => { const x = h?.days.find((y) => y.day === d); return <option key={d} value={d}>{fmtDate(d)}{d === today() ? ' (today)' : ''}{x ? ` · ${x.open} pick${x.open === 1 ? '' : 's'}` : ''}</option>; })}
           </select>
-          <button className="btn primary" disabled={!live.length || !h} onClick={() => saveWorkbook(packingListWorkbook(h!), `Packing_List_${day}.xlsx`)}>Download Packing List</button>
-          <button className="btn" disabled={!live.length || !h?.korberHeader} onClick={() => saveWorkbook(korberWorkbook(h!), `Korber_Picked_${day}.xlsx`)} title="The picked rolls in the Korber Inventory format">Korber lines</button>
         </div>
       </div>
+      {h && live.length > 0 && (
+        <div className="pl-bar" role="group" aria-label="Packing List download">
+          <span className="pl-what">{marked.length
+            ? <><b>{marked.length}</b> of {live.length} picks marked · {fmtQty(markedQty)} QTY · {marked.reduce((t, r) => t + r.rolls, 0)} rolls</>
+            : <>No picks marked — the download has <b>all {live.length}</b> picks of the day. Tick picks below to choose.</>}</span>
+          <div className="seg" role="group" aria-label="Packing List format" title="How the picks go into the Packing List">
+            <button className={oneSheet ? 'on' : ''} onClick={() => setOne(true)}>One sheet</button>
+            <button className={!oneSheet ? 'on' : ''} onClick={() => setOne(false)}>Sheet per pick</button>
+          </div>
+          <button className="btn primary" onClick={downloadPL}>Download Packing List{marked.length ? ` (${marked.length})` : ''}</button>
+          <button className="btn" disabled={!h.korberHeader} onClick={downloadKorber} title="The picked rolls in the Korber Inventory format (cut rolls with the cut QTY)">Korber Inventory{marked.length ? ` (${marked.length})` : ''}</button>
+          {marked.length > 0 && <button className="btn sm" onClick={() => setSel(new Set())}>Clear marks</button>}
+        </div>
+      )}
       {!h ? <Loader label="Loading the pick history…" /> : !h.requests.length ? <p className="muted">No picks on {fmtDate(day)}.</p> : (
         <div className="table-wrap" style={{ maxHeight: 'none' }}>
           <table className="mini">
-            <thead><tr><th>Req</th><th>Type</th><th>SO / LI / Item</th><th>Plant</th><th className="n">Plan QTY</th><th className="n">Picked</th><th className="n">Rolls</th><th>HJ Pick No</th><th>By</th><th /></tr></thead>
+            <thead><tr><th className="ck"><input type="checkbox" checked={allOn} ref={(el) => { if (el) el.indeterminate = marked.length > 0 && !allOn; }} onChange={() => setSel(allOn ? new Set() : new Set(live.map((r) => r.id)))} aria-label="Mark all picks" /></th><th>Req</th><th>Type</th><th>SO / LI / Item</th><th>Plant</th><th className="n">Plan QTY</th><th className="n">Picked</th><th className="n">Rolls</th><th>HJ Pick No</th><th>By</th><th /></tr></thead>
             <tbody>{h.requests.map((r) => {
               const rolls = h.picks.filter((p) => p.req_id === r.id);
               return [
-                <tr key={r.id} className={r.cancelled_at ? 'gone' : ''} onClick={() => setOpen(open === r.id ? null : r.id)} style={{ cursor: 'pointer' }}>
+                <tr key={r.id} className={`${r.cancelled_at ? 'gone' : ''} ${sel.has(r.id) ? 'marked' : ''}`} onClick={() => setOpen(open === r.id ? null : r.id)} style={{ cursor: 'pointer' }}>
+                  <td className="ck" onClick={(e) => e.stopPropagation()}>{!r.cancelled_at && <input type="checkbox" checked={sel.has(r.id)} onChange={() => flip(r.id)} aria-label={`Mark ${ordinal(r.seq)} pick for the Packing List`} />}</td>
                   <td><b>{ordinal(r.seq)}</b></td>
                   <td><span className={`pill ${r.kind === 'offsite' ? 'accent' : 'mute'}`}>{r.kind === 'offsite' ? 'Offsite' : 'Normal'}</span></td>
                   <td>{r.so} / {r.li} / {r.item}</td><td>{r.plant}</td><td className="n">{fmtQty(r.need)}</td>
@@ -579,7 +604,7 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
                   <td>{canEdit && (boss || r.by_user === me) && <button className="btn sm" onClick={(e) => { e.stopPropagation(); cancel(`/api/pick/req/${r.id}`, `${ordinal(r.seq)} pick`); }}>Cancel</button>}</td>
                 </tr>,
                 open === r.id && (
-                  <tr key={r.id + 'd'}><td colSpan={10} style={{ background: 'var(--panel-2)' }}>
+                  <tr key={r.id + 'd'}><td colSpan={11} style={{ background: 'var(--panel-2)' }}>
                     <table className="mini">
                       <thead><tr><th>Pallet</th><th>Lot</th><th>Shade</th><th className="n">Roll qty</th><th className="n">Picked</th><th>Insp. lot</th><th>Note</th><th /></tr></thead>
                       <tbody>{rolls.map((p) => (

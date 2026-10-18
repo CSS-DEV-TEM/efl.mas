@@ -678,3 +678,11 @@ table.pk-table tbody tr.gone { cursor: default; }
 .btn.primary[aria-busy="true"]::after { border-color: #fff transparent #fff transparent; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .spinner i, .skel-tile, .skel-line, .net-bar::before, .btn[aria-busy="true"]::after { animation-duration: 3s; } }
+
+/* Pick history: mark picks for one Packing List */
+.pl-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 12px; margin: 10px 0 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); }
+.pl-bar .pl-what { flex: 1 1 260px; font-size: 13px; color: var(--ink-2); }
+.pl-bar .pl-what b { color: var(--ink); }
+table.mini th.ck, table.mini td.ck { width: 30px; text-align: center; }
+table.mini td.ck input, table.mini th.ck input { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent); }
+table.mini tr.marked > td { background: color-mix(in srgb, var(--accent) 9%, transparent); }

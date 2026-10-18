@@ -103,41 +103,60 @@ const ST = {
 };
 const num = (x: unknown) => { const t = String(x ?? '').trim(); return /^\d+$/.test(t) && t.length < 16 ? Number(t) : t; };
 
-/** The day's Packing List: one sheet per pick (1st, 2nd …) in the PL format, a Summary, and the picked rolls in Korber format. */
-export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolean } = {}) {
-  const reqs = h.requests.filter((r) => !r.cancelled_at);
+/**
+ * The Packing List.
+ * `ids`: only these picks (the ones marked in the history); all live picks when empty.
+ * `combined`: every pick in ONE "Packing List" sheet (one table, the Pick No on each pick's first roll);
+ * otherwise one sheet per pick (1st, 2nd …). Plus a Summary and the picked rolls in Korber format.
+ */
+export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolean; ids?: Set<number> | number[]; combined?: boolean } = {}) {
+  const only = opts.ids ? new Set(opts.ids) : null;
+  const reqs = h.requests.filter((r) => !r.cancelled_at && (!only || !only.size || only.has(r.id)));
   const header = (h.korberHeader || []).map(hn);
   const col = (name: string) => header.indexOf(name);
   const U = XLSXS.utils;
   const wb = U.book_new();
   const summary: (string | number | null)[][] = [['Req', 'Total Qty', 'Total Rolls', 'Pick No', 'Type', 'Remarks']];
-  // the admin's "All users" view: every user has a 1st, 2nd … so the sheet names carry the user
+  // the admin's "All users" view: every user has a 1st, 2nd … so the names carry the user
   const multi = new Set(reqs.map((r) => r.by_user)).size > 1;
-  const sheetName = (r: PickReq) => (multi ? `${r.by_user} ${ordinal(r.seq)}` : ordinal(r.seq)).replace(/[\\/?*[\]:]/g, '').slice(0, 31);
+  const reqName = (r: PickReq) => (multi ? `${r.by_user} ${ordinal(r.seq)}` : ordinal(r.seq)).replace(/[\\/?*[\]:]/g, '').slice(0, 31);
   const korberRows: unknown[][] = [];
-  for (const r of reqs) {
-    const rolls = h.picks.filter((p) => p.req_id === r.id && !p.cancelled_at);
-    const pickNo = r.pick_no && /^\d+$/.test(r.pick_no) ? Number(r.pick_no) : (r.pick_no ?? '');
-    const lines = rolls.map((p, i) => {
-      const raw = (p.korber ? JSON.parse(p.korber) : []) as unknown[];
-      korberRows.push(pickedRow(raw, header, p.qty));
-      return PL_HEAD.map((c) => {
-        if (c === 'Actual Qty') return p.qty;
-        if (c === 'Pick No') return i === 0 ? pickNo : null;
-        if (c === 'Shade') return p.shade ?? '';
-        const k = col(PL_FROM[c]);
-        let v = k >= 0 ? raw[k] : null;
-        if (c === 'Item Number') { const d = col('display item number'); v = korberItemKey(d >= 0 ? raw[d] : null, v) || v; }
-        return (c === 'Item Number' ? num(v) : (v ?? '')) as string | number;
+  const pickNoOf = (r: PickReq) => (r.pick_no && /^\d+$/.test(r.pick_no) ? Number(r.pick_no) : (r.pick_no ?? ''));
+  const rollsOf = (r: PickReq) => h.picks.filter((p) => p.req_id === r.id && !p.cancelled_at);
+
+  /** One PL sheet for these picks: the totals block, the roll table, then the matched SO|LI|Qty|Material|Batch lines. */
+  const plSheet = (group: PickReq[]) => {
+    const lines: (string | number | null)[][] = [];
+    let qty = 0, nRolls = 0, cut = 0;
+    const pickNos: (string | number)[] = [];
+    const matchAll: string[] = [];
+    for (const r of group) {
+      const rolls = rollsOf(r);
+      const pickNo = pickNoOf(r);
+      if (pickNo !== '') pickNos.push(pickNo);
+      if (r.match) matchAll.push(r.match);
+      rolls.forEach((p, i) => {
+        const raw = (p.korber ? JSON.parse(p.korber) : []) as unknown[];
+        korberRows.push(pickedRow(raw, header, p.qty));
+        lines.push(PL_HEAD.map((c) => {
+          if (c === 'Actual Qty') return p.qty;
+          if (c === 'Pick No') return i === 0 ? pickNo : null;
+          if (c === 'Shade') return p.shade ?? '';
+          const k = col(PL_FROM[c]);
+          let v = k >= 0 ? raw[k] : null;
+          if (c === 'Item Number') { const d = col('display item number'); v = korberItemKey(d >= 0 ? raw[d] : null, v) || v; }
+          return (c === 'Item Number' ? num(v) : (v ?? '')) as string | number;
+        }));
+        qty += p.qty; nRolls++; if (p.partial) cut++;
       });
-    });
-    const qty = Math.round(rolls.reduce((t, p) => t + p.qty, 0) * 1000) / 1000;
-    const cut = rolls.filter((p) => p.partial).length;
+    }
+    qty = Math.round(qty * 1000) / 1000;
     const last = 6 + lines.length;
-    const matched = matchRows(r.match);
+    const matched = matchRows(matchAll);
+    const hj: string | number = pickNos.length === 1 ? pickNos[0] : pickNos.join(', ');
     const aoa: (string | number | null)[][] = [
       ['TOTAL QTY', 'TOTAL ROLLS', 'HJ PICK', null, null, 'TOTAL PICK', 'CUT ROLLS'],
-      [qty, rolls.length, pickNo, null, null, pickNo === '' ? 0 : 1, cut],
+      [qty, nRolls, hj, null, null, pickNos.length, cut],
       [], [null, null], [],
       PL_HEAD, ...lines,
       ...(matched.length ? [[], ...matched] : []),
@@ -145,8 +164,8 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
     const ws = U.aoa_to_sheet(aoa);
     if (lines.length) {
       ws.A2 = { t: 'n', v: qty, f: `SUM(M7:M${last})` };
-      ws.B2 = { t: 'n', v: rolls.length, f: `COUNTA(A7:A${last})` };
-      ws.F2 = { t: 'n', v: pickNo === '' ? 0 : 1, f: `COUNT(N7:N${last})` };
+      ws.B2 = { t: 'n', v: nRolls, f: `COUNTA(A7:A${last})` };
+      ws.F2 = { t: 'n', v: pickNos.length, f: `COUNTA(N7:N${last})` };
     }
     const style = (ref: string, s: unknown) => { ws[ref] = ws[ref] || { t: 's', v: '' }; (ws[ref] as { s?: unknown }).s = s; };
     for (const c of ['A', 'B', 'C', 'F', 'G']) { style(c + '1', ST.top); style(c + '2', ST.top); }
@@ -160,8 +179,15 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
     matched.forEach((row, i) => row.forEach((_, j) => style(U.encode_col(j) + (last + 2 + i), ST.match)));
     ws['!cols'] = [20.5, 16.3, 16.7, 23, 18.5, 10.8, 11.7, 15.8, 27.7, 19.8, 20, 21.3, 9.5, 14.7, 14.8].map((w) => ({ wch: w }));
     ws['!autofilter'] = { ref: `A6:O${Math.max(6, last)}` };
-    U.book_append_sheet(wb, ws, sheetName(r));
-    summary.push([sheetName(r), qty, rolls.length, pickNo, r.kind === 'offsite' ? 'Offsite' : 'Normal',
+    return ws;
+  };
+
+  if (opts.combined) U.book_append_sheet(wb, plSheet(reqs), 'Packing List');
+  for (const r of reqs) {
+    if (!opts.combined) U.book_append_sheet(wb, plSheet([r]), reqName(r));
+    const rolls = rollsOf(r);
+    const cut = rolls.filter((p) => p.partial).length;
+    summary.push([reqName(r), Math.round(rolls.reduce((t, p) => t + p.qty, 0) * 1000) / 1000, rolls.length, pickNoOf(r), r.kind === 'offsite' ? 'Offsite' : 'Normal',
       `${r.so} / ${r.li} / ${r.item}${cut ? ` · ${cut} cut roll${cut > 1 ? 's' : ''}` : ''}${r.closed ? ` · closed ${r.short ?? ''} short` : ''}${multi ? ` · ${r.by_user}` : ''}`]);
   }
   const n = summary.length;
@@ -188,12 +214,14 @@ export function saveWorkbook(wb: XLSX.WorkBook, file: string) {
  * SO | Line Item | Qty (ZMMBE UR = ZINR Insp. Lot Quantity) | Material | Batch.
  * ZMMBE rows are used; when the pick has none (an older pick), the ZINR lots.
  */
-function matchRows(match: string | null | undefined): (string | number)[][] {
-  if (!match) return [];
-  let m: { zmmbe?: Record<string, unknown>[]; zinr?: Record<string, unknown>[] };
-  try { m = JSON.parse(match); } catch { return []; }
-  const src = m.zmmbe?.length ? m.zmmbe.map((z) => ({ so: z.so, li: z.li, qty: z.ur, material: z.material, batch: z.batch }))
-    : (m.zinr || []).map((z) => ({ so: z.so, li: z.li, qty: z.qty, material: z.material, batch: z.batch }));
+function matchRows(matches: string[]): (string | number)[][] {
+  const src: { so: unknown; li: unknown; qty: unknown; material: unknown; batch: unknown }[] = [];
+  for (const match of matches) {
+    let m: { zmmbe?: Record<string, unknown>[]; zinr?: Record<string, unknown>[] };
+    try { m = JSON.parse(match); } catch { continue; }
+    src.push(...(m.zmmbe?.length ? m.zmmbe.map((z) => ({ so: z.so, li: z.li, qty: z.ur, material: z.material, batch: z.batch }))
+      : (m.zinr || []).map((z) => ({ so: z.so, li: z.li, qty: z.qty, material: z.material, batch: z.batch }))));
+  }
   const by = new Map<string, (string | number)[]>();
   for (const z of src) {
     const row = [String(z.so ?? ''), num(z.li), Number(z.qty) || 0, num(z.material), num(String(z.batch ?? '').replace(/^0+(?=\d)/, ''))];
@@ -204,7 +232,6 @@ function matchRows(match: string | null | undefined): (string | number)[][] {
   return Array.from(by.values());
 }
 
-/** The picked rolls only, in the Korber Inventory format (same columns as the uploaded file). */
 /**
  * The Korber row as picked: a cut roll's Actual Qty becomes the QTY taken from it (a full roll keeps its own).
  * `header` = the Korber header in `hn` form.
@@ -216,9 +243,11 @@ function pickedRow(raw: unknown[], header: string[], qty: number): unknown[] {
   return row;
 }
 
-export function korberWorkbook(h: PickHistory) {
+/** The picked rolls only (the marked picks, or all), in the Korber Inventory format (same columns as the uploaded file). */
+export function korberWorkbook(h: PickHistory, ids?: Set<number> | number[]) {
+  const only = ids ? new Set(ids) : null;
   const header = (h.korberHeader || []).map(hn);
-  const rows = h.picks.filter((p) => !p.cancelled_at && h.requests.some((r) => r.id === p.req_id && !r.cancelled_at)).map((p) => pickedRow((p.korber ? JSON.parse(p.korber) : []) as unknown[], header, p.qty) as (string | number)[]);
+  const rows = h.picks.filter((p) => !p.cancelled_at && (!only || !only.size || only.has(p.req_id)) && h.requests.some((r) => r.id === p.req_id && !r.cancelled_at)).map((p) => pickedRow((p.korber ? JSON.parse(p.korber) : []) as unknown[], header, p.qty) as (string | number)[]);
   const ws = XLSX.utils.aoa_to_sheet([(h.korberHeader || []) as (string | number)[], ...rows]);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
