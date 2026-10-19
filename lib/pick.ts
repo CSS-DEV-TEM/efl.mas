@@ -28,8 +28,14 @@ export interface ManualRoll { lot: string; batch: string; material: string; vend
   /** Korber rolls with the same item, Lot Number, Supplier Hu, Invoice and Po (another pallet). */
   suggest?: KorberRow[] }
 export interface KorberRow { pallet: string; item: string; lot: string | null; qty: number; uom: string | null; invoice: string | null; location: string | null; supplier_hu: string | null; status: string | null; available: number; picked_before: number }
+/** A Korber roll offered for a shade-report roll with no Barcode Number (same item; Lot / Supplier Hu agree). */
+export interface NbOption extends KorberRow { checks: Record<string, boolean | null>; exact: boolean }
+/** A shade-report roll with no Barcode Number: the user chooses its Korber roll from `options`. */
+export interface NoBarcodeRoll extends Omit<ManualRoll, 'reason' | 'suggest'> { options: NbOption[]; /** its Korber roll was picked in full already */ done?: boolean }
 export interface Candidates {
   manual?: ManualRoll[];
+  /** rolls without a Barcode Number, each with the Korber rolls that match its other fields */
+  nobarcode?: NoBarcodeRoll[]; nbAvail?: number;
   /** Available QTY of the matched rolls, and the balance they cannot cover (only that is picked by hand). */
   matchedAvail?: number; shortfall?: number;
   /** what is still needed from each batch (its UR less what was picked), trimmed to the line balance */

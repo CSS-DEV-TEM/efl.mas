@@ -688,3 +688,10 @@ table.mini td.ck input, table.mini th.ck input { width: 16px; height: 16px; curs
 table.mini tr.marked > td { background: color-mix(in srgb, var(--accent) 9%, transparent); }
 .dup-qty ul { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: auto; }
 .dup-qty li { margin: 2px 0; }
+
+/* pick: shade-report rolls with no barcode — the user chooses the Korber roll */
+.nb-pick { border: 1px dashed color-mix(in srgb, var(--info) 45%, transparent); background: color-mix(in srgb, var(--info) 5%, transparent); border-radius: 10px; padding: 12px 14px; }
+.nb-pick h3 { margin: 0 0 4px; font-size: 15px; display: flex; align-items: center; gap: 6px; }
+.nb-select { min-width: 300px; max-width: 520px; width: 100%; }
+.nb-checks { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.nb-checks .pill { font-size: 11px; }
