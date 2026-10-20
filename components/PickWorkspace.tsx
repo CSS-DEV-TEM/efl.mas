@@ -344,11 +344,16 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
   });
   // Qty only counts for a lot without Shade Report (otherwise Korber's Actual Qty is simply the roll's QTY)
   const nbMiss = (o: NbOption, m?: NoBarcodeRoll) => (['lot', 'hu', 'qty'] as const).filter((k) => o.checks[k] === false && (k !== 'qty' || !!m?.noShade));
+  // what is already chosen by hand for one shade-report roll (several Korber rolls can make up one roll / lot QTY)
+  const chosenFor = (m: ManualRoll) => manualSel.filter(([, x]) => x.manual === m);
+  const rollLeft = (m: ManualRoll) => (Number(m.roll_qty) > 0 ? Math.max(0, r3(Number(m.roll_qty) - chosenFor(m).reduce((t, [, x]) => t + (Number(x.qty) || 0), 0))) : Infinity);
+  // Use adds the Korber roll (the chooser stays open for more); Use on a chosen one takes it out again
   const useKorber = (m: ManualRoll, k: KorberRow) => {
-    setChoosing(null);
     if (c?.rolls.some((r) => r.pallet === k.pallet)) { if (!sel[k.pallet]) toggle(c.rolls.find((r) => r.pallet === k.pallet)!); return; }
-    if (manualLeft <= 1e-9) return;
-    setSel((x) => ({ ...x, [k.pallet]: { qty: String(r3(Math.min(k.available, manualLeft))), manual: m, korber: k } }));
+    if (sel[k.pallet]?.manual === m) { setSel((x) => { const n = { ...x }; delete n[k.pallet]; return n; }); return; }
+    const q = r3(Math.min(k.available, manualLeft, rollLeft(m)));
+    if (q <= 1e-9) return;
+    setSel((x) => ({ ...x, [k.pallet]: { qty: String(q), manual: m, korber: k } }));
   };
   // rolls the user has to look at before picking: a check that did not pass, or chosen by hand
   const flagged = c ? [
@@ -538,15 +543,18 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
                 <div className="table-wrap pk-tbl"><table className="mini">
                   <thead><tr><th>Roll</th><th>ZCOMENT barcode</th><th>Shade</th><th className="n">Roll qty</th><th>Why it did not match</th><th>Korber roll</th><th className="n">Pick qty</th></tr></thead>
                   <tbody>{c.manual!.map((m, i) => {
-                    const chosen = manualSel.find(([, x]) => x.manual === m);
+                    const chosenAll = chosenFor(m), chosen = chosenAll[0];
                     return (
                       <tr key={i} className={chosen ? 'picked' : ''}>
                         <td><b>{m.roll_no || '–'}</b></td><td className="mono">{m.barcode || <span className="muted">none</span>}</td><td><b>{m.shade}</b></td><td className="n">{fmtQty(m.roll_qty)}</td>
                         <td className="muted small why" title={m.reason}><span>{m.reason}</span></td>
-                        <td>{chosen ? <span className="mono">{chosen[0]} <button className="btn sm" onClick={() => setSel((x) => { const n = { ...x }; delete n[chosen[0]]; return n; })} aria-label="Remove">✕</button></span>
-                          : <button className="btn sm" disabled={manualLeft <= 1e-9} title={manualLeft <= 1e-9 ? 'The balance is already covered' : undefined} onClick={() => setChoosing(m)}>Choose Korber roll…</button>}</td>
-                        <td className="n">{chosen ? <input className="as-search" type="number" step="0.001" min="0.001" max={Math.min(chosen[1].korber?.available ?? Infinity, r3(shortfall - manualTotal + (Number(chosen[1].qty) || 0)))} style={{ width: 92 }} value={chosen[1].qty}
-                          onChange={(e) => setSel((x) => ({ ...x, [chosen[0]]: { ...x[chosen[0]], qty: e.target.value } }))} aria-label="Pick qty" /> : ''}</td>
+                        <td>
+                          {chosenAll.map(([pal]) => <div key={pal} className="mono man-chosen">{pal} <button className="btn sm" onClick={() => setSel((x) => { const n = { ...x }; delete n[pal]; return n; })} aria-label={`Remove ${pal}`}>✕</button></div>)}
+                          {(!chosen || (manualLeft > 1e-9 && rollLeft(m) > 1e-9)) && <button className="btn sm" disabled={manualLeft <= 1e-9} title={manualLeft <= 1e-9 ? 'The balance is already covered' : undefined} onClick={() => setChoosing(m)}>{chosen ? '+ Add Korber roll…' : 'Choose Korber roll…'}</button>}
+                          {chosenAll.length > 1 && <div className="muted small">{chosenAll.length} rolls · {fmtQty(chosenAll.reduce((t, [, x]) => t + (Number(x.qty) || 0), 0))}</div>}
+                        </td>
+                        <td className="n">{chosenAll.map(([pal, x]) => <div key={pal} className="man-chosen"><input className="as-search" type="number" step="0.001" min="0.001" max={Math.min(x.korber?.available ?? Infinity, r3(shortfall - manualTotal + (Number(x.qty) || 0)))} style={{ width: 92 }} value={x.qty}
+                          onChange={(e) => setSel((y) => ({ ...y, [pal]: { ...y[pal], qty: e.target.value } }))} aria-label={`Pick qty ${pal}`} /></div>)}</td>
                       </tr>
                     );
                   })}</tbody>
@@ -556,7 +564,8 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
             {(c.manual?.length ?? 0) > 0 && shortfall <= 1e-9 && (
               <p className="muted small" style={{ margin: 0 }}>{c.manual!.length} shade-report roll{c.manual!.length === 1 ? ' does' : 's do'} not match a Korber roll, but the matched rolls cover the line — nothing to pick by hand.</p>
             )}
-            {choosing && <KorberChooser item={line.item} roll={choosing} taken={Object.keys(sel)} onUse={(k) => useKorber(choosing, k)} onClose={() => setChoosing(null)} />}
+            {choosing && <KorberChooser item={line.item} roll={choosing} taken={Object.keys(sel).filter((p) => sel[p].manual !== choosing)} mine={chosenFor(choosing).map(([p]) => p)}
+              chosenQty={chosenFor(choosing).reduce((t, [, x]) => t + (Number(x.qty) || 0), 0)} open={manualLeft} rollOpen={rollLeft(choosing)} onUse={(k) => useKorber(choosing, k)} onClose={() => setChoosing(null)} />}
 
             {offsiteOver && <div className="notice bad">Offsite pick: the selected QTY is {fmt(diff, 2)} over the plan balance. Cut the last roll to the exact QTY or untick a roll.</div>}
             {kind === 'normal' && rules.allowNormalShort && isShort && !(lastOn && lastMode === 'leave') && (
@@ -598,7 +607,12 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
 }
 
 /** Search the uploaded Korber rolls of the line's item (or scan a pallet) and pick one for a manual roll. */
-function KorberChooser({ item, roll, taken, onUse, onClose }: { item: string; roll: ManualRoll; taken: string[]; onUse: (k: KorberRow) => void; onClose: () => void }) {
+/**
+ * Korber rolls for a shade-report roll that was not matched. Several can be used (one roll / lot QTY made up of
+ * several pallets): Use adds one and the list stays open; a used one shows Remove.
+ */
+function KorberChooser({ item, roll, taken, mine = [], chosenQty = 0, open = Infinity, rollOpen = Infinity, onUse, onClose }: { item: string; roll: ManualRoll; taken: string[]; mine?: string[]; chosenQty?: number; open?: number; rollOpen?: number; onUse: (k: KorberRow) => void; onClose: () => void }) {
+  const full = open <= 1e-9 || rollOpen <= 1e-9;
   const [q, setQ] = useState(roll.vendor_batch || '');
   const [rows, setRows] = useState<KorberRow[] | null>(null);
   useEffect(() => {
@@ -610,22 +624,24 @@ function KorberChooser({ item, roll, taken, onUse, onClose }: { item: string; ro
   return (
     <div className="kchooser">
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-        <b>Korber roll for {roll.roll_no || 'roll'}</b><span className="muted small">item {item} · vendor batch {roll.vendor_batch} · roll qty {fmtQty(roll.roll_qty)}</span>
+        <b>Korber rolls for {roll.roll_no || 'roll'}</b><span className="muted small">item {item} · vendor batch {roll.vendor_batch} · roll qty {fmtQty(roll.roll_qty)}</span>
+        <span className={`pill ${full ? 'ok' : 'accent'}`}>{mine.length} chosen · {fmtQty(chosenQty)}{Number(roll.roll_qty) > 0 ? ` of ${fmtQty(roll.roll_qty)}` : ''}{full ? ' · covered' : Number.isFinite(Math.min(open, rollOpen)) ? ` · ${fmtQty(Math.min(open, rollOpen))} open` : ''}</span>
         <input autoFocus className="as-search" placeholder="Scan / type pallet, lot or supplier HU" value={q} onChange={(e) => setQ(e.target.value)} style={{ flex: '1 1 240px' }} aria-label="Search Korber" />
-        <button className="btn sm" onClick={onClose}>Close</button>
+        <button className="btn sm primary" onClick={onClose}>{mine.length ? 'Done' : 'Close'}</button>
       </div>
-      <div className="table-wrap" style={{ maxHeight: 220, marginTop: 6 }}>
+      <div className="table-wrap" style={{ maxHeight: 300, marginTop: 6 }}>
         {rows === null ? <Loader label="Searching Korber…" /> : !rows.length ? <p className="muted">No Korber roll found{q ? ` for “${q}”` : ''}.</p> : (
           <table className="mini">
             <thead><tr><th>Pallet</th><th>Item</th><th>Location</th><th>Lot</th><th>Supplier HU</th><th className="n">Actual qty</th><th className="n">Available</th><th /></tr></thead>
             <tbody>{rows.map((k) => {
-              const used = taken.includes(k.pallet), gone = k.available <= 1e-9;
+              const used = taken.includes(k.pallet), gone = k.available <= 1e-9, isMine = mine.includes(k.pallet);
               return (
-                <tr key={k.pallet} className={gone ? 'gone' : ''}>
+                <tr key={k.pallet} className={`${gone ? 'gone' : ''} ${isMine ? 'picked' : ''}`}>
                   <td className="mono">{k.pallet}</td><td>{k.item}</td><td>{k.location}</td><td>{k.lot}</td><td>{k.supplier_hu}</td><td className="n">{fmtQty(k.qty)}</td>
                   <td className="n">{gone ? <span className="pill mute">picked</span> : fmtQty(k.available)}
                     {(k.picks?.length ?? 0) > 0 && <div className="pk-prev">{gone ? 'Picked in full' : 'Cut roll — balance only'}: {k.picks!.map(pickNote).join(' | ')}</div>}</td>
-                  <td><button className="btn sm primary" disabled={gone || used} onClick={() => onUse(k)}>{used ? 'Selected' : 'Use'}</button></td>
+                  <td>{isMine ? <button className="btn sm" onClick={() => onUse(k)}>Remove</button>
+                    : <button className="btn sm primary" disabled={gone || used || full} title={used ? 'Already chosen for another roll' : full ? 'The QTY is covered — remove one to choose another' : ''} onClick={() => onUse(k)}>{used ? 'Selected' : 'Use'}</button>}</td>
                 </tr>
               );
             })}</tbody>
