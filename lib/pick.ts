@@ -200,8 +200,26 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
     }
   }
 
+  // one pallet can be picked in pieces (several picks / batches): its pieces are one row, and it is a cut roll only when
+  // the pieces together are less than the roll (Korber Actual Qty); pieces adding up to the whole roll are not a cut
+  const aq = header.indexOf('actual qty');
+  const fullOf = (e: Entry) => Number(e.p.roll_qty) || Number(aq >= 0 ? e.raw[aq] : 0) || 0;
+  const palTotal = new Map<string, number>(), palFull = new Map<string, number>();
+  for (const e of entries) {
+    palTotal.set(e.p.pallet, (palTotal.get(e.p.pallet) ?? 0) + Number(e.p.qty));
+    palFull.set(e.p.pallet, Math.max(palFull.get(e.p.pallet) ?? 0, fullOf(e)));
+  }
+  const isCut = (pallet: string) => { const full = palFull.get(pallet) ?? 0; return full > 0 ? (palTotal.get(pallet) ?? 0) < full - 0.0005 : false; };
+  interface Merged { e: Entry; parts: Entry[]; qty: number }
+  const mergeByPallet = (list: Entry[]) => {
+    const by = new Map<string, Merged>();
+    for (const e of list) { const m = by.get(e.p.pallet); if (m) { m.parts.push(e); m.qty += Number(e.p.qty); } else by.set(e.p.pallet, { e, parts: [e], qty: Number(e.p.qty) }); }
+    return Array.from(by.values());
+  };
+
   /** One sheet: the totals block, then a table per Asn + Po + Lot with its SAP lines under it. */
-  const plSheet = (list: Entry[]) => {
+  const plSheet = (list0: Entry[]) => {
+    const list = mergeByPallet(list0);
     const aoa: (string | number | null)[][] = [
       ['TOTAL QTY', 'TOTAL ROLLS', 'HJ PICK', null, null, 'TOTAL PICK', 'CUT ROLLS'],
       [null, null, null, null, null, null, null],
@@ -210,22 +228,25 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
       [],
     ];
     const qtyRanges: string[] = []; const headRows: number[] = []; const rollRows: number[] = []; const sapRows: number[] = []; const cutRows: number[] = [];
-    const groups = new Map<string, Entry[]>();
-    for (const e of list) { const g = groups.get(e.group); if (g) g.push(e); else groups.set(e.group, [e]); }
+    const groups = new Map<string, Merged[]>();
+    for (const m of list) { const g = groups.get(m.e.group); if (g) g.push(m); else groups.set(m.e.group, [m]); }
     for (const g of groups.values()) {
       headRows.push(aoa.length); aoa.push([...PL_HEAD2]);
       const first = aoa.length;
       const seen = new Set<number>();
-      for (const e of g) {
-        const row = [...e.row];
-        if (!seen.has(e.r.id)) { row[PICKNO_COL] = pickNoOf(e.r); seen.add(e.r.id); } // the Pick No on each pick's first roll of the table
-        if (e.p.partial) cutRows.push(aoa.length);
+      for (const m of g) {
+        const row = [...m.e.row];
+        row[QTY_COL] = Math.round(m.qty * 1000) / 1000; // the pieces of the pallet together
+        // the Pick No on each pick's first roll of the table
+        const nos = m.parts.filter((x) => !seen.has(x.r.id)).map((x) => { seen.add(x.r.id); return pickNoOf(x.r); }).filter((x) => x !== '');
+        row[PICKNO_COL] = nos.length ? (nos.length === 1 ? nos[0] : Array.from(new Set(nos)).join(', ')) : null;
+        if (isCut(m.e.p.pallet)) cutRows.push(aoa.length);
         rollRows.push(aoa.length); aoa.push(row);
       }
       qtyRanges.push(`${U.encode_col(QTY_COL)}${first + 1}:${U.encode_col(QTY_COL)}${aoa.length}`);
       // the SAP lines of this table: SO | LI | Qty | Material | Batch, adding up to its Actual Qty
       const sap = new Map<string, (string | number)[]>();
-      for (const e of g) for (const b of e.batches) {
+      for (const e of g.flatMap((m) => m.parts)) for (const b of e.batches) {
         if (!(b.qty > 1e-9)) continue;
         const k = [e.r.so, e.r.li, e.r.item, String(b.batch).replace(/^0+(?=\d)/, '')].join('|');
         const had = sap.get(k);
@@ -236,12 +257,12 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
       for (const row of sap.values()) { sapRows.push(aoa.length); aoa.push(row); }
       aoa.push([]);
     }
-    const qty = Math.round(list.reduce((t, e) => t + e.p.qty, 0) * 1000) / 1000;
-    const picks = Array.from(new Set(list.map((e) => e.r.id)));
+    const qty = Math.round(list.reduce((t, m) => t + m.qty, 0) * 1000) / 1000;
+    const picks = Array.from(new Set(list0.map((e) => e.r.id)));
     const pickNos = picks.map((id) => pickNoOf(reqs.find((r) => r.id === id)!)).filter((x) => x !== '');
-    const cut = list.filter((e) => e.p.partial).length;
-    const cust = String(list.map((e) => { const i = col(['customer ref number']); return i >= 0 ? e.raw[i] : ''; }).find(Boolean) ?? '').split('-')[0];
-    const days = Array.from(new Set(list.map((e) => e.p.day))).sort();
+    const cut = list.filter((m) => isCut(m.e.p.pallet)).length;
+    const cust = String(list0.map((e) => { const i = col(['customer ref number']); return i >= 0 ? e.raw[i] : ''; }).find(Boolean) ?? '').split('-')[0];
+    const days = Array.from(new Set(list0.map((e) => e.p.day))).sort();
     aoa[1] = [qty, list.length, pickNos.length === 1 ? pickNos[0] : pickNos.join(', '), null, null, pickNos.length, cut];
     aoa[3] = [cust || null, days.map((d) => d.split('-').reverse().join('-')).join(', ') || null];
     const ws = U.aoa_to_sheet(aoa);
@@ -279,14 +300,17 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
   for (const r of reqs) {
     const es = entries.filter((e) => e.r.id === r.id);
     const q = (f: (e: Entry) => boolean) => Math.round(es.filter(f).reduce((t, e) => t + e.p.qty, 0) * 1000) / 1000;
-    const cut = es.filter((e) => e.p.partial).length;
-    summary.push([reqName(r), q(() => true), q((e) => e.kind === 'KFC'), q((e) => e.kind === 'PFC'), es.length, pickNoOf(r), r.kind === 'offsite' ? 'Offsite' : 'Normal',
+    const pals = Array.from(new Set(es.map((e) => e.p.pallet)));
+    const cut = pals.filter(isCut).length;
+    summary.push([reqName(r), q(() => true), q((e) => e.kind === 'KFC'), q((e) => e.kind === 'PFC'), pals.length, pickNoOf(r), r.kind === 'offsite' ? 'Offsite' : 'Normal',
       `${r.so} / ${r.li} / ${r.item}${cut ? ` · ${cut} cut roll${cut > 1 ? 's' : ''}` : ''}${r.closed ? ` · closed ${r.short ?? ''} short` : ''}${multi ? ` · ${r.by_user}` : ''}`]);
   }
   const n = summary.length;
   summary.push(['Total', null, null, null, null]);
   const sws = U.aoa_to_sheet(summary);
-  for (const c of ['B', 'C', 'D', 'E']) sws[`${c}${n + 1}`] = { t: 'n', v: summary.slice(1, n).reduce((t, row) => t + Number(row['BCDE'.indexOf(c) + 1] || 0), 0), f: `SUM(${c}2:${c}${n})` };
+  for (const c of ['B', 'C', 'D']) sws[`${c}${n + 1}`] = { t: 'n', v: summary.slice(1, n).reduce((t, row) => t + Number(row['BCD'.indexOf(c) + 1] || 0), 0), f: `SUM(${c}2:${c}${n})` };
+  // rolls: a pallet picked in pieces by several picks counts once
+  sws[`E${n + 1}`] = { t: 'n', v: new Set(entries.map((e) => e.p.pallet)).size };
   sws['!cols'] = [{ wch: multi ? 16 : 8 }, { wch: 11 }, { wch: 10 }, { wch: 10 }, { wch: 11 }, { wch: 14 }, { wch: 9 }, { wch: 52 }];
   U.book_append_sheet(wb, sws, 'Summary');
   if (opts.korberSheet !== false && h.korberHeader) {
@@ -322,13 +346,20 @@ function korberSheet(korberHeader: unknown[], picks: PickRoll[]) {
   const n = korberHeader.length;
   const aoa: (string | number | null)[][] = [[...(korberHeader as (string | number)[]), 'Cut Roll', 'Korber Qty', 'Balance Qty']];
   const cut: number[] = [];
+  // the pieces of one pallet (picked in parts) are one row; it is "CUT" only when they add up to less than the roll
+  const by = new Map<string, { p: PickRoll; raw: unknown[]; qty: number; full: number }>();
   for (const p of picks) {
     const raw = (p.korber ? JSON.parse(p.korber) : []) as unknown[];
-    const row = pickedRow(raw, header, p.qty) as (string | number | null)[];
-    while (row.length < n) row.push(null);
     const full = Number(p.roll_qty) || Number(qi >= 0 ? raw[qi] : 0) || 0;
-    if (p.partial) { cut.push(aoa.length); row.push('CUT', Math.round(full * 1000) / 1000, Math.round(Math.max(0, full - p.qty) * 1000) / 1000); }
-    else row.push(null, Math.round(full * 1000) / 1000, null);
+    const had = by.get(p.pallet);
+    if (had) { had.qty += Number(p.qty); had.full = Math.max(had.full, full); } else by.set(p.pallet, { p, raw, qty: Number(p.qty), full });
+  }
+  for (const x of by.values()) {
+    const row = pickedRow(x.raw, header, x.qty) as (string | number | null)[];
+    while (row.length < n) row.push(null);
+    const full = Math.round(x.full * 1000) / 1000;
+    if (x.full > 0 && x.qty < x.full - 0.0005) { cut.push(aoa.length); row.push('CUT', full, Math.round(Math.max(0, x.full - x.qty) * 1000) / 1000); }
+    else row.push(null, full || null, null);
     aoa.push(row);
   }
   const ws = U.aoa_to_sheet(aoa);
