@@ -107,7 +107,8 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
       const { period, ...line } = m.line as Partial<Line> & { key: string; period?: string; week?: string };
       const per = period ?? line.week;
       setData((d) => d && { ...d, rows: d.rows.map((r) => (r.key === line.key && (!per || periodOf(r) === per) && (!('date' in line) || (r.date ?? null) === (line.date ?? null))
-        ? { ...r, status: line.status ?? null, comment: line.comment ?? null, vehicle: line.vehicle ?? null, qi_note: line.qi_note ?? null, updated_by: line.updated_by ?? null, updated_at: line.updated_at ?? null } : r)) });
+        ? { ...r, status: line.status ?? null, comment: line.comment ?? null, vehicle: line.vehicle ?? null, qi_note: line.qi_note ?? null, updated_by: line.updated_by ?? null, updated_at: line.updated_at ?? null,
+            ...('hold' in line ? { hold: line.hold ?? null, hold_by: line.hold_by ?? null, hold_at: line.hold_at ?? null } : {}) } : r)) });
       setFlash((f) => new Set(f).add(line.key));
       setTimeout(() => setFlash((f) => { const n = new Set(f); n.delete(line.key); return n; }), 2300);
     }
@@ -139,7 +140,7 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
   const viewCounts = useMemo(() => {
     const c: Record<string, number> = {};
     const views: [string, View][] = [['partdisp', { kind: 'partdisp' }], ['Dispatched', { kind: 'action', value: 'Dispatched' }], ['urgent', { kind: 'urgent' }], ['priority', { kind: 'priority' }], ['carried', { kind: 'carried' }],
-      ...(['Ready to pull', 'Not in Korber', 'Release QI / Block', 'Partial pull', 'Follow up TN', 'No stock'] as Action[]).map((a) => [a, { kind: 'action', value: a }] as [string, View])];
+      ...(['Ready to pull', 'Not in Korber', 'On hold', 'Release QI / Block', 'Partial pull', 'Follow up TN', 'No stock'] as Action[]).map((a) => [a, { kind: 'action', value: a }] as [string, View])];
     for (const [k, v] of views) c[k] = scoped.filter((r) => matchView(r, v, today)).length;
     return c;
   }, [scoped, today]);
@@ -404,7 +405,7 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
               </div>
               <div className="views" role="group" aria-label="Smart views">
                 {([['all', 'All lines', { kind: 'all' }], ['urgent', 'Urgent', { kind: 'urgent' }], ['priority', 'Priority', { kind: 'priority' }], ['carried', 'Carried over', { kind: 'carried' }],
-                  ['Ready to pull', 'Ready to pull', { kind: 'action', value: 'Ready to pull' }], ['Not in Korber', 'Not in Korber', { kind: 'action', value: 'Not in Korber' }], ['Release QI / Block', 'Release QI / Block', { kind: 'action', value: 'Release QI / Block' }],
+                  ['Ready to pull', 'Ready to pull', { kind: 'action', value: 'Ready to pull' }], ['Not in Korber', 'Not in Korber', { kind: 'action', value: 'Not in Korber' }], ['On hold', 'On hold', { kind: 'action', value: 'On hold' }], ['Release QI / Block', 'Release QI / Block', { kind: 'action', value: 'Release QI / Block' }],
                   ['Partial pull', 'Partial pull', { kind: 'action', value: 'Partial pull' }], ['Follow up TN', 'Follow up TN', { kind: 'action', value: 'Follow up TN' }],
                   ['No stock', 'No stock', { kind: 'action', value: 'No stock' }],
                   ...((data?.dispatch?.items.length ? [['partdisp', 'Part dispatched', { kind: 'partdisp' }], ['Dispatched', 'Dispatched ✓', { kind: 'action', value: 'Dispatched' }]] : []) as [string, string, View][])] as [string, string, View][]).map(([k, label, v]) => (

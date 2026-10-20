@@ -97,7 +97,7 @@ function MyWork() {
                       <b>{l.so} / {l.li}</b><span className="muted">{l.item} · {l.plant || '–'} · {l.plan_type === 'day' ? (/~(\d+)$/.exec(l.week || '') ? `Pick ${/~(\d+)$/.exec(l.week || '')![1]}` : 'day plan') : 'week plan'}</span>
                       <span className={`pill ${d === 'Overdue' ? 'bad' : d === 'Today' ? 'warn' : 'mute'}`}>{d}{l.date ? ` · ${fmtDate(l.date)}` : ''}</span>
                       <span className="n"><b>{fmtQty(need(l))}</b> to send · UR {fmtQty(avail(l))}</span>
-                      {canEdit && <button className="btn sm primary" onClick={() => setPicking(l)}>Pick</button>}
+                      {canEdit && (l.hold ? <span className="pill bad" title={l.hold}>On hold</span> : <button className="btn sm primary" onClick={() => setPicking(l)}>Pick</button>)}
                     </li>
                   );
                 })}
@@ -118,7 +118,7 @@ function MyWork() {
                         <td><span className={`pill ${n.tone}`}>{n.step}</span>{isPrio(l) && <span className="pill warn" style={{ marginLeft: 4 }}>priority</span>}</td>
                         <td>{l.so}</td><td>{l.li}</td><td>{l.item}</td><td>{l.plan_type === 'day' ? 'Day' : 'Week'}</td><td>{fmtDate(l.date)}</td><td>{l.plant}</td>
                         <td className="n">{fmtQty(l.qty)}</td><td className="n">{l.picked ? fmtQty(l.picked) : '–'}</td><td className="n"><b>{fmtQty(need(l))}</b></td><td className="n">{fmtQty(avail(l))}</td>
-                        <td style={{ whiteSpace: 'nowrap' }}>{canEdit && n.rank <= 2 && <button className="btn sm primary" onClick={() => setPicking(l)}>Pick</button>}
+                        <td style={{ whiteSpace: 'nowrap' }}>{canEdit && n.rank <= 2 && (l.hold ? <span className="pill bad" title={l.hold}>On hold</span> : <button className="btn sm primary" onClick={() => setPicking(l)}>Pick</button>)}
                           {canEdit && <> <CompleteLine line={l} onDone={(m) => { toast(m); load(); }} /></>}</td>
                       </tr>
                     );

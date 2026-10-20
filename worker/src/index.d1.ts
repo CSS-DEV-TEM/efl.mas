@@ -147,7 +147,7 @@ const thisWeek = () => weekId(new Date(Date.now() + 5.5 * 3600 * 1000).toISOStri
  * adds plan.week, fills it from the dates, and moves dashboard edits to week-scoped keys ("2026-W42#SO|LI|Item").
  */
 let schemaReady = false;
-const SCHEMA_V = '20';
+const SCHEMA_V = '21';
 async function ensureSchema(env: Env) {
   if (schemaReady || !env.DB) return;
   try {
@@ -248,6 +248,8 @@ async function ensureSchema(env: Env) {
     env.DB.prepare(`UPDATE plan SET week = date || '~' || COALESCE(NULLIF(upper(trim(plant)), ''), '-') || '~1' WHERE plan_type = 'day' AND instr(week, '~') = 0 AND date IS NOT NULL`),
     env.DB.prepare("DELETE FROM config WHERE k IN ('c_counts', 'c_pick_counts', 'c_weeks') OR k LIKE 'c_weeks:%'"),
   ]);
+  // v21: Pick Hold — a line on hold is not picked until the hold is released (reason, who, when)
+  for (const c of ['hold TEXT', 'hold_by TEXT', 'hold_at TEXT']) { try { await env.DB.prepare(`ALTER TABLE line_status ADD COLUMN ${c}`).run(); } catch { /* already there */ } }
   await env.DB.prepare("INSERT INTO config (k, v) VALUES ('schema_v', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(SCHEMA_V).run();
   schemaReady = true;
 }
@@ -310,7 +312,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 38; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 39; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -406,6 +408,7 @@ async function handleUpload(env: Env, req: Request) {
     /** a day plan round: the day, and Pick 1, 2 … of the plant (`plant`) on that day */
     day?: string; round?: number };
   let stockDups = 0;
+  let plantOut = 0;
   let stockDiff: { added: number; removed: number; unchanged: number } | null = null;
   let derived: { kfc: number; pfc: number; plant: number | null; plantKept?: number } | null = null;
   if (!ALL_SRCS.includes(body.src)) throw new HttpError(400, 'Unknown report type.');
@@ -532,7 +535,9 @@ async function handleUpload(env: Env, req: Request) {
       const dpl = plantRows.length && !ownPlant ? await write('plant', plantRows) : null;
       stmts.push(...dz.stmts, ...dk.stmts, ...dp.stmts, ...(dpl ? dpl.stmts : []));
       stockDiff = dz;
-      derived = { kfc: kfcRows.length, pfc: pfcRows.length, plant: dpl ? plantRows.length : null, ...(plantRows.length && !dpl ? { plantKept: plantRows.length } : {}) };
+      // plant: the plant-location rows kept out of ZMMBE / KFC / PFC (shown as "left out", not as skipped)
+      derived = { kfc: kfcRows.length, pfc: pfcRows.length, plant: plantRows.length, ...(plantRows.length && !dpl ? { plantKept: plantRows.length } : {}) };
+      plantOut = plantRows.length;
       const from = `${body.fileName || 'ZMMBE'} (from ZMMBE)`;
       for (const [src, n] of [['kfc', kfcRows.length], ['pfc', pfcRows.length], ...(dpl ? [['plant', plantRows.length]] : [])] as [string, number][]) {
         stmts.push(env.DB.prepare('INSERT INTO uploads (src, file_name, sheet_name, row_count, uploaded_by, uploaded_at, mode) VALUES (?,?,?,?,?,?,?)')
@@ -554,7 +559,7 @@ async function handleUpload(env: Env, req: Request) {
   await env.DB.batch(stmts); // all or nothing
 
   await broadcast(env, { type: 'data', src: body.src, by: s.u, rows: mapped.length, weeks });
-  return json({ ok: true, src: body.src, accepted: mapped.length, skipped: body.rows.length - mapped.length - (Number(planSummary?.inFileDups) || 0) - stockDups, stockDups, mode: body.src === 'plan' ? undefined : body.mode === 'add' ? 'add' : 'replace', weeks, changes: stockDiff ? { added: stockDiff.added, removed: stockDiff.removed, unchanged: stockDiff.unchanged } : undefined, derived: derived ?? undefined, ...(planSummary || {}) });
+  return json({ ok: true, src: body.src, accepted: mapped.length, skipped: Math.max(0, body.rows.length - mapped.length - plantOut - (Number(planSummary?.inFileDups) || 0) - stockDups), stockDups, mode: body.src === 'plan' ? undefined : body.mode === 'add' ? 'add' : 'replace', weeks, changes: stockDiff ? { added: stockDiff.added, removed: stockDiff.removed, unchanged: stockDiff.unchanged } : undefined, derived: derived ?? undefined, ...(planSummary || {}) });
 }
 
 // ---------------------------------------------------------------- the pull plan calculation
@@ -607,7 +612,7 @@ SELECT p.rowid AS id, p.row_no, p.key, p.week, p.owner, p.plan_type, p.src_user,
     SELECT 1 FROM plan pp LEFT JOIN line_status pls ON pls.key = ${SK('pp')}
     WHERE pp.week = ?2 AND pp.key = p.key AND (?3 IS NULL OR pp.owner = ?3) AND pp.plan_type = ?4 AND lower(COALESCE(pls.status, '')) NOT LIKE '%done%'
   ) THEN 1 ELSE 0 END AS carried,
-  ls.status, ls.comment, ls.vehicle, ls.qi_note, ls.updated_by, ls.updated_at
+  ls.status, ls.comment, ls.vehicle, ls.qi_note, ls.updated_by, ls.updated_at, ls.hold, ls.hold_by, ls.hold_at
 FROM plan p
 LEFT JOIN s  ON s.key = p.key
 LEFT JOIN t  ON t.key = p.key
@@ -1309,6 +1314,12 @@ async function handlePick(env: Env, req: Request, p: string) {
     const line = await env.DB.prepare('SELECT so, li, item, qty, plant, date, owner FROM plan WHERE week = ?1 AND key = ?2 AND COALESCE(date, \'\') = ?3 ORDER BY (owner = ?4) DESC LIMIT 1').bind(b.week, b.key, b.date ?? '', s.u).first<Row>();
     if (!line) throw new HttpError(404, 'That plan line is not in this week.');
     if (!isBoss(s) && line.owner && line.owner !== s.u) throw new HttpError(403, `That line is in ${line.owner}'s plan.`);
+    // Pick Hold: a held line is not picked until the hold is released
+    {
+      const sk = statusKey({ plan_type: parseRound(b.week) || /^\d{4}-\d{2}-\d{2}$/.test(b.week) ? 'day' : 'week', week: b.week, date: b.date ?? '', key: b.key });
+      const h = await env.DB.prepare('SELECT hold, hold_by, hold_at FROM line_status WHERE key = ? AND hold IS NOT NULL').bind(sk).first<Row>();
+      if (h) throw new HttpError(409, `This line is on hold (${h.hold}${h.hold_by ? ` — ${h.hold_by}` : ''}). Release the hold first.`);
+    }
     const cand = await pickCandidates(env, b.week, b.key, b.date ?? '', line);
     const byPallet = new Map(cand.rolls.map((r) => [r.pallet, r]));
     const lineId = `${b.key}|${b.date ?? ''}`;
@@ -2083,7 +2094,7 @@ async function handleDispatch(env: Env, req: Request) {
 
 async function handleStatus(env: Env, req: Request) {
   const s = await requireUser(env, req, 'editor');
-  const b = (await req.json()) as { key: string; week?: string; date?: string | null; status?: string | null; comment?: string | null; vehicle?: string | null; qi_note?: string | null };
+  const b = (await req.json()) as { key: string; week?: string; date?: string | null; status?: string | null; comment?: string | null; vehicle?: string | null; qi_note?: string | null; hold?: string | null };
   if (!b.key) throw new HttpError(400, 'Missing line key.');
   // the plan the status belongs to: a week (2026-W47) or, for a day plan, the day (2026-11-17)
   const week = b.week && (/^(\d{4}-W\d{2}|\d{4}-\d{2}-\d{2})$/.test(b.week) || parseRound(b.week)) ? b.week
@@ -2097,22 +2108,25 @@ async function handleStatus(env: Env, req: Request) {
       : (await env.DB.prepare("SELECT DISTINCT COALESCE(date, '') d FROM plan WHERE week = ? AND key = ? AND COALESCE(plan_type, 'week') = 'week'").bind(week, b.key).all<{ d: string }>()).results.map((r) => `${week}#${b.key}@${r.d}`);
     if (!sKeys.length) sKeys = [`${week}#${b.key}@`];
   }
-  const fields = (['status', 'comment', 'vehicle', 'qi_note'] as const).filter((f) => f in b);
+  const fields = (['status', 'comment', 'vehicle', 'qi_note', 'hold'] as const).filter((f) => f in b);
+  // Pick Hold: the reason (blank / null = released); who and when are kept with it
+  if ('hold' in b && b.hold !== null && b.hold !== undefined && !String(b.hold).trim()) b.hold = 'On hold';
   if (!fields.length) throw new HttpError(400, 'Nothing to change.');
-  const cur = await env.DB.prepare('SELECT status, comment, vehicle, qi_note FROM line_status WHERE key = ?').bind(sKeys[0]).first<Row>();
-  const next: Row = { status: null, comment: null, vehicle: null, qi_note: null, ...(cur || {}) };
+  const cur = await env.DB.prepare('SELECT status, comment, vehicle, qi_note, hold, hold_by, hold_at FROM line_status WHERE key = ?').bind(sKeys[0]).first<Row>();
+  const next: Row = { status: null, comment: null, vehicle: null, qi_note: null, hold: null, hold_by: null, hold_at: null, ...(cur || {}) };
   for (const f of fields) next[f] = txt(b[f]);
+  if ('hold' in b) { next.hold_by = next.hold ? s.u : null; next.hold_at = next.hold ? now() : null; }
   const date = rnd ? rnd.day : isDay ? week : 'date' in b ? normDate(b.date) : undefined;
   await env.DB.batch([
-    ...sKeys.map((k) => env.DB.prepare(`INSERT INTO line_status (key, status, comment, vehicle, qi_note, updated_by, updated_at) VALUES (?,?,?,?,?,?,?)
+    ...sKeys.map((k) => env.DB.prepare(`INSERT INTO line_status (key, status, comment, vehicle, qi_note, updated_by, updated_at, hold, hold_by, hold_at) VALUES (?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(key) DO UPDATE SET status=excluded.status, comment=excluded.comment, vehicle=excluded.vehicle,
-                    qi_note=excluded.qi_note, updated_by=excluded.updated_by, updated_at=excluded.updated_at`)
-      .bind(k, next.status, next.comment, next.vehicle, next.qi_note, s.u, now())),
+                    qi_note=excluded.qi_note, updated_by=excluded.updated_by, updated_at=excluded.updated_at, hold=excluded.hold, hold_by=excluded.hold_by, hold_at=excluded.hold_at`)
+      .bind(k, next.status, next.comment, next.vehicle, next.qi_note, s.u, now(), next.hold, next.hold_by, next.hold_at)),
     env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)')
       .bind(now(), s.u, 'edit', `${rnd ? `${rnd.day} ${rnd.plant ?? ''} Pick ${rnd.round}` : week.includes('W') ? 'W' + week.slice(-2) : week} ${b.key.replace(/\|/g, ' / ')}${!isDay && date ? ' ' + date : ''}: ${fields.map((f) => `${f} → ${next[f] ?? '(blank)'}`).join(', ')}`),
   ]);
   // period = the week or the day; date = the line's date (undefined: every line of the key in that week)
-  const line = { key: b.key, period: week, ...(date !== undefined ? { date } : {}), status: next.status, comment: next.comment, vehicle: next.vehicle, qi_note: next.qi_note, updated_by: s.u, updated_at: now() };
+  const line = { key: b.key, period: week, ...(date !== undefined ? { date } : {}), status: next.status, comment: next.comment, vehicle: next.vehicle, qi_note: next.qi_note, hold: next.hold, hold_by: next.hold_by, hold_at: next.hold_at, updated_by: s.u, updated_at: now() };
   await broadcast(env, { type: 'status', line, by: s.u });
   return json({ ok: true, line });
 }

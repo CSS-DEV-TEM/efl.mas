@@ -23,6 +23,8 @@ export interface Line {
   picked?: number; picked_rolls?: number; pick_reqs?: number; last_pick_at?: string | null;
   /** Korber Inventory: QTY / rolls of this SO / LI / Item still on the shelf (its ZINR lots, less picks); undefined = no Korber upload */
   korber_avail?: number; korber_rolls?: number;
+  /** Pick Hold: the reason, who and when (null = not on hold) — a held line is not picked */
+  hold?: string | null; hold_by?: string | null; hold_at?: string | null;
   /** dispatch item whose left-over QTY was assigned to this line */
   assigned_from?: string;
 }

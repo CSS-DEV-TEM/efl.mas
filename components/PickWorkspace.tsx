@@ -14,9 +14,10 @@ type LineP = Line & { picked?: number; picked_rolls?: number };
 const today = () => new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
 
 /** Why a plan line is still pending, in the order the work is done. */
-const PENDING_ORDER = ['Part picked', 'Ready to pull', 'Not in Korber', 'Partial pull', 'Release QI / Block', 'Follow up TN', 'No stock'];
-const PENDING_TONE: Record<string, string> = { 'Part picked': 'accent', 'Ready to pull': 'ok', 'Not in Korber': 'warn', 'Partial pull': 'info', 'Release QI / Block': 'warn', 'Follow up TN': 'warn', 'No stock': 'bad' };
+const PENDING_ORDER = ['On hold', 'Part picked', 'Ready to pull', 'Not in Korber', 'Partial pull', 'Release QI / Block', 'Follow up TN', 'No stock'];
+const PENDING_TONE: Record<string, string> = { 'On hold': 'bad', 'Part picked': 'accent', 'Ready to pull': 'ok', 'Not in Korber': 'warn', 'Partial pull': 'info', 'Release QI / Block': 'warn', 'Follow up TN': 'warn', 'No stock': 'bad' };
 function pendingWhy(l: LineP): string {
+  if (l.hold) return 'On hold';
   if ((l.picked ?? 0) > 0) return 'Part picked';
   const a = action(l);
   return PENDING_ORDER.includes(a) ? a : 'No stock';
@@ -26,7 +27,7 @@ function pendingWhy(l: LineP): string {
 export default function PickWorkspace({ week, rows, canEdit, toast, reload, label }: { week: string; rows: LineP[]; canEdit: boolean; toast: (m: string) => void; reload: () => void; /** what is on screen, e.g. "20 Oct · ASIALINE Pick 2" */ label?: string }) {
   const [status, setStatus] = useState<{ counts: { src: string; n: number }[]; uploads: { src: string; file_name: string | null; row_count: number; uploaded_by: string; uploaded_at: string }[] } | null>(null);
   const [busy, setBusy] = useState<PickSrc | null>(null);
-  const [scope, setScope] = useState<'pending' | 'ready' | 'open' | 'picked' | 'done'>('pending');
+  const [scope, setScope] = useState<'pending' | 'ready' | 'open' | 'picked' | 'done' | 'hold'>('pending');
   const [why, setWhy] = useState('');
   const [q, setQ] = useState('');
   const [picking, setPicking] = useState<LineP | null>(null);
@@ -50,6 +51,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
     const s = q.trim().toLowerCase();
     return rows.filter((l) => (scope === 'picked' ? (l.picked ?? 0) > 0
       : scope === 'done' ? isDone(l)
+      : scope === 'hold' ? !!l.hold && !isDone(l)
       : scope === 'pending' ? !isDone(l) && need(l) > 1e-9 && (!why || pendingWhy(l) === why)
       : !isDone(l) && need(l) > 1e-9 && (scope === 'open' ? avail(l) > 0 : action(l) === 'Ready to pull')))
       .filter((l) => !s || [l.so, l.li, l.item, l.plant].join(' ').toLowerCase().includes(s))
@@ -66,6 +68,17 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
     return PENDING_ORDER.filter((k) => m.has(k)).map((k) => ({ why: k, ...m.get(k)! }));
   }, [rows]);
   const cnt = (src: string) => status?.counts.find((c) => c.src === src)?.n ?? 0;
+  const holdN = useMemo(() => rows.filter((l) => l.hold && !isDone(l)).length, [rows]);
+  // Pick Hold: put a line on hold (a reason) or release it; a held line cannot be picked
+  const [holding, setHolding] = useState<LineP | null>(null);
+  const setHold = async (l: LineP, reason: string | null) => {
+    try {
+      const period = (l as LineP & { plan_type?: string }).plan_type === 'day' ? (l.week?.includes('~') ? l.week : l.date || l.week) : l.week;
+      await api('/api/status', { method: 'PATCH', body: { key: l.key, week: period, date: l.date ?? null, hold: reason } });
+      toast(reason ? `${l.so} / ${l.li} is on hold — ${reason}` : `Hold released: ${l.so} / ${l.li} can be picked`);
+      reload();
+    } catch (e) { toast(e instanceof Error ? e.message : 'Could not change the hold.'); }
+  };
 
   return (
     <>
@@ -102,6 +115,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
               <button className={scope === 'ready' ? 'on' : ''} onClick={() => setScope('ready')}>Ready to pull</button>
               <button className={scope === 'open' ? 'on' : ''} onClick={() => setScope('open')}>All with UR</button>
               <button className={scope === 'picked' ? 'on' : ''} onClick={() => setScope('picked')}>Picked</button>
+              <button className={scope === 'hold' ? 'on' : ''} onClick={() => setScope('hold')}>On hold{holdN ? ` (${holdN})` : ''}</button>
               <button className={scope === 'done' ? 'on' : ''} onClick={() => setScope('done')}>Completed</button>
             </div>
           </div>
@@ -119,20 +133,22 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
             ))}
           </div>
         )}
-        {!list.length ? <p className="muted">No lines {scope === 'ready' ? 'are ready to pull' : scope === 'picked' ? 'picked yet' : scope === 'pending' ? 'pending' : 'with UR stock'} in {label || week}.</p> : (
+        {!list.length ? <p className="muted">No lines {scope === 'ready' ? 'are ready to pull' : scope === 'picked' ? 'picked yet' : scope === 'hold' ? 'on hold' : scope === 'pending' ? 'pending' : 'with UR stock'} in {label || week}.</p> : (
           <div className="table-wrap" style={{ maxHeight: 460 }}>
             <table className="mini">
               <thead><tr><th>SO</th><th>LI</th><th>Item</th><th>Date</th><th>Plant</th><th className="n">QTY</th><th className="n">Picked = Dispatched</th><th className="n">Balance</th><th className="n">UR left</th><th>State</th><th /></tr></thead>
               <tbody>{list.map((l) => {
                 const pk = l.picked ?? 0, done = isDispatched(l);
                 return (
-                  <tr key={l.id}>
+                  <tr key={l.id} className={l.hold && !isDone(l) ? 'on-hold' : ''}>
                     <td>{l.so}</td><td>{l.li}</td><td>{l.item}</td><td>{fmtDate(l.date)}</td><td>{l.plant}</td>
                     <td className="n">{fmtQty(l.qty)}</td>
                     <td className="n">{pk ? <>{fmtQty(pk)} <span className="muted">({l.picked_rolls} roll{l.picked_rolls === 1 ? '' : 's'})</span></> : '–'}</td>
                     <td className="n"><b>{fmtQty(need(l))}</b></td><td className="n">{fmtQty(avail(l))}</td>
-                    <td>{isDone(l) && !done ? <span className="pill ok" title={l.comment || ''}>Completed ✓</span> : scope === 'pending' && !done ? <span className={`pill ${PENDING_TONE[pendingWhy(l)] || 'mute'}`}>{pendingWhy(l)}</span> : done && Number((l as LineP & { closed_short?: number }).closed_short) > 0 ? <span className="pill ok" title="Closed short by a Normal pick">Picked ✓ · {fmtQty(Number((l as LineP & { closed_short?: number }).closed_short))} short</span> : done ? <span className="pill ok">Picked ✓ · Dispatched</span> : pk ? <span className="pill accent">Part picked</span> : <span className="pill mute">To pick</span>}</td>
-                    <td style={{ whiteSpace: 'nowrap' }}>{canEdit && !isDone(l) && <button className="btn sm primary" onClick={() => setPicking(l)}>{pk ? 'Pick more' : 'Pick'}</button>}
+                    <td>{l.hold && !isDone(l) ? <span className="pill bad" title={`On hold${l.hold_by ? ` by ${l.hold_by}` : ''}${l.hold_at ? ` · ${new Date(l.hold_at).toLocaleString()}` : ''}`}>On hold · {l.hold}</span> : isDone(l) && !done ? <span className="pill ok" title={l.comment || ''}>Completed ✓</span> : scope === 'pending' && !done ? <span className={`pill ${PENDING_TONE[pendingWhy(l)] || 'mute'}`}>{pendingWhy(l)}</span> : done && Number((l as LineP & { closed_short?: number }).closed_short) > 0 ? <span className="pill ok" title="Closed short by a Normal pick">Picked ✓ · {fmtQty(Number((l as LineP & { closed_short?: number }).closed_short))} short</span> : done ? <span className="pill ok">Picked ✓ · Dispatched</span> : pk ? <span className="pill accent">Part picked</span> : <span className="pill mute">To pick</span>}</td>
+                    <td style={{ whiteSpace: 'nowrap' }}>{canEdit && !isDone(l) && (l.hold
+                        ? <button className="btn sm" onClick={() => setHold(l, null)} title="Release the hold — the line can be picked again">Release hold</button>
+                        : <><button className="btn sm primary" onClick={() => setPicking(l)}>{pk ? 'Pick more' : 'Pick'}</button> <button className="btn sm" onClick={() => setHolding(l)} title="Put this line on Pick Hold — nobody can pick it until it is released">Hold</button></>)}
                       {canEdit && <> <CompleteLine line={l} onDone={(m) => { toast(m); reload(); }} /></>}</td>
                   </tr>
                 );
@@ -141,6 +157,8 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
           </div>
         )}
       </section>
+
+      {holding && <HoldDialog line={holding} onClose={() => setHolding(null)} onSave={(r) => { const l = holding; setHolding(null); void setHold(l, r); }} />}
 
       <PickHistoryCard key={histKey} canEdit={canEdit} toast={toast} onChanged={() => { reload(); setHistKey((k) => k + 1); }} />
 
@@ -215,6 +233,29 @@ function autoPlan(c: Candidates, withPool = false): { sel: Sel; last: LastRoll |
     if (fit) { last = { pallet: fit.pallet, hu: fit.supplier_hu, full: r3(fit.available), cut: left }; take(fit, left, null); }
   }
   return { sel, last };
+}
+
+const HOLD_REASONS = ['Customer asked to hold', 'Shade issue', 'Quality check', 'Plant not ready', 'Wrong roll / label', 'Waiting for approval'];
+/** Asks the reason for a Pick Hold (a list of usual reasons, or typed). */
+function HoldDialog({ line, onClose, onSave }: { line: LineP; onClose: () => void; onSave: (reason: string) => void }) {
+  const [r, setR] = useState('');
+  return (
+    <div className="modal-back">
+      <form className="modal" role="dialog" aria-modal="true" aria-labelledby="hold-title" onSubmit={(e) => { e.preventDefault(); onSave(r.trim() || 'On hold'); }}>
+        <div className="modal-head">
+          <div><h2 id="hold-title">Pick Hold · {line.so} / {line.li}</h2><p className="sub" style={{ margin: 0 }}>{line.item} · balance {fmtQty(need(line))}. Nobody can pick this line until the hold is released; it shows as <b>On hold</b> everywhere.</p></div>
+          <button type="button" className="btn sm" onClick={onClose} aria-label="Close">✕</button>
+        </div>
+        <label style={{ display: 'grid', gap: 6 }}>Reason
+          <input autoFocus list="hold-reasons" value={r} onChange={(e) => setR(e.target.value)} placeholder="e.g. Customer asked to hold" maxLength={120}
+            style={{ padding: '8px 10px', border: '1px solid var(--line-strong)', borderRadius: 6, background: 'var(--panel)', color: 'var(--ink)' }} />
+          <datalist id="hold-reasons">{HOLD_REASONS.map((x) => <option key={x} value={x} />)}</datalist>
+        </label>
+        <div className="hold-quick">{HOLD_REASONS.map((x) => <button key={x} type="button" className={`btn sm ${r === x ? 'primary' : ''}`} onClick={() => setR(x)}>{x}</button>)}</div>
+        <div className="modal-foot"><span /><button type="button" className="btn" onClick={onClose}>Cancel</button><button className="btn primary">Put on hold</button></div>
+      </form>
+    </div>
+  );
 }
 
 export function PickModal({ week, line, onClose, onDone }: { week: string; line: LineP; onClose: () => void; onDone: (m: string) => void }) {
@@ -344,6 +385,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
           <div>
             <h2 id="pk-title">Pick {line.so} / {line.li}</h2>
             <p className="sub" style={{ margin: 0 }}>Item {line.item} · {fmtDate(line.date)} · {line.plant || '–'}</p>
+            {line.hold && <div className="notice bad" style={{ marginTop: 6 }}><b>On hold</b> — {line.hold}{line.hold_by ? ` (${line.hold_by})` : ''}. Release the hold on Pick &amp; Dispatch before picking.</div>}
           </div>
           <div className="pk-kind" role="radiogroup" aria-label="Pick type">
             <button type="button" role="radio" aria-checked={kind === 'normal'} className={kind === 'normal' ? 'on' : ''} onClick={() => setKind('normal')}>

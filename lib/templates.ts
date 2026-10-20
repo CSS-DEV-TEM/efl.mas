@@ -4,6 +4,11 @@ import type { Src } from './mapping';
 
 interface Template { file: string; title: string; note: string; headers: string[]; rows: (string | number)[][] }
 
+/** the SAP ZMMBE export as it comes now (40 columns) */
+const ZMMBE_HEADERS = ['Plant', 'St Location', 'Material Type', 'Sales Order Status', 'Material', 'SO', 'LI', 'Size/Grid', 'Material Description', 'Batch', 'UOM', 'Last goods Received Date',
+  'Sales order UR Stock', 'UR Stock Batch', 'SO QI stock', 'QI stock', 'SO Blocked stock Stock', 'Blocked Stock Batch', 'Total stock', 'FG Code', 'Style', 'Bin Location', 'SO Plant',
+  'Net ST Price', 'Purchasing Group', 'ST Price', 'Price Unit', 'Value', 'Batch Created Date', 'Customer', 'Material group', 'FG Ext. Mat.group', 'Vendor code', 'FG Ext. Mat.grp Description',
+  'Customer Color Code', 'Customer Color Desc', 'Vendor Name', 'PCD', 'Req Del on PCD', 'Stock Category', 'Assigned Qty'];
 const STOCK_HEADERS = ['Plant', 'St Location', 'SO Plant', 'SO', 'LI', 'UR', 'Material', 'Batch', 'Style', 'Type', 'QI', 'Block', 'Assigned', 'Total'];
 
 export const TEMPLATES: Record<Src, Template> = {
@@ -15,9 +20,12 @@ export const TEMPLATES: Record<Src, Template> = {
   },
   zmmbe: {
     file: 'ZMMBE.xlsx', title: 'ZMMBE (full stock)',
-    note: 'SAP ZMMBE export. The raw export without headers (Plant in column A) also works.',
-    headers: STOCK_HEADERS,
-    rows: [['C050', 203, 'C051', 1001730394, 10, 0.359, 1000091737, 112434091, '22MN', '', 0, 0, 0, 0.359], ['C051', 42, 'C051', 1001721838, 10, 0.75, 1000178590, 116961651, 'IU6560', '', 0, 0, 0, 0.75]],
+    note: 'SAP ZMMBE export (new layout). Used: Plant, St Location, SO, LI, Material, Batch, Style, SO Plant, Sales order UR Stock (UR), SO QI stock (QI), SO Blocked stock Stock (Block), Total stock, Assigned Qty (Assigned). The other columns are allowed and left out. The older layouts still work too.',
+    headers: ZMMBE_HEADERS,
+    rows: [
+      ['C065', '0042', 'ZFAB', 'A', '1000272464', 'E101720417', '50', '', '53/47_MERINO/RPES_2009098720_FWBE_52.75"', '0131013106', 'YD', '2026-08-28', 100.7, 0, 0, 0, 0, 0, 100.7, '7001534814', '44636', '', 'C065', 8.55, 'HW9', 8.55, 1, 860.99, '2026-08-28', '56', 'FAB0002', '56', '101585', 'Patagonia', 'FWBE', 'FWBE', 'Global Merino', '2026-11-05', '2026-10-31', '', 0],
+      ['C065', '0042', 'ZFAB', 'A', '1000274604', 'E101702873', '40', '', '89/11 RNYL/SPX_2733000010_NGRY_52', '0131022592', 'YD', '2026-08-29', 24.225, 0, 0, 0, 0, 0, 24.225, '7001534216', '32125', '', 'C065', 4.301, 'HV9', 43.01, 10, 104.19, '2026-08-29', '56', 'FAB0002', '56', '100968', 'Patagonia', 'SWLC', 'SWLC', 'Stantex Corporation', '2026-10-26', '2026-10-21', '', 24.225],
+    ],
   },
   kfc: {
     file: 'ZMMBE_KFC.xlsx', title: 'ZMMBE KFC',

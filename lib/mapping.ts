@@ -107,7 +107,7 @@ export function guessSrcFromGrid(grid: Grid): Src | null {
     const has = (...a: string[]) => a.some((x) => row.includes(x));
     if (has('tn', 'tn number', 'tn no', 'transfer note') && has('so', 'sales order')) return 'trr';
     if (has('item code') && has('qty', 'quantity') && has('so', 'sales order')) return 'plan';
-    if (has('unrestricted', 'ur', 'unrestricted stock') && has('material')) return 'zmmbe';
+    if (has('unrestricted', 'ur', 'unrestricted stock', 'sales order ur stock', 'so qi stock') && has('material')) return 'zmmbe';
   }
   return null;
 }

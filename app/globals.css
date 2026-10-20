@@ -776,3 +776,6 @@ tr[data-tf-hide] { display: none !important; }
 .tf-pop .tf-list small { color: var(--ink-3); font-variant-numeric: tabular-nums; }
 .tf-pop .tf-more { color: var(--ink-3); padding: 4px; font-size: 12px; }
 .tf-pop .tf-f { display: flex; justify-content: flex-end; gap: 6px; }
+/* Pick Hold */
+tr.on-hold td { background: color-mix(in srgb, #ef4444 9%, transparent); }
+.hold-quick { display: flex; flex-wrap: wrap; gap: 6px; }

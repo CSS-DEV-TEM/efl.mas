@@ -4,13 +4,14 @@
  */
 import { avail, isDispatched, isDone, need, shortBy, type DispatchSummary, type Line, type Upload } from './calc';
 
-export type Action = 'Dispatched' | 'Done' | 'Ready to pull' | 'Not in Korber' | 'Release QI / Block' | 'Partial pull' | 'Follow up TN' | 'No stock';
-export const ACTIONS: Action[] = ['Ready to pull', 'Not in Korber', 'Release QI / Block', 'Partial pull', 'Follow up TN', 'No stock', 'Dispatched', 'Done'];
+export type Action = 'Dispatched' | 'Done' | 'On hold' | 'Ready to pull' | 'Not in Korber' | 'Release QI / Block' | 'Partial pull' | 'Follow up TN' | 'No stock';
+export const ACTIONS: Action[] = ['Ready to pull', 'Not in Korber', 'On hold', 'Release QI / Block', 'Partial pull', 'Follow up TN', 'No stock', 'Dispatched', 'Done'];
 export const ACTION_PILL: Record<Action, string> = {
-  'Ready to pull': 'ok', 'Not in Korber': 'warn', 'Release QI / Block': 'info', 'Partial pull': 'warn', 'Follow up TN': 'accent', 'No stock': 'bad', Dispatched: 'ok', Done: 'mute',
+  'Ready to pull': 'ok', 'Not in Korber': 'warn', 'On hold': 'bad', 'Release QI / Block': 'info', 'Partial pull': 'warn', 'Follow up TN': 'accent', 'No stock': 'bad', Dispatched: 'ok', Done: 'mute',
 };
 export const ACTION_HELP: Record<Action, string> = {
   'Ready to pull': 'Full UR stock and the Korber rolls (Korber Inventory) cover the QTY',
+  'On hold': 'Put on Pick Hold — not picked until the hold is released',
   'Not in Korber': 'UR covers the QTY, but the Korber Inventory does not have enough rolls of its lots on the shelf',
   'Release QI / Block': 'UR alone is short, but UR + QI + Block covers the QTY',
   'Partial pull': 'Some UR stock, not enough for the QTY',
@@ -24,6 +25,7 @@ export const ACTION_HELP: Record<Action, string> = {
 export function action(l: Line): Action {
   if (isDispatched(l)) return 'Dispatched';
   if (isDone(l)) return 'Done';
+  if (l.hold) return 'On hold';
   const n = need(l), u = avail(l);
   // UR covers it; the rolls must be on the Korber shelf too (no Korber upload yet: UR only)
   if (n > 0 && u >= n - 1e-9) return l.korber_avail == null || l.korber_avail >= n - 1e-6 ? 'Ready to pull' : 'Not in Korber';
@@ -59,7 +61,7 @@ export function priority(l: Line, today = todayLocal()): number {
   const a = action(l);
   if (a === 'Done' || a === 'Dispatched') return 0;
   const dueScore: Record<Due, number> = { Overdue: 45, Today: 38, Tomorrow: 26, 'This week': 14, Later: 6, 'No date': 10 };
-  const actScore: Record<Action, number> = { 'Not in Korber': 16, Dispatched: 0, 'No stock': 30, 'Follow up TN': 22, 'Partial pull': 20, 'Release QI / Block': 18, 'Ready to pull': 12, Done: 0 };
+  const actScore: Record<Action, number> = { 'On hold': 4, 'Not in Korber': 16, Dispatched: 0, 'No stock': 30, 'Follow up TN': 22, 'Partial pull': 20, 'Release QI / Block': 18, 'Ready to pull': 12, Done: 0 };
   let s = dueScore[due(l, today)] + actScore[a];
   if (isPriority(l)) s += 15;
   if (l.carried) s += 10; // already slipped once
@@ -166,6 +168,8 @@ export function insights(rows: Line[], uploads: Upload[], today = todayLocal(), 
 
   const ready = open.filter((l) => action(l) === 'Ready to pull');
   const noKorber = open.filter((l) => action(l) === 'Not in Korber');
+  const held = open.filter((l) => action(l) === 'On hold');
+  if (held.length) out.push({ id: 'hold', tone: 'bad', count: held.length, label: 'On hold', title: `${L(held.length)} ${are(held.length)} on Pick Hold`, detail: `${n0(held.reduce((s, l) => s + need(l), 0))} QTY is held and not picked: ${Array.from(new Set(held.map((l) => l.hold))).slice(0, 4).join(' · ')}. Release the hold on Pick & Dispatch.`, view: { kind: 'action', value: 'On hold' } });
   if (noKorber.length) out.push({ id: 'nokorber', tone: 'warn', count: noKorber.length, label: 'Not in Korber', title: `${L(noKorber.length)} ${are(noKorber.length)} covered by UR but not on the Korber shelf`, detail: `UR covers them, but the Korber Inventory has only ${n0(noKorber.reduce((s, l) => s + (l.korber_avail ?? 0), 0))} of the ${n0(noKorber.reduce((s, l) => s + need(l), 0))} QTY in rolls of their lots. Upload the latest Korber Inventory or check the GRN.`, view: { kind: 'action', value: 'Not in Korber' } });
   if (ready.length) out.push({ id: 'ready', tone: 'ok', count: ready.length, label: 'Ready to pull', title: `${L(ready.length)} ${are(ready.length)} ready to pull`, detail: `Full UR stock and the Korber rolls cover ${n0(ready.reduce((s, l) => s + l.qty, 0))} QTY. Pick them on Pick & Dispatch.`, view: { kind: 'action', value: 'Ready to pull' } });
 
