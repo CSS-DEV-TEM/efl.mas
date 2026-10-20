@@ -2,11 +2,9 @@
 import { useState } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from '@/lib/api';
-import { fmt, fmtQty, isDone, type Line } from '@/lib/calc';
+import { fmt, fmtQty, isDone, periodOf, type Line } from '@/lib/calc';
 
 type L = Line & { picked?: number; plan_type?: string };
-/** The plan a status belongs to: the week for a week plan, the day for a day plan. */
-const periodOf = (l: L) => (l.plan_type === 'day' && l.date ? l.date : l.week);
 
 /**
  * "Complete": the user tells the system a plan line is finished, even when less or more than the plan QTY went

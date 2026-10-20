@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Loader, Skeleton } from '@/components/Loader';
 import { api, getSession, isBossRole } from '@/lib/api';
 import CompleteLine from '@/components/CompleteLine';
-import { ago, avail, fmt, fmtDate, fmtQty, isDispatched, isDone, need, type Line } from '@/lib/calc';
+import { ago, avail, fmt, fmtDate, fmtQty, isDispatched, isDone, need, periodOf, type Line } from '@/lib/calc';
 import { action } from '@/lib/smart';
 import {
   PICK_SRCS, korberWorkbook, ordinal, packingListWorkbook, saveWorkbook, uploadPickFile,
@@ -73,7 +73,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
   const [holding, setHolding] = useState<LineP | null>(null);
   const setHold = async (l: LineP, reason: string | null) => {
     try {
-      const period = (l as LineP & { plan_type?: string }).plan_type === 'day' ? (l.week?.includes('~') ? l.week : l.date || l.week) : l.week;
+      const period = periodOf(l as LineP & { plan_type?: string });
       await api('/api/status', { method: 'PATCH', body: { key: l.key, week: period, date: l.date ?? null, hold: reason } });
       toast(reason ? `${l.so} / ${l.li} is on hold — ${reason}` : `Hold released: ${l.so} / ${l.li} can be picked`);
       reload();
@@ -664,13 +664,29 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
     if (!confirm(`Cancel ${what}? It is deleted from the pick history and the roll${path.includes('/req/') ? 's become' : ' becomes'} pickable again.`)) return;
     try { await api(path, { method: 'DELETE' }); toast(`${what} cancelled and deleted from the history`); load(); onChanged(); } catch (e) { toast(e instanceof Error ? e.message : 'Failed.'); }
   };
+  // the marked picks this user may cancel (their own; Admin / Head: anyone's), cancelled together
+  const cancelable = marked.filter((r) => boss || r.by_user === me);
+  const [bulkBusy, setBulkBusy] = useState('');
+  const cancelMarked = async () => {
+    if (!cancelable.length) return;
+    const others = marked.length - cancelable.length;
+    if (!confirm(`Cancel ${cancelable.length} marked pick${cancelable.length === 1 ? '' : 's'} (${fmtQty(cancelable.reduce((t, r) => t + r.qty, 0))} QTY, ${cancelable.reduce((t, r) => t + r.rolls, 0)} rolls)?\n\nThey are deleted from the pick history and their rolls become pickable again.${others ? `\n${others} marked pick${others === 1 ? ' is' : 's are'} another user's and stay.` : ''}`)) return;
+    let ok = 0; const fail: string[] = [];
+    for (const r of cancelable) {
+      setBulkBusy(`Cancelling ${ok + fail.length + 1} / ${cancelable.length}…`);
+      try { await api(`/api/pick/req/${r.id}`, { method: 'DELETE' }); ok++; } catch (e) { fail.push(`${ordinal(r.seq)} ${r.so}/${r.li}: ${e instanceof Error ? e.message : 'failed'}`); }
+    }
+    setBulkBusy(''); setSel(new Set());
+    toast(`${ok} pick${ok === 1 ? '' : 's'} cancelled${fail.length ? ` · ${fail.length} could not be cancelled — ${fail.slice(0, 2).join('; ')}` : ''}`);
+    load(); onChanged();
+  };
   const days = Array.from(new Set([today(), ...(h?.days || []).map((d) => d.day)])).sort().reverse();
   return (
     <section className="card" aria-labelledby="ph-title">
       <div className="sheet-top">
         <div>
           <h2 id="ph-title">Pick history &amp; Packing List</h2>
-          <p className="sub" style={{ margin: 0 }}>Everyone&apos;s picks of the day. A fully picked roll can&apos;t be picked again by anyone; a part-picked roll keeps only its balance for the next pick. Cancel deletes a pick and frees its rolls.</p>
+          <p className="sub" style={{ margin: 0 }}>Everyone&apos;s picks of the day. A fully picked roll can&apos;t be picked again by anyone; a part-picked roll keeps only its balance for the next pick. Cancel deletes a pick and frees its rolls — mark several picks to cancel them together.</p>
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
           <div className="seg" role="group" aria-label="Whose picks">
@@ -693,6 +709,8 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
           </div>
           <button className="btn primary" onClick={downloadPL}>Download Packing List{marked.length ? ` (${marked.length})` : ''}</button>
           <button className="btn" disabled={!h.korberHeader} onClick={downloadKorber} title="The picked rolls in the Korber Inventory format (cut rolls with the cut QTY)">Korber Inventory{marked.length ? ` (${marked.length})` : ''}</button>
+          {canEdit && marked.length > 0 && <button className="btn danger" disabled={!cancelable.length || !!bulkBusy} aria-busy={!!bulkBusy || undefined} onClick={cancelMarked}
+            title={cancelable.length ? 'Cancel the marked picks: deleted from the history, their rolls become pickable again' : 'You can cancel only your own picks'}>{bulkBusy || `Cancel marked (${cancelable.length})`}</button>}
           {marked.length > 0 && <button className="btn sm" onClick={() => setSel(new Set())}>Clear marks</button>}
         </div>
       )}

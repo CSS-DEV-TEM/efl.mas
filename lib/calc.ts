@@ -33,6 +33,13 @@ export interface DispatchItem { item: string; dispatched: number; allocated: num
 export interface DispatchAssign { id: number; week: string; item: string; line: string; qty: number; by_user?: string; at?: string; applied?: number }
 export interface DispatchSummary { total: number; items: DispatchItem[]; unmatched: DispatchItem[]; leftover?: DispatchItem[]; assigns?: DispatchAssign[]; planLines?: number; elsewhere?: Record<string, string[]> }
 
+/**
+ * The plan a line's status, hold and picks belong to: the week (2026-W43), a day plan round ("2026-10-20~C051~2"),
+ * or — an older day plan — its day. Every status / Complete / Hold change sends this.
+ */
+export const periodOf = (l: Pick<Line, 'week' | 'date'> & { plan_type?: string | null }) =>
+  (l.plan_type === 'day' ? (l.week?.includes('~') ? l.week : l.date || l.week) : l.week);
+
 /** One plan line: the same SO / LI / Item can be on several dates of a week. */
 export const lineRef = (l: Pick<Line, 'key' | 'date'>) => `${l.key}@${l.date ?? ''}`;
 /** QTY still to send (plan QTY − dispatched). */

@@ -10,7 +10,7 @@ import PlanPicks from '@/components/PlanPicks';
 import { fmtTime, type PlantInfo } from '@/lib/summary';
 import { api, userParam } from '@/lib/api';
 import { useRefreshOnActivity } from '@/lib/freshness';
-import { COVERAGES, type DispatchSummary, ago, compact, coverage, fmt, fmtDate, isDone, lineRef, totals, type Coverage, type Line, type Upload, type WeekInfo } from '@/lib/calc';
+import { COVERAGES, periodOf, type DispatchSummary, ago, compact, coverage, fmt, fmtDate, isDone, lineRef, totals, type Coverage, type Line, type Upload, type WeekInfo } from '@/lib/calc';
 import { exportPullPlan } from '@/lib/export';
 import { CountUp } from '@/components/Brand';
 import InsightDrawer from '@/components/InsightDrawer';
@@ -28,7 +28,7 @@ const weekRange = (w: WeekInfo | undefined) => (w?.start ? `${fmtDate(w.start)} 
 
 /** The plan a status belongs to: the week for a week plan, the day for a day plan. */
 /** the plan a line belongs to: the week, a day plan round ("<day>~<plant>~<n>"), or (older day plans) the day */
-export const periodOf = (l: Line) => ((l as Line & { plan_type?: string }).plan_type === 'day' ? (l.week?.includes('~') ? l.week : l.date || l.week) : l.week);
+export { periodOf };
 /** "2026-10-20~C064~2" → { plant: 'C064', round: 2 } */
 export const roundOf = (w: string | null | undefined) => { const m = /^\d{4}-\d{2}-\d{2}~([^~]*)~(\d+)$/.exec(w || ''); return m ? { plant: m[1] === '-' ? '' : m[1], round: Number(m[2]) } : null; };
 const dayLabel = (d: string) => new Date(d + 'T00:00:00Z').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });

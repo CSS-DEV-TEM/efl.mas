@@ -1,6 +1,6 @@
 'use client';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { api } from '@/lib/api';
+import { api, getSession, isBossRole } from '@/lib/api';
 import { fmt, type Line } from '@/lib/calc';
 import { fmtTime } from '@/lib/summary';
 import { korberWorkbook, ordinal, packingListWorkbook, saveWorkbook, type PickHistory, type PickReq } from '@/lib/pick';
@@ -60,6 +60,19 @@ export default function PlanPicks({ rows, label, reloadKey, plantName }: { rows:
   const ids = new Set(target.map((r) => r.id));
   const downloadPL = () => h && saveWorkbook(packingListWorkbook(h, { ids, combined: oneSheet, pfcSlocs }), `Packing_List_${tag}.xlsx`);
   const downloadKorber = () => h && saveWorkbook(korberWorkbook(h, ids), `Korber_Picked_${tag}.xlsx`);
+  // cancel the marked picks together (own picks; Admin / Head: anyone's) — they leave the history, their rolls are free again
+  const me = getSession()?.user.username || '';
+  const boss = isBossRole(getSession()?.user.role);
+  const canEdit = getSession()?.user.role !== 'viewer';
+  const cancelable = marked.filter((r) => boss || r.by_user === me);
+  const [busy, setBusy] = useState('');
+  const cancelMarked = async () => {
+    if (!cancelable.length || !confirm(`Cancel ${cancelable.length} marked pick${cancelable.length === 1 ? '' : 's'} (${q(cancelable.reduce((t, r) => t + Number(r.qty), 0))} QTY)? They are deleted from the pick history and their rolls become pickable again.${marked.length > cancelable.length ? `\n${marked.length - cancelable.length} marked pick(s) of another user stay.` : ''}`)) return;
+    let ok = 0, bad = 0;
+    for (const r of cancelable) { setBusy(`Cancelling ${ok + bad + 1} / ${cancelable.length}…`); try { await api(`/api/pick/req/${r.id}`, { method: 'DELETE' }); ok++; } catch { bad++; } }
+    setBusy(''); setSel(new Set()); setMsg(`${ok} pick${ok === 1 ? '' : 's'} cancelled${bad ? ` · ${bad} could not be cancelled` : ''}`); void load();
+  };
+  const [msg, setMsg] = useState('');
 
   const tot = (list: PickReq[]) => ({ qty: list.reduce((t, r) => t + Number(r.qty), 0), rolls: list.reduce((t, r) => t + Number(r.rolls), 0), lines: new Set(list.map((r) => r.line)).size });
   const T = tot(shown);
@@ -78,6 +91,7 @@ export default function PlanPicks({ rows, label, reloadKey, plantName }: { rows:
           <label className="pp-opt"><input type="radio" checked={!oneSheet} onChange={() => setOne(false)} /> Sheet per pick</label>
           <button className="btn sm primary" disabled={!target.length || !h} onClick={downloadPL}>Packing List{marked.length ? ` (${marked.length})` : ''}</button>
           <button className="btn sm" disabled={!target.length || !h} onClick={downloadKorber}>Korber Inventory</button>
+          {canEdit && marked.length > 0 && <button className="btn sm danger" disabled={!cancelable.length || !!busy} onClick={cancelMarked} title={cancelable.length ? 'Cancel the marked picks' : 'You can cancel only your own picks'}>{busy || `Cancel marked (${cancelable.length})`}</button>}
         </div>
       </div>
 
@@ -97,6 +111,7 @@ export default function PlanPicks({ rows, label, reloadKey, plantName }: { rows:
       </div>
 
       {err && <div className="notice bad">{err}</div>}
+      {msg && <div className="notice ok">{msg}</div>}
       {!h && !err && <p className="sub">Loading picks…</p>}
       {h && !shown.length && <div className="empty" style={{ padding: 24 }}><strong>No picks yet</strong><span>Picks saved for this plan&apos;s lines show here the moment they are saved.</span></div>}
       {h && shown.length > 0 && (
