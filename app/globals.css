@@ -721,3 +721,29 @@ table.mini td.why span { display: -webkit-box; -webkit-line-clamp: 2; -webkit-bo
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) table.mini tr.picked td { background: color-mix(in srgb, var(--accent) 8%, transparent); } }
 :root[data-theme="dark"] table.mini tr.picked td { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 table.mini tr.picked td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+
+/* plant summary: live */
+.psum th.pick { background: #6d28d9; }
+.psum td.pick { color: #a78bfa; font-weight: 600; }
+.psum-live { display: inline-flex; align-items: center; gap: 6px; margin-left: 10px; font-size: 12px; font-weight: 600; color: var(--ink-3); vertical-align: middle; }
+.psum-live i { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3); }
+.psum-live.on { color: var(--ok); }
+.psum-live.on i { background: var(--ok); animation: pulse 1.8s infinite; }
+.psum td.flash-cell { animation: flash 2.4s ease-out; }
+.psum td.prog-td { min-width: 110px; }
+.prog { position: relative; display: block; height: 16px; border-radius: 8px; background: color-mix(in srgb, var(--ink-3) 22%, transparent); overflow: hidden; }
+.prog i { position: absolute; inset: 0 auto 0 0; background: linear-gradient(90deg, #2563eb, #22c55e); border-radius: 8px; transition: width .6s ease; }
+.prog.full i { background: #16a34a; }
+.prog b { position: relative; display: block; text-align: center; font-size: 11px; line-height: 16px; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,.6); }
+/* completed picks tab */
+.pp-opt { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; color: var(--ink-2); }
+.pp-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin: 12px 0; }
+.pp-kpis > div { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; display: grid; gap: 2px; }
+.pp-kpis span { font-size: 11.5px; color: var(--ink-3); text-transform: uppercase; letter-spacing: .04em; }
+.pp-kpis b { font-size: 18px; font-variant-numeric: tabular-nums; }
+.pp-kpis small { font-size: 12px; font-weight: 400; color: var(--ink-3); }
+.pp-table tbody tr.on td { background: var(--accent-soft); }
+.pp-st { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11.5px; font-weight: 600; }
+.pp-st.full { background: color-mix(in srgb, #16a34a 22%, transparent); color: #22c55e; }
+.pp-st.part { background: color-mix(in srgb, #f59e0b 22%, transparent); color: #f59e0b; }
+.pp-st.closed { background: color-mix(in srgb, #64748b 25%, transparent); color: var(--ink-2); }

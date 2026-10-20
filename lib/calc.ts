@@ -19,6 +19,8 @@ export interface Line {
   ur_take_key?: number;
   /** QI / Block released to UR by hand (until the next ZMMBE) */
   released?: number;
+  /** picks of this line (pick history): QTY, rolls, number of picks, when the last one was saved */
+  picked?: number; picked_rolls?: number; pick_reqs?: number; last_pick_at?: string | null;
   /** dispatch item whose left-over QTY was assigned to this line */
   assigned_from?: string;
 }

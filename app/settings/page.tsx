@@ -166,7 +166,7 @@ function ReportRules({ toast }: { toast: (m: string) => void }) {
           <span><b>ZMMBE KFC = every other ZMMBE row</b><small>All ZMMBE stock that is not PFC (42, 44, 203 …). KFC + PFC = ZMMBE, as in the workbook.</small></span>
         </div>
         <label className="set-row">
-          <span><b>PLANT = storage locations</b><small>Stock at the plants (40, 70, 75). ZMMBE exports usually do not have these rows — then upload the PLANT report as before. If the ZMMBE file has them, they become PLANT and are left out of ZMMBE.</small></span>
+          <span><b>Plant storage locations</b><small>Stock already at the plants (40, 70, 75). If a ZMMBE file has rows in these St Locations, they are left out of ZMMBE, KFC and PFC.</small></span>
           <input className="set-text" value={plant} onChange={(e) => setPlant(e.target.value)} placeholder="40, 70, 75" />
         </label>
       </div>

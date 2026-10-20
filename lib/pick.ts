@@ -173,7 +173,9 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
   const U = XLSXS.utils;
   const wb = U.book_new();
   const multi = new Set(reqs.map((r) => r.by_user)).size > 1;
-  const reqName = (r: PickReq) => (multi ? `${r.by_user} ${ordinal(r.seq)}` : ordinal(r.seq));
+  // picks of several days (a whole plan): the day goes in front, the 1st of each day is its own
+  const multiDay = new Set(reqs.map((r) => r.day)).size > 1;
+  const reqName = (r: PickReq) => `${multiDay ? r.day.slice(8, 10) + '-' + r.day.slice(5, 7) + ' ' : ''}${multi ? `${r.by_user} ` : ''}${ordinal(r.seq)}`;
   const pickNoOf = (r: PickReq) => (r.pick_no && /^\d+$/.test(r.pick_no) ? Number(r.pick_no) : (r.pick_no ?? ''));
   const rollsOf = (r: PickReq) => h.picks.filter((p) => p.req_id === r.id && !p.cancelled_at);
   const korberRows: unknown[][] = [];
@@ -252,7 +254,12 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
     ws['!cols'] = [17.5, 14, 19, 26, 12, 9, 12, 12, 24, 22, 22, 11, 10, 7, 12].map((w) => ({ wch: w }));
     return ws;
   };
-  const sheetName = (t: string) => t.replace(/[\\/?*[\]:]/g, '').slice(0, 31);
+  const usedNames = new Set<string>();
+  const sheetName = (t: string) => {
+    const base = t.replace(/[\\/?*[\]:]/g, '').slice(0, 31); let n = base, i = 2;
+    while (usedNames.has(n.toLowerCase())) n = `${base.slice(0, 27)} (${i++})`;
+    usedNames.add(n.toLowerCase()); return n;
+  };
   const kinds: ('KFC' | 'PFC')[] = ['KFC', 'PFC'];
   if (opts.combined) {
     for (const k of kinds) { const list = entries.filter((e) => e.kind === k); if (list.length) U.book_append_sheet(wb, plSheet(list), `${k} Packing List`); }

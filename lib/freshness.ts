@@ -15,7 +15,7 @@ export async function fetchChanges(): Promise<{ rev: string | null; realtime: bo
  * check whether anything changed since the data on screen (`shownRev`), and reload only then.
  * Your own uploads and edits already reload the page themselves.
  */
-export function useRefreshOnActivity(load: () => unknown, shownRev: string | null | undefined, enabled = true) {
+export function useRefreshOnActivity(load: () => unknown, shownRev: string | null | undefined, enabled = true, everyMs = 0) {
   const shown = useRef(shownRev);
   shown.current = shownRev;
   const last = useRef(0);
@@ -39,11 +39,14 @@ export function useRefreshOnActivity(load: () => unknown, shownRev: string | nul
     window.addEventListener('keydown', on);
     window.addEventListener('focus', on);
     document.addEventListener('visibilitychange', on);
+    // also every so often while the page is open and visible (one small /api/changes call; a reload only when something changed)
+    const timer = everyMs > 0 ? setInterval(on, everyMs) : undefined;
     return () => {
+      if (timer) clearInterval(timer);
       window.removeEventListener('pointerdown', on);
       window.removeEventListener('keydown', on);
       window.removeEventListener('focus', on);
       document.removeEventListener('visibilitychange', on);
     };
-  }, [check, enabled]);
+  }, [check, enabled, everyMs]);
 }

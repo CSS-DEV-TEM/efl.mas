@@ -1,22 +1,43 @@
 'use client';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { api } from '@/lib/api';
 import { fmt, type Line } from '@/lib/calc';
-import { SOLI_PER_HOUR, plantSummary, timeMinutes, type Bucket, type PlantInfo, type PlantRow, type TimeSetup } from '@/lib/summary';
+import { SOLI_PER_HOUR, fmtTime, plantSummary, timeMinutes, type Bucket, type PlantInfo, type PlantRow, type TimeSetup } from '@/lib/summary';
 
 const q = (n: number) => (Math.abs(n) < 0.0005 ? '' : fmt(n, 2));
 const c = (n: number) => (n ? fmt(n) : '');
+/** dd-mm-yyyy of a time, in Sri Lanka time (UTC+05:30) */
+const pickDay = (iso: string) => { const d = new Date(new Date(iso).getTime() + 330 * 60000).toISOString().slice(0, 10); return `${d.slice(8, 10)}-${d.slice(5, 7)}-${d.slice(0, 4)}`; };
 
 /** Plant-wise summary in the layout of the daily pull summary sheet. Click a plant to see its lines. */
 /**
  * `week` is the period the received times belong to: the week (2026-W47), or the day for a day plan (2026-11-17).
  * Target times are system settings (admin only); received times are typed by the users.
  */
-export default function PlantSummary({ rows, plants, received = [], week, day, canTarget, canEdit, time, onPlant, onSaved }: {
+export default function PlantSummary({ rows, plants, received = [], week, day, canTarget, canEdit, time, onPlant, onSaved, live, updatedAt }: {
   rows: Line[]; plants: PlantInfo[]; received?: { code: string; received: string | null }[]; week: string; day?: string | null; canTarget: boolean; canEdit: boolean; time?: TimeSetup; onPlant: (code: string) => void; onSaved: (msg: string) => void;
+  /** realtime connected (updates the moment someone picks / uploads) or not (updates when the page is used, and every minute) */
+  live?: boolean; updatedAt?: string;
 }) {
   const s = useMemo(() => plantSummary(rows, plants, received, time), [rows, plants, received, time]);
+  // cells whose figure changed since the last update flash for a moment, so a live change is seen
+  const prev = useRef<Map<string, number> | null>(null);
+  const [changed, setChanged] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    const now = new Map<string, number>();
+    for (const r of [...s.rows, s.total]) {
+      for (const k of ['plan', 'ur', 'qi', 'block', 'nih', 'adhoc', 'sameDay', 'picked', 'released', 'dispatched', 'pending'] as const) { now.set(`${r.code}:${k}`, Math.round(r[k].qty * 1000)); now.set(`${r.code}:${k}#`, r[k].soli); }
+      now.set(`${r.code}:progress`, Math.round(r.progress * 1000)); now.set(`${r.code}:done`, r.doneSoli);
+    }
+    const before = prev.current; prev.current = now;
+    if (!before) return;
+    const diff = new Set(Array.from(now.entries()).filter(([k, v]) => before.has(k) && before.get(k) !== v).map(([k]) => k));
+    if (!diff.size) return;
+    setChanged(diff);
+    const t = setTimeout(() => setChanged(new Set()), 2600);
+    return () => clearTimeout(t);
+  }, [s]);
   const saveTarget = async (code: string, v: string) => {
     const p = plants.find((x) => x.code.toUpperCase() === code) || { code, name: '', responsible: '', target: '', sort: 0 };
     await api('/api/plants', { method: 'POST', body: { plants: [{ ...p, target: v }] } });
@@ -27,7 +48,10 @@ export default function PlantSummary({ rows, plants, received = [], week, day, c
     onSaved(v ? `Received time for ${code} saved` : `Received time for ${code} back to the upload time`);
   };
   const [setup, setSetup] = useState(false);
-  const pair = (b: Bucket, strong = false) => (<><td className={`n ${strong ? 'strong' : ''}`}>{q(b.qty)}</td><td className="n soli">{c(b.soli)}</td></>);
+  const fl = (code: string, k: string) => (changed.has(`${code}:${k}`) ? ' flash-cell' : '');
+  const pair = (r: PlantRow, k: 'plan' | 'ur' | 'qi' | 'block' | 'nih' | 'adhoc' | 'sameDay' | 'picked' | 'released' | 'dispatched' | 'pending', strong = false) => (
+    <><td className={`n ${strong ? 'strong' : ''}${fl(r.code, k)}`}>{q(r[k].qty)}</td><td className={`n soli${fl(r.code, k + '#')}`}>{c(r[k].soli)}</td></>);
+  const pct = (r: PlantRow) => Math.round(r.progress * 100);
   const row = (r: PlantRow, isTotal = false) => (
     <tr key={r.code} className={isTotal ? 'total' : ''} onClick={isTotal ? undefined : () => onPlant(r.code)} title={isTotal ? '' : `Show ${r.name} lines`}>
       <td>{isTotal ? '' : r.responsible}</td>
@@ -35,16 +59,21 @@ export default function PlantSummary({ rows, plants, received = [], week, day, c
       <td onClick={(e) => e.stopPropagation()}>{isTotal ? '' : <TimeCell value={r.target} canEdit={canTarget} placeholder="10:00 AM" title="Target time (admin setting) — click to change" onSave={(v) => saveTarget(r.code, v)} weekly />}</td>
       <td onClick={(e) => e.stopPropagation()} className={r.late === true ? 'late' : r.late === false ? 'ontime' : ''}>{isTotal ? '' : <TimeCell value={r.receivedText} canEdit={canEdit} placeholder="9:48 AM" manual={r.receivedManual}
         title={r.receivedManual ? 'Typed on the dashboard — click to change, clear it to use the upload time' : r.received ? 'Plan upload time — click to type the real received time' : 'Click to type the received time'} onSave={(v) => saveReceived(r.code, v)} />}</td>
-      {pair(r.plan)}{pair(r.ur, true)}
+      {pair(r, 'plan')}{pair(r, 'ur', true)}
       <td className="n">{r.wh ? fmt(r.wh, 2) : isTotal ? '' : '–'}</td>
-      {pair(r.qi)}{pair(r.block)}{pair(r.nih)}{pair(r.adhoc)}{pair(r.sameDay)}{pair(r.released)}{pair(r.dispatched)}
+      {pair(r, 'qi')}{pair(r, 'block')}{pair(r, 'nih')}{pair(r, 'adhoc')}{pair(r, 'sameDay')}
+      <td className={`n pick${fl(r.code, 'picked')}`} title={r.rolls ? `${fmt(r.rolls)} roll${r.rolls === 1 ? '' : 's'} picked` : ''}>{q(r.picked.qty)}</td><td className={`n soli${fl(r.code, 'picked#')}`}>{c(r.picked.soli)}</td>
+      {pair(r, 'released')}{pair(r, 'dispatched')}
       <td className="n strong">{q(r.total) || (isTotal ? '' : '–')}</td>
-      {pair(r.pending)}
+      {pair(r, 'pending')}
+      <td className={`n${fl(r.code, 'done')}`} title="SO/LI lines sent in full (picked / dispatched) or marked Done, of all lines">{r.plan.soli ? `${fmt(r.doneSoli)} / ${fmt(r.plan.soli)}` : ''}</td>
+      <td className={`prog-td${fl(r.code, 'progress')}`} title={`${pct(r)}% of the plan QTY sent`}>{r.plan.qty > 0 && <span className={`prog ${pct(r) >= 100 ? 'full' : ''}`}><i style={{ width: `${pct(r)}%` }} /><b>{pct(r)}%</b></span>}</td>
+      <td className="n" title={r.lastPick ? `Last pick saved ${pickDay(r.lastPick)} ${fmtTime(r.lastPick)}` : ''}>{r.lastPick ? `${pickDay(r.lastPick) === pickDay(new Date().toISOString()) ? '' : pickDay(r.lastPick).slice(0, 5) + ' '}${fmtTime(r.lastPick)}` : ''}</td>
     </tr>
   );
   const exportXlsx = () => {
-    const head = ['Responsible', 'PLANT', 'Target time', 'Received time', 'Plan Qty', 'SOLI', 'UR', 'SOLI', 'W/H', 'QI', 'SOLI', 'BLOCK', 'SOLI', 'NIH', 'SOLI', 'Adhoc', 'SOLI', 'Same day', 'SOLI', 'Released to UR', 'SOLI', 'Dispatched', 'SOLI', 'Total qty', 'Pending', 'SOLI'];
-    const line = (r: PlantRow) => [r.responsible, r.name, r.target, r.receivedText, r.plan.qty, r.plan.soli, r.ur.qty, r.ur.soli, Math.round(r.wh * 100) / 100, r.qi.qty, r.qi.soli, r.block.qty, r.block.soli, r.nih.qty, r.nih.soli, r.adhoc.qty, r.adhoc.soli, r.sameDay.qty, r.sameDay.soli, r.released.qty, r.released.soli, r.dispatched.qty, r.dispatched.soli, r.total, r.pending.qty, r.pending.soli]
+    const head = ['Responsible', 'PLANT', 'Target time', 'Received time', 'Plan Qty', 'SOLI', 'UR', 'SOLI', 'W/H', 'QI', 'SOLI', 'BLOCK', 'SOLI', 'NIH', 'SOLI', 'Adhoc', 'SOLI', 'Same day', 'SOLI', 'Picked', 'SOLI', 'Rolls', 'Released to UR', 'SOLI', 'Dispatched', 'SOLI', 'Total qty', 'Pending', 'SOLI', 'Done SOLI', 'Progress %', 'Last pick'];
+    const line = (r: PlantRow) => [r.responsible, r.name, r.target, r.receivedText, r.plan.qty, r.plan.soli, r.ur.qty, r.ur.soli, Math.round(r.wh * 100) / 100, r.qi.qty, r.qi.soli, r.block.qty, r.block.soli, r.nih.qty, r.nih.soli, r.adhoc.qty, r.adhoc.soli, r.sameDay.qty, r.sameDay.soli, r.picked.qty, r.picked.soli, r.rolls, r.released.qty, r.released.soli, r.dispatched.qty, r.dispatched.soli, r.total, r.pending.qty, r.pending.soli, r.doneSoli, Math.round(r.progress * 100), fmtTime(r.lastPick)]
       .map((v) => (typeof v === 'number' ? Math.round(v * 1000) / 1000 : v));
     const ws = XLSX.utils.aoa_to_sheet([head, ...s.rows.map(line), line(s.total)]);
     ws['!cols'] = head.map((h, i) => ({ wch: i < 4 ? 14 : Math.max(7, h.length + 2) }));
@@ -56,8 +85,9 @@ export default function PlantSummary({ rows, plants, received = [], week, day, c
     <section className="card psum-card" aria-labelledby="psum-title">
       <div className="table-head">
         <div>
-          <h2 id="psum-title">Plant summary{day ? <span className="pill accent" style={{ marginLeft: 8, fontSize: 12 }}>Day plan · {day}</span> : ''}</h2>
-          <p className="sub" style={{ margin: 0 }}>QTY still to send split by what covers it: UR → QI → Block → NIH (not in house). SOLI = SO/LI lines. W/H = UR SOLI ÷ {time?.soliPerHour || SOLI_PER_HOUR} per hour. Total = UR + Adhoc. Click a plant to see its lines.</p>
+          <h2 id="psum-title">Plant summary{day ? <span className="pill accent" style={{ marginLeft: 8, fontSize: 12 }}>Day plan · {day}</span> : ''}
+            <span className={`psum-live ${live ? 'on' : ''}`} title={live ? 'Updates the moment someone picks, uploads or changes a line' : 'Updates when you use the page and every minute'}><i />{live ? 'Live' : 'Auto'}{updatedAt ? ` · ${fmtTime(updatedAt)}` : ''}</span></h2>
+          <p className="sub" style={{ margin: 0 }}>QTY still to send split by what covers it: UR → QI → Block → NIH (not in house). SOLI = SO/LI lines. W/H = UR SOLI ÷ {time?.soliPerHour || SOLI_PER_HOUR} per hour. Total = UR + Adhoc. Picked = saved picks; Pending and Progress follow every pick. Click a plant to see its lines.</p>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           {canTarget && <button className="btn sm" onClick={() => setSetup(true)}>Plant settings</button>}
@@ -71,8 +101,10 @@ export default function PlantSummary({ rows, plants, received = [], week, day, c
             <th className="n">Plan Qty</th><th className="n">SOLI</th><th className="n">UR</th><th className="n">SOLI</th><th className="n" title={`UR SOLI ÷ ${SOLI_PER_HOUR}`}>W/H</th>
             <th className="n">QI</th><th className="n">SOLI</th><th className="n">BLOCK</th><th className="n">SOLI</th><th className="n" title="Not in house: no UR, QI or Block stock for it">NIH</th><th className="n">SOLI</th>
             <th className="n" title='Lines with "adhoc" in Remarks or Comment'>Adhoc</th><th className="n">SOLI</th><th className="n" title="Lines dated the same day the plan was received">Same day</th><th className="n">SOLI</th>
+            <th className="n pick" title="Saved picks (pick history) — rolls in the tooltip">Picked</th><th className="n pick">SOLI</th>
             <th className="n rel" title="QI / Block released to UR">Released</th><th className="n rel">SOLI</th><th className="n disp">Dispatched</th><th className="n disp">SOLI</th>
             <th className="n">Total qty</th><th className="n pend">Pending</th><th className="n pend">SOLI</th>
+            <th className="n" title="SO/LI lines done, of all lines">Done</th><th title="Share of the plan QTY sent (picked / dispatched)">Progress</th><th className="n" title="Time of the last saved pick">Last pick</th>
           </tr></thead>
           <tbody>{s.rows.map((r) => row(r))}</tbody>
           <tfoot>{row(s.total, true)}</tfoot>

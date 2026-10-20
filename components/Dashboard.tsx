@@ -6,6 +6,7 @@ import { useShell } from '@/components/Shell';
 import Ledger, { STATUS_OPTIONS } from '@/components/Ledger';
 import { COV_COLOR } from '@/components/Charts';
 import PlantSummary from '@/components/PlantSummary';
+import PlanPicks from '@/components/PlanPicks';
 import type { PlantInfo } from '@/lib/summary';
 import { api, userParam } from '@/lib/api';
 import { useRefreshOnActivity } from '@/lib/freshness';
@@ -53,9 +54,9 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
   const [openInsight, setOpenInsight] = useState<Insight | null>(null);
   const [editing, setEditing] = useState<Line | 'new' | null>(null);
   // Summary (plant summary + insights) or Plan details (the line table); remembered in the URL hash
-  const [tab, setTabState] = useState<'summary' | 'details'>('summary');
-  useEffect(() => { if (location.hash === '#details') setTabState('details'); }, []);
-  const setTab = useCallback((t: 'summary' | 'details') => { setTabState(t); try { history.replaceState(null, '', t === 'details' ? '#details' : location.pathname); } catch { /* ignore */ } }, []);
+  const [tab, setTabState] = useState<'summary' | 'details' | 'picks'>('summary');
+  useEffect(() => { if (location.hash === '#details') setTabState('details'); if (location.hash === '#picks') setTabState('picks'); }, []);
+  const setTab = useCallback((t: 'summary' | 'details' | 'picks') => { setTabState(t); try { history.replaceState(null, '', t === 'summary' ? location.pathname : '#' + t); } catch { /* ignore */ } }, []);
   const searchRef = useRef<HTMLInputElement>(null);
   const tableRef = useRef<HTMLElement>(null);
   const today = todayLocal();
@@ -82,7 +83,8 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
   }, [isDay]);
   useEffect(() => { load(); }, [load, pickedWeek]);
   // no timer: when someone uses the page, check if anything changed and reload only then
-  useRefreshOnActivity(load, data ? data.rev ?? null : undefined, live !== 'live');
+  // without realtime: on activity, and once a minute while the summary / picks are open (a reload only when something changed)
+  useRefreshOnActivity(load, data ? data.rev ?? null : undefined, live !== 'live', tab === 'details' ? 0 : 60000);
   const [refreshing, setRefreshing] = useState(false);
   const refreshNow = async () => { setRefreshing(true); try { await load(); } finally { setRefreshing(false); } };
   useEffect(() => { const t = setInterval(() => tick((x) => x + 1), 30000); return () => clearInterval(t); }, []);
@@ -104,6 +106,8 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
   }), [subscribe, load]);
 
   const rows = data?.rows || [];
+  // picks saved for this plan's lines (one per pick request)
+  const pickCount = useMemo(() => rows.reduce((t, r) => t + (r.pick_reqs ?? 0), 0), [rows]);
   const dates = useMemo(() => Array.from(new Set(rows.map((r) => r.date || ''))).filter(Boolean).sort(), [rows]);
   const plants = useMemo(() => Array.from(new Set(rows.map((r) => r.plant || ''))).filter(Boolean).sort(), [rows]);
   const remarks = useMemo(() => Array.from(new Set(rows.map((r) => r.remarks || ''))).filter(Boolean).sort(), [rows]);
@@ -120,6 +124,9 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
       (!s || [r.so, r.li, r.item, r.status, r.comment, r.vehicle, r.remarks, r.tn_number, r.stock_plant].join(' ').toLowerCase().includes(s)));
   }, [scoped, state, cov, search, view, today]);
   const t = useMemo(() => totals(scoped), [scoped]);
+  const pickedQty = useMemo(() => scoped.reduce((x, r) => x + (r.picked ?? 0), 0), [scoped]);
+  const pickedLines = useMemo(() => scoped.filter((r) => (r.picked ?? 0) > 0).length, [scoped]);
+  const pickedRolls = useMemo(() => scoped.reduce((x, r) => x + (r.picked_rolls ?? 0), 0), [scoped]);
   const tips = useMemo(() => insights(scoped, data?.uploads || [], today, data?.dispatch), [scoped, data?.uploads, today, data?.dispatch]);
   const viewCounts = useMemo(() => {
     const c: Record<string, number> = {};
@@ -247,7 +254,7 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
         <div className="kpi"><span className="k">Required QTY</span><span className="v"><CountUp value={t.qty} format={compact} /></span><span className="s" title="QTY − Assigned">Variance {compact(t.variance)}</span>{unfiltered && prevW && thisW && <span className="s">vs {weekLabel(prevW.week)}: {compact(prevW.qty)} {delta(thisW.qty, prevW.qty, false, true)}</span>}</div>
         <div className="kpi"><span className="k">Full UR stock</span><span className="v"><CountUp value={t.ur} format={compact} /></span><span className="s">QI {compact(t.qi)} · Block {compact(t.block)}</span></div>
         <div className="kpi"><span className="k">KFC / PFC UR</span><span className="v"><CountUp value={t.kfc_ur} format={compact} /></span><span className="s">PFC {compact(t.pfc_ur)}</span></div>
-        <div className="kpi"><span className="k">At plant (PLANT)</span><span className="v"><CountUp value={t.plant_qty} format={compact} /></span><span className="s">TN QTY {compact(t.tn_qty)}</span></div>
+        <div className="kpi"><span className="k">Picked</span><span className="v"><CountUp value={pickedQty} format={compact} /></span><span className="s">{fmt(pickedLines)} SO/LI lines · {fmt(pickedRolls)} rolls</span></div>
         {(
           <div className="kpi ok"><span className="k">Dispatched</span><span className="v"><CountUp value={t.dispatched} format={compact} /></span>
             <span className="s" title={`Balance ${compact(t.balance)}`}>{fmt(t.dispatchedLines)} line{t.dispatchedLines === 1 ? '' : 's'} complete</span>
@@ -289,6 +296,7 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
         <div className="tabs" role="tablist" aria-label="Dashboard view">
           <button role="tab" aria-selected={tab === 'summary'} className={tab === 'summary' ? 'on' : ''} onClick={() => setTab('summary')}>Summary</button>
           <button role="tab" aria-selected={tab === 'details'} className={tab === 'details' ? 'on' : ''} onClick={() => setTab('details')}>Plan details <span className="n">{fmt(tableRows.length)}</span></button>
+          {!guest && <button role="tab" aria-selected={tab === 'picks'} className={tab === 'picks' ? 'on' : ''} onClick={() => setTab('picks')}>Completed picks{pickCount ? <span className="n">{fmt(pickCount)}</span> : null}</button>}
           {!guest && <Link href="/dispatch/" className="tabs-link" style={{ marginLeft: 'auto', alignSelf: 'center', fontSize: 13 }}>Dispatch →</Link>}
         </div>
       )}
@@ -308,17 +316,22 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
       {tab === 'summary' && data?.week && rows.length > 0 && (
         <PlantSummary rows={date ? rows.filter((r) => r.date === date) : rows} plants={data.plants || []}
           received={(data.received || []).filter((r) => (r.period ?? data.week) === (date || (isDay ? data.day : null) || data.week))} week={date || (isDay ? data.day : null) || data.week!} day={date || (isDay ? data.day : null)}
-          canTarget={!guest && user.role === 'admin'} canEdit={canEdit} time={data.time}
+          canTarget={!guest && user.role === 'admin'} canEdit={canEdit} time={data.time} live={live === 'live'} updatedAt={data.generatedAt}
           onPlant={(c) => { setPlant(rows.some((r) => (r.plant || '').toUpperCase() === c) ? (rows.find((r) => (r.plant || '').toUpperCase() === c)!.plant || '') : ''); setView({ kind: 'all' }); setTab('details'); }}
           onSaved={(m) => { toast(m); load(); }} />
       )}
 
 
+      {tab === 'picks' && !guest && data?.week && rows.length > 0 && (
+        <PlanPicks rows={date ? rows.filter((r) => r.date === date) : rows} label={date || (isDay ? data.day : null) || data.week!} reloadKey={data.generatedAt}
+          plantName={(c) => (data.plants || []).find((p) => p.code.toUpperCase() === c.toUpperCase())?.name || c} />
+      )}
+
       {!data && !err && <PageLoading label={isDay ? 'Loading the day plan…' : 'Calculating the week plan from the latest uploads…'} tiles={8} rows={8} />}
       {data && rows.length === 0 ? (
         <div className="card empty">
           <strong>No weekly plan yet</strong>
-          <span>Upload the weekly plan and the ZMMBE, KFC, PFC and PLANT reports to start tracking.</span>
+          <span>Upload the weekly plan and the ZMMBE report to start tracking.</span>
           {canEdit && <Link className="btn primary" href="/upload/">Go to uploads</Link>}
         </div>
       ) : (

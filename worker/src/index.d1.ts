@@ -287,7 +287,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 36; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 37; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -701,10 +701,10 @@ async function handlePullPlan(env: Env, req: Request) {
   }
   // picked QTY per plan line, all weeks (cancelled picks do not count). picked_after = picked after the latest full ZMMBE,
   // still inside ZMMBE's UR, so it comes off UR here; earlier picks are already out of that ZMMBE.
-  let pickAll: { week: string; line: string; qty: number; qty_after: number; rolls: number; closed: number }[] = [];
+  let pickAll: { week: string; line: string; qty: number; qty_after: number; rolls: number; closed: number; last_at: string | null; reqs: number }[] = [];
   try {
     pickAll = (await env.DB.prepare(`SELECT p.week, p.line, SUM(p.qty) qty, SUM(CASE WHEN ?1 IS NULL OR p.at > ?1 THEN p.qty ELSE 0 END) qty_after, COUNT(*) rolls,
-      MAX(COALESCE(r.closed, 0)) closed FROM picks p LEFT JOIN pick_req r ON r.id = p.req_id WHERE p.cancelled_at IS NULL GROUP BY p.week, p.line`).bind(zAt ?? null).all<{ week: string; line: string; qty: number; qty_after: number; rolls: number; closed: number }>()).results;
+      MAX(COALESCE(r.closed, 0)) closed, MAX(p.at) last_at, COUNT(DISTINCT p.req_id) reqs FROM picks p LEFT JOIN pick_req r ON r.id = p.req_id WHERE p.cancelled_at IS NULL GROUP BY p.week, p.line`).bind(zAt ?? null).all<{ week: string; line: string; qty: number; qty_after: number; rolls: number; closed: number; last_at: string | null; reqs: number }>()).results;
   } catch { /* pick tables not created yet */ }
   const picksOf = (w: string | null) => pickAll.filter((x) => x.week === w);
   applyPicks(plan, picksOf(week));
@@ -750,12 +750,14 @@ async function handlePullPlan(env: Env, req: Request) {
  * Whatever is left after every line of the item is full is reported as over-dispatched.
  */
 /** Picked QTY counts as dispatched on its plan line; picks after the latest ZMMBE also come off UR left. */
-function applyPicks(plan: Row[], picks: { line: string; qty: number; qty_after: number; rolls: number; closed?: number }[]) {
+function applyPicks(plan: Row[], picks: { line: string; qty: number; qty_after: number; rolls: number; closed?: number; last_at?: string | null; reqs?: number }[]) {
   const byLine = new Map(picks.map((x) => [x.line, x]));
   for (const r of plan) {
     const x = byLine.get(`${r.key}|${r.date ?? ''}`);
     r.picked = x ? r3(Number(x.qty)) : 0;
     r.picked_rolls = x ? Number(x.rolls) : 0;
+    r.last_pick_at = x?.last_at ?? null;
+    r.pick_reqs = x ? Number(x.reqs ?? 0) : 0;
     if (!x) continue;
     const take = Math.min(Number(x.qty), Math.max(0, Number(r.qty) - Number(r.dispatched || 0)));
     r.dispatched = r3(Number(r.dispatched || 0) + take);

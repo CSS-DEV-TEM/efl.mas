@@ -17,6 +17,10 @@ export interface PlantRow {
   receivedText: string; receivedManual: boolean; late: boolean | null;
   plan: Bucket; ur: Bucket; wh: number; qi: Bucket; block: Bucket; nih: Bucket; adhoc: Bucket; sameDay: Bucket;
   released: Bucket; dispatched: Bucket; total: number; pending: Bucket;
+  /** picked from the pick history (QTY, SOLI with a pick), rolls, the last pick time */
+  picked: Bucket; rolls: number; lastPick: string | null;
+  /** SOLI done (sent in full / marked Done) and the share of the plan QTY already sent */
+  doneSoli: number; progress: number;
 }
 
 const b0 = (): Bucket => ({ qty: 0, soli: 0 });
@@ -63,7 +67,7 @@ export function plantSummary(rows: Line[], plants: PlantInfo[], received: { code
     const p = info.get(code);
     const r: PlantRow = {
       code, name: p?.name || code, responsible: p?.responsible || '', target: p?.target || time.defaultTarget || '', received: null, receivedText: '', receivedManual: false, late: null,
-      plan: b0(), ur: b0(), wh: 0, qi: b0(), block: b0(), nih: b0(), adhoc: b0(), sameDay: b0(), released: b0(), dispatched: b0(), total: 0, pending: b0(),
+      plan: b0(), ur: b0(), wh: 0, qi: b0(), block: b0(), nih: b0(), adhoc: b0(), sameDay: b0(), released: b0(), dispatched: b0(), total: 0, pending: b0(), picked: b0(), rolls: 0, lastPick: null, doneSoli: 0, progress: 0,
     };
     const relKeys = new Set<string>();
     for (const l of [...ls].sort(byDate)) {
@@ -79,8 +83,11 @@ export function plantSummary(rows: Line[], plants: PlantInfo[], received: { code
       const q = Math.min(left, st.qi); add(r.qi, q); left -= q; st.qi -= q;
       const k = Math.min(left, st.block); add(r.block, k); left -= k; st.block -= k;
       add(r.nih, left);
-      if (!isDone(l)) add(r.pending, need(l));
+      if (!isDone(l)) add(r.pending, need(l)); else if (l.qty > 0) r.doneSoli++;
+      add(r.picked, l.picked ?? 0); r.rolls += l.picked_rolls ?? 0;
+      if (l.last_pick_at && (!r.lastPick || l.last_pick_at > r.lastPick)) r.lastPick = l.last_pick_at;
     }
+    r.progress = r.plan.qty > 0 ? Math.min(1, Math.max(0, 1 - r.pending.qty / r.plan.qty)) : 0;
     r.wh = r.ur.soli / perHour;
     r.total = r.ur.qty + r.adhoc.qty;
     const typed = rec.get(code);
@@ -95,8 +102,10 @@ export function plantSummary(rows: Line[], plants: PlantInfo[], received: { code
   const total = make('Summary', []);
   total.name = 'Summary';
   for (const r of out) {
-    for (const k of ['plan', 'ur', 'qi', 'block', 'nih', 'adhoc', 'sameDay', 'released', 'dispatched', 'pending'] as const) { total[k].qty += r[k].qty; total[k].soli += r[k].soli; }
-    total.wh += r.wh; total.total += r.total;
+    for (const k of ['plan', 'ur', 'qi', 'block', 'nih', 'adhoc', 'sameDay', 'released', 'dispatched', 'pending', 'picked'] as const) { total[k].qty += r[k].qty; total[k].soli += r[k].soli; }
+    total.wh += r.wh; total.total += r.total; total.rolls += r.rolls; total.doneSoli += r.doneSoli;
+    if (r.lastPick && (!total.lastPick || r.lastPick > total.lastPick)) total.lastPick = r.lastPick;
   }
+  total.progress = total.plan.qty > 0 ? Math.min(1, Math.max(0, 1 - total.pending.qty / total.plan.qty)) : 0;
   return { rows: out, total };
 }

@@ -34,7 +34,6 @@ const COLS: Col[] = [
   { id: 'pfc_ur', label: 'UR', grp: 'PFC', n: true, get: (l) => l.pfc_ur, render: (l) => q(l.pfc_ur) },
   { id: 'pfc_qi', label: 'QI', grp: 'PFC', n: true, full: true, get: (l) => l.pfc_qi, render: (l) => q(l.pfc_qi) },
   { id: 'pfc_block', label: 'Block', grp: 'PFC', n: true, full: true, get: (l) => l.pfc_block, render: (l) => q(l.pfc_block) },
-  { id: 'plant_qty', label: 'At plant', grp: 'PLANT', n: true, get: (l) => l.plant_qty, render: (l) => q(l.plant_qty) },
   { id: 'short', label: 'Short', grp: 'Balance − UR', n: true, get: (l) => shortBy(l), render: (l) => q(shortBy(l)) },
   { id: 'coverage', label: 'Coverage', full: true, get: (l) => coverage(l), render: (l) => <span className={`pill ${COV_PILL[coverage(l)]}`}>{coverage(l)}</span> },
   { id: 'stock_plant', label: 'Plant', grp: 'Stock at', full: true, get: (l) => l.stock_plant || '' },
