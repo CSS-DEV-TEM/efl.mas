@@ -312,7 +312,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 39; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 40; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1295,10 +1295,11 @@ async function handlePick(env: Env, req: Request, p: string) {
         .bind(qs, item, `%${qs}%`, `%${qs}%`, `%${qs}%`).all<Row>()).results
       : (await env.DB.prepare('SELECT pallet, item, lot, qty, uom, invoice, location, supplier_hu, status FROM korber WHERE item = ? ORDER BY lot, supplier_hu LIMIT 200').bind(item).all<Row>()).results;
     for (const r of rows) {
-      const ph = (await env.DB.prepare('SELECT qty, roll_qty FROM picks WHERE pallet = ? AND cancelled_at IS NULL ORDER BY id').bind(r.pallet).all<Row>()).results;
-      const base = ph.length ? Number(ph[0].roll_qty ?? r.qty) : Number(r.qty);
-      r.picked_before = r3(ph.reduce((t, x) => t + Number(x.qty), 0));
-      r.available = Math.max(0, r3(base - Number(r.picked_before)));
+      const pp = await palletPicks(env, r.pallet);
+      const base = pp.base ?? Number(r.qty);
+      r.picked_before = pp.before;
+      r.available = Math.max(0, r3(base - pp.before));
+      r.picks = pp.picks;
     }
     return json({ rows });
   }
@@ -1351,11 +1352,14 @@ async function handlePick(env: Env, req: Request, p: string) {
       if (!r) throw new HttpError(400, `Roll ${x.pallet} is not a candidate for this line (refresh and try again).`);
       const q = r3(num(x.qty));
       if (!(q > 0)) throw new HttpError(400, `Enter a QTY for roll ${x.pallet}.`);
-      if (r.available <= 1e-9) throw new HttpError(409, `Roll ${x.pallet} is already picked${r.picks.length ? ' (' + r.picks.map((k) => `${k.day} by ${k.by_user}`).join(', ') + ')' : ''}.`);
-      if (q > r.available + 1e-6) throw new HttpError(409, `Roll ${x.pallet}: only ${r.available} left to pick.`);
+      // the same pallet twice in one pick counts together: a pallet's full Actual Qty is never picked twice
+      const inThis = r3(picks.filter((p0) => p0.pallet === r!.pallet).reduce((t, p0) => t + Number(p0.qty), 0));
+      const left = r3(r.available - inThis);
+      if (left <= 1e-9) throw new HttpError(409, `Pallet ${x.pallet} is already picked in full${r.picks.length ? ` — ${r.picks.map(pickText).join('; ')}` : inThis ? ' in this pick' : ''}.`);
+      if (q > left + 1e-6) throw new HttpError(409, `Pallet ${x.pallet}: only ${left} left to pick (cut roll balance${r.picks.length ? ` after ${r.picks.map(pickText).join('; ')}` : ''}).`);
       if (r.needsConfirm && !x.confirmed) throw new HttpError(400, `Roll ${x.pallet}: ${r.warnings.join('; ')} — tick "Confirmed" for it.`);
       picks.push({ day, week: b.week, line: lineId, so: line.so, li: line.li, item: line.item, pallet: r.pallet, qty: q, roll_qty: r.base_qty,
-        partial: q < r.available - 1e-6 || r.picked_before > 0 ? 1 : 0, shade: r.shade || (await zcomentShade(env, { pallet: r.pallet, item: r.item, lot: r.lot, supplier_hu: r.supplier_hu }, r.insp_lots)), lot: r.lot, insp_lot: r.insp_lots.join(','), batch: r.batches.join(','),
+        partial: q < left - 1e-6 || r.picked_before > 0 || inThis > 0 ? 1 : 0, shade: r.shade || (await zcomentShade(env, { pallet: r.pallet, item: r.item, lot: r.lot, supplier_hu: r.supplier_hu }, r.insp_lots)), lot: r.lot, insp_lot: r.insp_lots.join(','), batch: r.batches.join(','),
         note: [nb ? '' : x.manual ? `Manual pick for roll ${x.manual.roll_no || '?'}${x.manual.barcode ? ' (barcode ' + x.manual.barcode + ')' : ''}` : '', r.warnings.length ? `${nb && !r.needsConfirm ? '' : 'Confirmed: '}${r.warnings.join('; ')}` : ''].filter(Boolean).join(' · ') || null,
         by_user: s.u, at, korber: r.raw });
     }
@@ -1403,15 +1407,36 @@ async function handlePick(env: Env, req: Request, p: string) {
       if (q > 1e-9 && parts.length) give({ ...parts[0], left: Infinity }, q);
     }
     const match = JSON.stringify({ zmmbe: cand.stock.filter((x) => used.has(`${x.batch}|${normId(x.sloc)}`)), zinr: zinrUsed, lots: cand.lots.filter((l) => usedLots.has(String(l.lot))), alloc });
+    // the last check, right before saving: what is picked of each pallet now (another user may have picked it meanwhile)
+    const over = async (exceptReq?: number) => {
+      const out: string[] = [];
+      for (const pl of Array.from(new Set(picks.map((x) => String(x.pallet))))) {
+        const mine = r3(picks.filter((x) => x.pallet === pl).reduce((t, x) => t + Number(x.qty), 0));
+        const pp = await palletPicks(env, pl);
+        // after saving: only the picks saved before this one count (of two at the same moment the earlier one stays)
+        const others = exceptReq ? (await env.DB.prepare('SELECT COALESCE(SUM(qty), 0) q FROM picks WHERE pallet = ? AND cancelled_at IS NULL AND req_id < ?').bind(pl, exceptReq).first<{ q: number }>())!.q : pp.before;
+        const base = pp.base ?? Number(picks.find((x) => x.pallet === pl)!.roll_qty);
+        if (r3(Number(others) + mine) > base + 1e-6) out.push(`Pallet ${pl}: ${r3(Math.max(0, base - Number(others)))} left, ${mine} asked${pp.picks.some((k) => !exceptReq || k.req < exceptReq) ? ` — picked ${pp.picks.filter((k) => !exceptReq || k.req < exceptReq).map(pickText).join('; ')}` : ''}`);
+      }
+      return out;
+    };
+    const pre = await over();
+    if (pre.length) throw new HttpError(409, `Picked meanwhile — ${pre.join(' · ')}. Refresh and pick again.`);
     const reqRow = await env.DB.prepare(`INSERT INTO pick_req (day, seq, pick_no, week, line, so, li, item, plant, need, qty, rolls, by_user, at, match, kind, closed, short) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`)
       .bind(day, seq, txt(b.pickNo), b.week, lineId, line.so, line.li, line.item, line.plant ?? null, cand.need, total, picks.length, s.u, at, match, kind, closed, short).first<{ id: number }>();
     const reqId = Number(reqRow!.id);
     for (const x of picks) x.req_id = reqId;
     await env.DB.batch([
       ...jsonInsert(env, 'picks', ['req_id', 'day', 'week', 'line', 'so', 'li', 'item', 'pallet', 'qty', 'roll_qty', 'partial', 'shade', 'lot', 'insp_lot', 'batch', 'note', 'by_user', 'at', 'korber'], picks, 100),
+      // two picks saved at the same moment: the later one is taken back (below), so a pallet is never picked twice
       env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(at, s.u, 'pick',
         `${kind === 'offsite' ? 'Offsite' : 'Normal'} pick ${ordinal(seq)} ${day}: ${line.so} / ${line.li} / ${line.item} — ${picks.length} roll(s), ${total}${short ? ` (closed ${short} short)` : ''}${b.pickNo ? ' · pick no ' + b.pickNo : ''}`),
     ]);
+    const post = await over(reqId);
+    if (post.length) {
+      await env.DB.batch([env.DB.prepare('DELETE FROM picks WHERE req_id = ?').bind(reqId), env.DB.prepare('DELETE FROM pick_req WHERE id = ?').bind(reqId)]);
+      throw new HttpError(409, `Picked by someone else at the same moment — ${post.join(' · ')}. Nothing was saved; refresh and pick again.`);
+    }
     await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: picks.length, weeks: [b.week] });
     return json({ ok: true, id: reqId, seq, label: ordinal(seq), day, qty: total, rolls: picks.length });
   }
@@ -1611,11 +1636,10 @@ async function suggestKorber(env: Env, sh: Row, lot: Row) {
     if (up(k.lot) !== up(sh.vendor_batch)) continue;
     if (lot.invoice && up(k.invoice) !== up(lot.invoice)) continue;
     if (lot.po && !poMatch(await korberPo(env, k), lot)) continue;
-    const ph = (await env.DB.prepare('SELECT qty, roll_qty FROM picks WHERE pallet = ? AND cancelled_at IS NULL ORDER BY id').bind(k.pallet).all<Row>()).results;
-    const base = ph.length ? Number(ph[0].roll_qty ?? k.qty) : Number(k.qty);
-    const before = r3(ph.reduce((t, x) => t + Number(x.qty), 0));
+    const pp = await palletPicks(env, k.pallet);
+    const base = pp.base ?? Number(k.qty), before = pp.before;
     out.push({ pallet: k.pallet, item: k.item, lot: k.lot, qty: k.qty, uom: k.uom, invoice: k.invoice, location: k.location, supplier_hu: k.supplier_hu, status: k.status,
-      picked_before: before, available: Math.max(0, r3(base - before)) });
+      picked_before: before, available: Math.max(0, r3(base - before)), picks: pp.picks });
   }
   return out.slice(0, 5);
 }
@@ -1658,14 +1682,14 @@ async function noBarcodeOptions(env: Env, sh: Row, lot: Row, skip: Set<string>) 
     // another shade-report roll has this pallet as its barcode: not this roll
     const core = palletCore(k.pallet);
     if (await env.DB.prepare('SELECT 1 FROM zcoment WHERE (barcode = ?1 OR (?2 IS NOT NULL AND barcode LIKE \'%\' || ?2 || \'%\')) AND NOT (upper(COALESCE(roll_no, \'\')) = ?3 AND ?3 <> \'\') LIMIT 1').bind(up(k.pallet), core, hu).first()) continue;
-    const ph = (await env.DB.prepare('SELECT qty, roll_qty FROM picks WHERE pallet = ? AND cancelled_at IS NULL ORDER BY id').bind(k.pallet).all<Row>()).results;
-    const base = ph.length ? Number(ph[0].roll_qty ?? k.qty) : Number(k.qty);
-    const before = r3(ph.reduce((t, x) => t + Number(x.qty), 0));
+    const pp = await palletPicks(env, k.pallet);
+    const base = pp.base ?? Number(k.qty);
+    const before = pp.before;
     // with a roll number: Supplier Hu (and Lot) decide; without one (no Shade Report): Lot and the lot's QTY
     const exact = hu ? !!checks.hu && checks.lot !== false : !!checks.lot && !!checks.qty;
     const score = (checks.lot ? 20 : 0) + (checks.hu ? 20 : 0) + (checks.invoice ? 10 : 0) + (checks.po ? 10 : 0) + (checks.qty ? (hu ? 5 : 30) : 0) + (base - before > 1e-9 ? 3 : 0);
     out.push({ pallet: k.pallet, item: k.item, lot: k.lot, supplier_hu: k.supplier_hu, qty: k.qty, uom: k.uom, location: k.location, status: k.status, invoice: k.invoice,
-      picked_before: before, available: Math.max(0, r3(base - before)), checks, exact, score });
+      picked_before: before, available: Math.max(0, r3(base - before)), checks, exact, score, picks: pp.picks });
   }
   // once one of them was picked for this roll, that pallet is the roll: only it stays (its balance, if it was cut)
   const used = out.filter((o) => Number(o.picked_before) > 0);
@@ -1673,6 +1697,20 @@ async function noBarcodeOptions(env: Env, sh: Row, lot: Row, skip: Set<string>) 
 }
 
 interface ManualFor { roll_no?: string | null; barcode?: string | null; lot?: string | null; batch?: string | null; vendor_batch?: string | null; shade?: string | null; roll_qty?: number | null; invoice?: string | null; po?: string | null }
+
+/**
+ * A pallet's earlier picks (not cancelled): QTY, the roll's QTY when first picked, and the plan each went to
+ * (day plan round / week, SO / LI, HJ Pick No, day, who) — a cut roll keeps only its balance, a roll picked in full is gone.
+ */
+interface PalletPick { day: string; by_user: string; qty: number; plan: string; so: string; li: string; pick_no: string | null; at: string; req: number }
+async function palletPicks(env: Env, pallet: unknown) {
+  const ph = (await env.DB.prepare(`SELECT p.day, p.by_user, p.qty, p.roll_qty, p.week, p.so, p.li, p.at, p.req_id, r.pick_no FROM picks p LEFT JOIN pick_req r ON r.id = p.req_id
+    WHERE p.pallet = ? AND p.cancelled_at IS NULL ORDER BY p.id`).bind(String(pallet ?? '')).all<Row>()).results;
+  const picks: PalletPick[] = ph.map((x) => ({ day: String(x.day), by_user: String(x.by_user), qty: Number(x.qty), plan: periodLabel(x.week), so: String(x.so ?? ''), li: String(x.li ?? ''), pick_no: (x.pick_no as string | null) ?? null, at: String(x.at ?? ''), req: Number(x.req_id) }));
+  return { picks, base: ph.length ? Number(ph[0].roll_qty) : null, before: r3(picks.reduce((t, x) => t + x.qty, 0)) };
+}
+/** "64.46 on 2026-10-20 · 2026-10-20 C051 Pick 1 · E101698226 / 10 · HJ 5501 · admin" */
+const pickText = (k: PalletPick) => `${k.qty} on ${k.day} · ${k.plan} · ${k.so} / ${k.li}${k.pick_no ? ` · HJ ${k.pick_no}` : ''} · ${k.by_user}`;
 
 /** A Korber roll chosen by hand for a shade-report roll that had no matching pallet: same checks, always needs "Confirmed". */
 async function manualCandidate(env: Env, pallet: string, m: ManualFor, lineItem: string): Promise<Candidate | undefined> {
@@ -1694,14 +1732,14 @@ async function manualCandidate(env: Env, pallet: string, m: ManualFor, lineItem:
   // QTY: Korber's Actual Qty is used; a different ZCOMENT Roll qty is not a warning
   if (checks.invoice === false) warnings.push(`Invoice ${k.invoice} ≠ ZINR ${m.invoice}`);
   if (checks.po === false) warnings.push(`Po Number ${(await korberPo(env, k)) ?? '–'} ≠ ZINR ${m.po}`);
-  const ph = (await env.DB.prepare('SELECT day, by_user, qty, roll_qty FROM picks WHERE pallet = ? AND cancelled_at IS NULL ORDER BY id').bind(k.pallet).all<Row>()).results;
-  const base = ph.length ? Number(ph[0].roll_qty ?? k.qty) : Number(k.qty);
-  const before = r3(ph.reduce((t, x) => t + Number(x.qty), 0));
+  const pp = await palletPicks(env, k.pallet);
+  const base = pp.base ?? Number(k.qty);
+  const before = pp.before;
   return {
     pallet: String(k.pallet), item: String(k.item), lot: k.lot as string | null, supplier_hu: k.supplier_hu as string | null, location: k.location as string | null, uom: k.uom as string | null,
     invoice: k.invoice as string | null, actual_qty: Number(k.qty), base_qty: base, picked_before: before, available: Math.max(0, r3(base - before)), roll_qty: Number(m.roll_qty ?? k.qty),
     shade: m.shade ?? null, insp_lots: m.lot ? [String(m.lot)] : [], batches: m.batch ? [String(m.batch)] : [], checks, warnings, needsConfirm: true, raw: k.raw as string | null,
-    picks: ph.map((x) => ({ day: String(x.day), by_user: String(x.by_user), qty: Number(x.qty) })),
+    picks: pp.picks,
   };
 }
 
@@ -1709,7 +1747,7 @@ interface Candidate {
   pallet: string; item: string; lot: string | null; supplier_hu: string | null; location: string | null; uom: string | null; invoice: string | null;
   actual_qty: number; base_qty: number; picked_before: number; available: number; roll_qty: number; shade: string | null;
   insp_lots: string[]; batches: string[]; checks: Record<string, boolean | null>; warnings: string[]; needsConfirm: boolean; raw: string | null;
-  picks: { day: string; by_user: string; qty: number }[];
+  picks: PalletPick[];
   /** matched straight from ZINR to Korber: Item + Lot Number = Vendor Batch + Invoice + Po (no ZCOMENT barcode) */
   direct?: boolean;
   /** the ZCOMENT barcode is not a Korber pallet: found by Supplier Hu = Vendor Roll No (+ Lot, Invoice, Po) */
@@ -1963,12 +2001,12 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
   if (nNoShade) steps.push(`${nNoShade} inspection lot${nNoShade === 1 ? ' has' : 's have'} no Shade Report in ZCOMENT VIEW: choose its Korber roll under “No Barcode — choose the roll” (same item and Lot Number; Actual Qty = lot QTY first).`);
   // pick history: a roll picked in full is gone; a partial pick leaves only its balance (counted from the qty when first picked)
   for (const r of rolls.values()) {
-    const ph = (await env.DB.prepare('SELECT day, by_user, qty, roll_qty FROM picks WHERE pallet = ? AND cancelled_at IS NULL ORDER BY id').bind(r.pallet).all<Row>()).results;
-    if (!ph.length) continue;
-    r.base_qty = Number(ph[0].roll_qty ?? r.actual_qty);
-    r.picked_before = r3(ph.reduce((t, x) => t + Number(x.qty), 0));
+    const pp = await palletPicks(env, r.pallet);
+    if (!pp.picks.length) continue;
+    r.base_qty = pp.base ?? r.actual_qty;
+    r.picked_before = pp.before;
     r.available = Math.max(0, r3(r.base_qty - r.picked_before));
-    r.picks = ph.map((x) => ({ day: String(x.day), by_user: String(x.by_user), qty: Number(x.qty) }));
+    r.picks = pp.picks;
   }
   // SO Plant: the rest of a roll (after a cut) belongs to the other SO lines that have this roll in ZCOMENT — or stays on this
   // line. When they all have this line's SO Plant (ZMMBE), the roll need not be cut: the plant gets it anyway.

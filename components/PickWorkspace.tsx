@@ -7,7 +7,7 @@ import { ago, avail, fmt, fmtDate, fmtQty, isDispatched, isDone, need, periodOf,
 import { action } from '@/lib/smart';
 import {
   PICK_SRCS, korberWorkbook, ordinal, packingListWorkbook, saveWorkbook, uploadPickFile,
-  type Candidate, type Candidates, type KorberRow, type ManualRoll, type NbOption, type NoBarcodeRoll, type PickHistory, type PickSrc,
+  pickNote, type Candidate, type Candidates, type KorberRow, type ManualRoll, type NbOption, type NoBarcodeRoll, type PickHistory, type PickSrc,
 } from '@/lib/pick';
 
 type LineP = Line & { picked?: number; picked_rolls?: number };
@@ -442,9 +442,10 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
                         <tr key={r.pallet} className={`${s ? 'picked' : ''} ${isGone ? 'gone' : ''}`} onClick={(e) => { if (!isGone && (e.target as HTMLElement).tagName !== 'INPUT') toggle(r); }}>
                           <td><input type="checkbox" disabled={isGone} checked={!!s} onChange={() => toggle(r)} aria-label={`Pick ${r.pallet}`} /></td>
                           <td><b>{r.supplier_hu}</b></td>
-                          <td className="mono">{r.pallet}{r.borrowed && <span className="pill info" style={{ marginLeft: 4 }} title={r.qtyNote || ''}>barcode from same roll</span>}{r.via && <span className="pill accent" style={{ marginLeft: 4 }} title={r.byHu ? `ZCOMENT Barcode Number ${r.barcode} is not a Korber pallet — found by Supplier Hu ${r.supplier_hu} = Vendor Roll No, with the same Lot, Invoice and Po` : `ZCOMENT Barcode Number ${r.barcode} — the same roll number in Korber under pallet ${r.via}`}>{r.byHu ? `roll no ${r.supplier_hu} · barcode ${r.barcode}` : `barcode ${r.barcode}`}</span>}</td><td>{r.location}</td><td><b>{r.shade}</b></td>
-                          <td className="n">{isGone ? <span className="pill mute" title={r.picks.map((p) => `${p.day} ${p.by_user}: ${p.qty}`).join('\n')}>picked</span>
-                            : <>{fmtQty(r.available)}{r.picked_before > 0 && <span className="pill accent" style={{ marginLeft: 4 }} title={`Picked before: ${r.picks.map((p) => `${p.day} ${p.by_user} ${p.qty}`).join(', ')}`}>balance</span>}</>}</td>
+                          <td className="mono">{r.pallet}{r.borrowed && <span className="pill info" style={{ marginLeft: 4 }} title={r.qtyNote || ''}>barcode from same roll</span>}{r.via && <span className="pill accent" style={{ marginLeft: 4 }} title={r.byHu ? `ZCOMENT Barcode Number ${r.barcode} is not a Korber pallet — found by Supplier Hu ${r.supplier_hu} = Vendor Roll No, with the same Lot, Invoice and Po` : `ZCOMENT Barcode Number ${r.barcode} — the same roll number in Korber under pallet ${r.via}`}>{r.byHu ? `roll no ${r.supplier_hu} · barcode ${r.barcode}` : `barcode ${r.barcode}`}</span>}
+                            {r.picks.length > 0 && <div className="pk-prev">{isGone ? 'Picked in full' : `Cut roll · ${fmtQty(r.available)} left of ${fmtQty(r.base_qty)}`} — {r.picks.map(pickNote).join(' | ')}</div>}</td><td>{r.location}</td><td><b>{r.shade}</b></td>
+                          <td className="n">{isGone ? <span className="pill mute" title={r.picks.map(pickNote).join('\n')}>picked</span>
+                            : <>{fmtQty(r.available)}{r.picked_before > 0 && <span className="pill accent" style={{ marginLeft: 4 }} title={`Cut before: ${r.picks.map(pickNote).join(' | ')}`}>balance</span>}</>}</td>
                           <td className="n">{s ? <span className="pk-qty">
                             {isLast && <span className={`pill ${lastMode === 'full' ? 'warn' : 'accent'}`}>{lastMode === 'full' ? 'full roll' : 'cut'}</span>}
                             <input className="as-search" type="number" step="0.001" min="0.001" max={r.available} value={s.qty} onClick={(e) => e.stopPropagation()}
@@ -514,11 +515,11 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
                               const miss = nbMiss(o, m);
                               const ok = (['lot', 'hu', 'invoice', 'po', 'qty'] as const).filter((k) => o.checks[k]).map((k) => ({ lot: 'Lot', hu: 'HU', invoice: 'Inv', po: 'Po', qty: 'Qty' })[k]);
                               return <option key={o.pallet} value={o.pallet} disabled={o.available <= 1e-9 || takenElsewhere(o.pallet)}>
-                                {o.pallet} · Lot {o.lot ?? '–'} · HU {o.supplier_hu ?? '–'} · {fmtQty(o.available)}{o.picked_before > 0 ? ' left' : ''} · {o.location ?? ''} · {o.available <= 1e-9 ? 'picked' : takenElsewhere(o.pallet) ? 'chosen for another roll' : `✓ ${ok.join(' ')}${miss.length ? ` · ✗ ${miss.map((k) => ({ lot: 'Lot', hu: 'HU', qty: 'Qty' })[k]).join(' ')}` : ''}`}
+                                {o.pallet} · Lot {o.lot ?? '–'} · HU {o.supplier_hu ?? '–'} · {fmtQty(o.available)}{o.picked_before > 0 ? ` left (picked ${(o.picks || []).map((p) => `${p.qty} · ${p.plan || p.day}`).join(', ')})` : ''} · {o.location ?? ''} · {o.available <= 1e-9 ? 'picked' : takenElsewhere(o.pallet) ? 'chosen for another roll' : `✓ ${ok.join(' ')}${miss.length ? ` · ✗ ${miss.map((k) => ({ lot: 'Lot', hu: 'HU', qty: 'Qty' })[k]).join(' ')}` : ''}`}
                               </option>;
                             })}
                           </select>
-                          {m.options.some((o) => o.picked_before > 0) && <div className="muted small">Part picked before as {m.options[0].pallet} — its balance only</div>}
+                          {m.options.some((o) => o.picked_before > 0) && <div className="pk-prev">Part picked before as {m.options[0].pallet} — its balance only: {(m.options[0].picks || []).map(pickNote).join(' | ')}</div>}
                           {co && <div className="nb-checks">{(['lot', 'hu', 'invoice', 'po', 'qty'] as const).map((k) => co.checks[k] === null ? null : <span key={k} className={`pill ${co.checks[k] ? 'ok' : 'warn'}`}>{co.checks[k] ? '✓' : '✗'} {({ lot: 'Lot', hu: 'Supplier Hu', invoice: 'Invoice', po: 'Po', qty: `Qty ${fmtQty(co.qty)}` })[k]}</span>)}</div>}
                         </>}</td>
                         <td className="n">{chosen ? <input className="as-search" type="number" step="0.001" min="0.001" max={co?.available} style={{ width: 92 }} value={chosen[1].qty}
@@ -622,7 +623,8 @@ function KorberChooser({ item, roll, taken, onUse, onClose }: { item: string; ro
               return (
                 <tr key={k.pallet} className={gone ? 'gone' : ''}>
                   <td className="mono">{k.pallet}</td><td>{k.item}</td><td>{k.location}</td><td>{k.lot}</td><td>{k.supplier_hu}</td><td className="n">{fmtQty(k.qty)}</td>
-                  <td className="n">{gone ? <span className="pill mute">picked</span> : fmtQty(k.available)}</td>
+                  <td className="n">{gone ? <span className="pill mute">picked</span> : fmtQty(k.available)}
+                    {(k.picks?.length ?? 0) > 0 && <div className="pk-prev">{gone ? 'Picked in full' : 'Cut roll — balance only'}: {k.picks!.map(pickNote).join(' | ')}</div>}</td>
                   <td><button className="btn sm primary" disabled={gone || used} onClick={() => onUse(k)}>{used ? 'Selected' : 'Use'}</button></td>
                 </tr>
               );

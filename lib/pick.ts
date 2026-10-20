@@ -16,7 +16,7 @@ export interface Candidate {
   pallet: string; item: string; lot: string | null; supplier_hu: string | null; location: string | null; uom: string | null; invoice: string | null;
   actual_qty: number; base_qty: number; picked_before: number; available: number; roll_qty: number; shade: string | null;
   insp_lots: string[]; batches: string[]; checks: Record<string, boolean | null>; warnings: string[]; needsConfirm: boolean;
-  picks: { day: string; by_user: string; qty: number }[];
+  picks: PalletPick[];
   /** found under another pallet label than the ZCOMENT Barcode Number (e.g. COMPCP… for CP…) */
   via?: string | null; barcode?: string | null;
   qtyNote?: string | null;
@@ -40,7 +40,11 @@ export interface LotInfo { via?: string | null; noShade?: boolean; /** rolls fou
 export interface ManualRoll { lot: string; batch: string; material: string; vendor_batch: string | null; roll_no: string | null; barcode: string | null; roll_qty: number; shade: string | null; invoice: string | null; po?: string | null; reason: string;
   /** Korber rolls with the same item, Lot Number, Supplier Hu, Invoice and Po (another pallet). */
   suggest?: KorberRow[] }
-export interface KorberRow { pallet: string; item: string; lot: string | null; qty: number; uom: string | null; invoice: string | null; location: string | null; supplier_hu: string | null; status: string | null; available: number; picked_before: number }
+export interface KorberRow { pallet: string; item: string; lot: string | null; qty: number; uom: string | null; invoice: string | null; location: string | null; supplier_hu: string | null; status: string | null; available: number; picked_before: number; picks?: PalletPick[] }
+/** an earlier pick of a pallet: QTY, the plan it went to (day plan round / week), SO / LI, HJ Pick No, day, who */
+export interface PalletPick { day: string; by_user: string; qty: number; plan?: string; so?: string; li?: string; pick_no?: string | null; at?: string }
+/** "64.46 · 20 Oct · VAANAVIL Pick 1 · E101698226 / 10 · HJ 5501 · admin" */
+export const pickNote = (p: PalletPick) => [String(p.qty), p.plan || p.day, p.so ? `${p.so} / ${p.li}` : '', p.pick_no ? `HJ ${p.pick_no}` : '', p.by_user].filter(Boolean).join(' · ');
 /** A Korber roll offered for a shade-report roll with no Barcode Number (same item; Lot / Supplier Hu agree). */
 export interface NbOption extends KorberRow { checks: Record<string, boolean | null>; exact: boolean }
 /** A shade-report roll with no Barcode Number: the user chooses its Korber roll from `options`. */

@@ -779,3 +779,4 @@ tr[data-tf-hide] { display: none !important; }
 /* Pick Hold */
 tr.on-hold td { background: color-mix(in srgb, #ef4444 9%, transparent); }
 .hold-quick { display: flex; flex-wrap: wrap; gap: 6px; }
+.pk-prev { margin-top: 3px; font-family: var(--sans, inherit); font-size: 11.5px; line-height: 1.35; color: #f59e0b; text-align: left; white-space: normal; max-width: 520px; }
