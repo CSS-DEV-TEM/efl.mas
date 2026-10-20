@@ -12,7 +12,10 @@ export const SOLI_PER_HOUR = 12;
 
 export interface Bucket { qty: number; soli: number }
 export interface PlantRow {
-  code: string; name: string; responsible: string; target: string; received: string | null;
+  /** the row's key: the plant code, or "<plant>~<n>" for a day plan round */
+  code: string; name: string;
+  /** the plant code (same as code unless a round) and, for a round, its period id and Pick No */
+  plantCode: string; period?: string; round?: number; responsible: string; target: string; received: string | null;
   /** received time shown: typed on the dashboard, or the plan upload time */
   receivedText: string; receivedManual: boolean; late: boolean | null;
   plan: Bucket; ur: Bucket; wh: number; qi: Bucket; block: Bucket; nih: Bucket; adhoc: Bucket; sameDay: Bucket;
@@ -46,27 +49,36 @@ export const fmtTime = (iso: string | null) => {
 
 /** Time setup (Admin → Settings): SO/LI lines per hour for W/H, grace minutes before "late", target when a plant has none. */
 export interface TimeSetup { soliPerHour?: number; lateGraceMin?: number; defaultTarget?: string }
-export function plantSummary(rows: Line[], plants: PlantInfo[], received: { code: string; received: string | null }[] = [], time: TimeSetup = {}): { rows: PlantRow[]; total: PlantRow } {
+/** "2026-10-20~C064~2" → the round's plant and Pick No */
+const roundParts = (w: string | null | undefined) => { const m = /^\d{4}-\d{2}-\d{2}~([^~]*)~(\d+)$/.exec(w || ''); return m ? { plant: m[1] === '-' ? '' : m[1], round: Number(m[2]) } : null; };
+
+/** `byRound`: a day plan — one row per plant per Pick No (Pick 1, Pick 2 …), received time per round. */
+export function plantSummary(rows: Line[], plants: PlantInfo[], received: { code: string; received: string | null; period?: string }[] = [], time: TimeSetup = {}, byRound = false): { rows: PlantRow[]; total: PlantRow } {
   const perHour = time.soliPerHour && time.soliPerHour > 0 ? time.soliPerHour : SOLI_PER_HOUR;
-  const rec = new Map(received.map((r) => [r.code.toUpperCase(), r.received || '']));
+  const rec = new Map(received.map((r) => [byRound ? `${r.period ?? ''}|${r.code.toUpperCase()}` : r.code.toUpperCase(), r.received || '']));
   const info = new Map(plants.map((p) => [p.code.toUpperCase(), p]));
   const by = new Map<string, Line[]>();
+  const periodOfKey = new Map<string, string>();
   for (const l of rows) {
-    const c = (l.plant || '—').toUpperCase();
+    const rp = byRound ? roundParts(l.week) : null;
+    const c = rp ? `${(l.plant || rp.plant || '—').toUpperCase()}~${rp.round}` : (l.plant || '—').toUpperCase();
+    if (rp) periodOfKey.set(c, l.week);
     if (!by.has(c)) by.set(c, []);
     by.get(c)!.push(l);
   }
-  // plants set up in settings show even with no lines this week, like the sheet
-  for (const p of plants) if (!by.has(p.code.toUpperCase())) by.set(p.code.toUpperCase(), []);
+  // plants set up in settings show even with no lines this week, like the sheet (a day plan: only the rounds uploaded)
+  if (!byRound) for (const p of plants) if (!by.has(p.code.toUpperCase())) by.set(p.code.toUpperCase(), []);
 
   // UR / QI / Block are stock of the SO / LI / Item: lines of the same one (other dates) share it, earliest date first
   const stockLeft = new Map<string, { ur: number; qi: number; block: number }>();
   const stockOf = (l: Line) => { let x = stockLeft.get(l.key); if (!x) { x = { ur: avail(l), qi: l.qi, block: l.block }; stockLeft.set(l.key, x); } return x; };
   const byDate = (a: Line, b: Line) => String(a.date ?? '9999').localeCompare(String(b.date ?? '9999')) || (a.row_no ?? 0) - (b.row_no ?? 0);
   const make = (code: string, ls: Line[]): PlantRow => {
-    const p = info.get(code);
+    const pc = code.includes('~') ? code.split('~')[0] : code;
+    const rn = code.includes('~') ? Number(code.split('~')[1]) : undefined;
+    const p = info.get(pc);
     const r: PlantRow = {
-      code, name: p?.name || code, responsible: p?.responsible || '', target: p?.target || time.defaultTarget || '', received: null, receivedText: '', receivedManual: false, late: null,
+      code, plantCode: pc, period: periodOfKey.get(code), round: rn, name: `${p?.name || pc}${rn ? ` · Pick ${rn}` : ''}`, responsible: p?.responsible || '', target: p?.target || time.defaultTarget || '', received: null, receivedText: '', receivedManual: false, late: null,
       plan: b0(), ur: b0(), wh: 0, qi: b0(), block: b0(), nih: b0(), adhoc: b0(), sameDay: b0(), released: b0(), dispatched: b0(), total: 0, pending: b0(), picked: b0(), rolls: 0, lastPick: null, doneSoli: 0, progress: 0,
     };
     const relKeys = new Set<string>();
@@ -90,7 +102,7 @@ export function plantSummary(rows: Line[], plants: PlantInfo[], received: { code
     r.progress = r.plan.qty > 0 ? Math.min(1, Math.max(0, 1 - r.pending.qty / r.plan.qty)) : 0;
     r.wh = r.ur.soli / perHour;
     r.total = r.ur.qty + r.adhoc.qty;
-    const typed = rec.get(code);
+    const typed = rec.get(byRound ? `${r.period ?? ''}|${pc}` : code);
     r.receivedManual = !!typed;
     r.receivedText = typed || fmtTime(r.received);
     const tm = timeMinutes(r.target), rm = timeMinutes(r.receivedText);
@@ -98,7 +110,7 @@ export function plantSummary(rows: Line[], plants: PlantInfo[], received: { code
     return r;
   };
   const out = Array.from(by.entries()).map(([c, ls]) => make(c, ls))
-    .sort((a, b) => (info.get(a.code)?.sort ?? 999) - (info.get(b.code)?.sort ?? 999) || b.plan.qty - a.plan.qty);
+    .sort((a, b) => (info.get(a.plantCode)?.sort ?? 999) - (info.get(b.plantCode)?.sort ?? 999) || a.plantCode.localeCompare(b.plantCode) || (a.round ?? 0) - (b.round ?? 0) || b.plan.qty - a.plan.qty);
   const total = make('Summary', []);
   total.name = 'Summary';
   for (const r of out) {

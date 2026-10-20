@@ -21,6 +21,8 @@ export interface Line {
   released?: number;
   /** picks of this line (pick history): QTY, rolls, number of picks, when the last one was saved */
   picked?: number; picked_rolls?: number; pick_reqs?: number; last_pick_at?: string | null;
+  /** Korber Inventory: QTY / rolls of this SO / LI / Item still on the shelf (its ZINR lots, less picks); undefined = no Korber upload */
+  korber_avail?: number; korber_rolls?: number;
   /** dispatch item whose left-over QTY was assigned to this line */
   assigned_from?: string;
 }

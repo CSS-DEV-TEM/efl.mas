@@ -7,7 +7,7 @@ import Ledger, { STATUS_OPTIONS } from '@/components/Ledger';
 import { COV_COLOR } from '@/components/Charts';
 import PlantSummary from '@/components/PlantSummary';
 import PlanPicks from '@/components/PlanPicks';
-import type { PlantInfo } from '@/lib/summary';
+import { fmtTime, type PlantInfo } from '@/lib/summary';
 import { api, userParam } from '@/lib/api';
 import { useRefreshOnActivity } from '@/lib/freshness';
 import { COVERAGES, type DispatchSummary, ago, compact, coverage, fmt, fmtDate, isDone, lineRef, totals, type Coverage, type Line, type Upload, type WeekInfo } from '@/lib/calc';
@@ -19,14 +19,18 @@ import { SRC_INFO, SRC_ORDER } from '@/lib/mapping';
 import { ACTION_HELP, insights, matchView, todayLocal, type Action, type Insight, type View } from '@/lib/smart';
 
 
-interface PullPlan { type?: 'week' | 'day'; day?: string | null; days?: { day: string; week: string; lines: number; done: number; qty: number }[]; week: string | null; prevWeek?: string | null; rev?: string | null; weeks: WeekInfo[]; rows: Line[]; dispatch?: DispatchSummary; plants?: PlantInfo[]; received?: { period?: string; code: string; received: string | null }[]; releases?: { key: string; qi: number; block: number; by_user: string; at: string; active: boolean }[]; uploads: Upload[]; counts: { src: string; n: number }[]; generatedAt: string; time?: { soliPerHour?: number; lateGraceMin?: number; defaultTarget?: string } }
+export interface RoundInfo { id: string; plant: string | null; round: number; lines: number; qty: number; done: number; src_at: string | null; src_user: string | null }
+interface PullPlan { type?: 'week' | 'day'; day?: string | null; days?: { day: string; week: string; lines: number; done: number; qty: number }[]; rounds?: RoundInfo[]; week: string | null; prevWeek?: string | null; rev?: string | null; weeks: WeekInfo[]; rows: Line[]; dispatch?: DispatchSummary; plants?: PlantInfo[]; received?: { period?: string; code: string; received: string | null }[]; releases?: { key: string; qi: number; block: number; by_user: string; at: string; active: boolean }[]; uploads: Upload[]; counts: { src: string; n: number }[]; generatedAt: string; time?: { soliPerHour?: number; lateGraceMin?: number; defaultTarget?: string } }
 
 /** "2026-W42" → "Week 42" */
 const weekLabel = (w: string | null | undefined) => (w ? `Week ${Number(w.slice(-2))}` : '');
 const weekRange = (w: WeekInfo | undefined) => (w?.start ? `${fmtDate(w.start)} – ${fmtDate(w.end)}` : '');
 
 /** The plan a status belongs to: the week for a week plan, the day for a day plan. */
-export const periodOf = (l: Line) => ((l as Line & { plan_type?: string }).plan_type === 'day' && l.date ? l.date : l.week);
+/** the plan a line belongs to: the week, a day plan round ("<day>~<plant>~<n>"), or (older day plans) the day */
+export const periodOf = (l: Line) => ((l as Line & { plan_type?: string }).plan_type === 'day' ? (l.week?.includes('~') ? l.week : l.date || l.week) : l.week);
+/** "2026-10-20~C064~2" → { plant: 'C064', round: 2 } */
+export const roundOf = (w: string | null | undefined) => { const m = /^\d{4}-\d{2}-\d{2}~([^~]*)~(\d+)$/.exec(w || ''); return m ? { plant: m[1] === '-' ? '' : m[1], round: Number(m[2]) } : null; };
 const dayLabel = (d: string) => new Date(d + 'T00:00:00Z').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
 
 /** Week plan dashboard (planType "week") and Day plan dashboard (planType "day"): the same tracking, separate plans. */
@@ -39,6 +43,10 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
   const [, tick] = useState(0);
   // null = follow the most recent week; a value = the week someone picked
   const [pickedWeek, setPickedWeek] = useState<string | null>(null);
+  // day plan: one round (Pick No of a plant) or the whole day (null)
+  const [round, setRound] = useState<string | null>(null);
+  const roundRef = useRef(round); roundRef.current = round;
+  useEffect(() => { setRound(null); }, [pickedWeek]);
   const weekRef = useRef<string | null>(null);
   weekRef.current = pickedWeek;
 
@@ -74,14 +82,14 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
 
   const load = useCallback(async () => {
     try {
-      const w = weekRef.current;
-      const qs = isDay ? `?type=day${w ? '&day=' + encodeURIComponent(w) : ''}` : w ? '?week=' + encodeURIComponent(w) : '';
+      const w = weekRef.current, rd = roundRef.current;
+      const qs = isDay ? `?type=day${w ? '&day=' + encodeURIComponent(w) : ''}${rd ? '&round=' + encodeURIComponent(rd) : ''}` : w ? '?week=' + encodeURIComponent(w) : '';
       const p = await api<PullPlan>('/api/pullplan' + qs + (qs ? userParam() : userParam(true)));
       if (w && (isDay ? p.day : p.week) !== w) setPickedWeek(null); // that plan was deleted: back to the latest
       setData(p); setErr('');
     } catch (e) { setErr(e instanceof Error ? e.message : 'Could not load data.'); }
   }, [isDay]);
-  useEffect(() => { load(); }, [load, pickedWeek]);
+  useEffect(() => { load(); }, [load, pickedWeek, round]);
   // no timer: when someone uses the page, check if anything changed and reload only then
   // without realtime: on activity, and once a minute while the summary / picks are open (a reload only when something changed)
   useRefreshOnActivity(load, data ? data.rev ?? null : undefined, live !== 'live', tab === 'details' ? 0 : 60000);
@@ -131,7 +139,7 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
   const viewCounts = useMemo(() => {
     const c: Record<string, number> = {};
     const views: [string, View][] = [['partdisp', { kind: 'partdisp' }], ['Dispatched', { kind: 'action', value: 'Dispatched' }], ['urgent', { kind: 'urgent' }], ['priority', { kind: 'priority' }], ['carried', { kind: 'carried' }],
-      ...(['Ready to pull', 'Release QI / Block', 'Partial pull', 'Follow up TN', 'No stock'] as Action[]).map((a) => [a, { kind: 'action', value: a }] as [string, View])];
+      ...(['Ready to pull', 'Not in Korber', 'Release QI / Block', 'Partial pull', 'Follow up TN', 'No stock'] as Action[]).map((a) => [a, { kind: 'action', value: a }] as [string, View])];
     for (const [k, v] of views) c[k] = scoped.filter((r) => matchView(r, v, today)).length;
     return c;
   }, [scoped, today]);
@@ -159,6 +167,10 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
 
   const up = new Map((data?.uploads || []).map((u) => [u.src, u]));
   const canEdit = !guest && user.role !== 'viewer';
+  // what is on screen: the week, the round, or (null week) the whole day of a day plan
+  const period = isDay ? (data?.week || data?.day || null) : data?.week || null;
+  const plantLabel = (code: string | null | undefined) => { const c = (code || '').toUpperCase(); const p = (data?.plants || []).find((x) => x.code.toUpperCase() === c); return p?.name || c || 'No plant'; };
+  const roundLabel = (w: string | null | undefined) => { const r = roundOf(w); return r ? `${plantLabel(r.plant)} · Pick ${r.round}` : ''; };
   const filtersOn = !!(date || plant || remark || cov || search);
 
   if (err && !data) return <main className="page"><div className="notice bad">{err}</div></main>;
@@ -167,7 +179,7 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
     <main className="page anim">
       <div className="page-head">
         <div>
-          <h1>{isDay ? (data?.day ? <>Day plan · {dayLabel(data.day)} <span className="h1-sub">{weekLabel(data.week)}</span></> : 'Day plan tracking')
+          <h1>{isDay ? (data?.day ? <>Day plan · {dayLabel(data.day)} <span className="h1-sub">{data.week ? roundLabel(data.week) : 'all picks'}</span></> : 'Day plan tracking')
             : data?.week ? <>{weekLabel(data.week)} <span className="h1-sub">week plan</span></> : 'Week plan tracking'}</h1>
           <p>
             {data ? <>Calculated {ago(data.generatedAt)} from the latest uploads. {t.open > 0 ? <><b>{fmt(t.shortLines)}</b> open lines need <b>{fmt(t.short, 2)}</b> more than the Full UR stock holds.</> : 'All lines in view are done.'}</> : 'Loading…'}
@@ -176,7 +188,7 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <button className="btn" onClick={refreshNow} disabled={refreshing} title="Load the latest data now">{refreshing ? 'Refreshing…' : '↻ Refresh'}</button>
           {canEdit && <Link className="btn" href="/upload/">Upload reports</Link>}
-          <button className="btn primary" disabled={!tableRows.length} onClick={() => exportPullPlan(tableRows, `MAS_Weekly_Plan_${(data?.week || '').replace('-', '_')}`)}>Export Excel ({fmt(tableRows.length)})</button>
+          <button className="btn primary" disabled={!tableRows.length} onClick={() => exportPullPlan(tableRows, isDay ? `MAS_Day_Plan_${data?.day || ''}${data?.week ? '_' + roundLabel(data.week).replace(/[^\w]+/g, '_') : ''}` : `MAS_Weekly_Plan_${(data?.week || '').replace('-', '_')}`)}>Export Excel ({fmt(tableRows.length)})</button>
         </div>
       </div>
 
@@ -227,6 +239,19 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
           </div>
         );
       })()}
+
+      {isDay && data && (data.rounds || []).length > 0 && (
+        <nav className="days rounds" aria-label="Picks of the day">
+          <span className="weeks-label">Pick</span>
+          <button type="button" className={`day-chip ${!round ? 'on' : ''}`} aria-pressed={!round} onClick={() => { setRound(null); setView({ kind: 'all' }); }}>
+            <b>All picks</b><span>{fmt((data.rounds || []).reduce((t, r) => t + r.lines, 0))} lines</span></button>
+          {(data.rounds || []).map((r) => (
+            <button key={r.id} type="button" className={`day-chip ${round === r.id ? 'on' : ''} ${r.lines && r.done >= r.lines ? 'done' : ''}`} aria-pressed={round === r.id}
+              onClick={() => { setRound(round === r.id ? null : r.id); setView({ kind: 'all' }); }} title={`${plantLabel(r.plant)} Pick ${r.round} · ${fmt(r.lines)} lines · ${fmt(r.done)} done · uploaded ${r.src_at ? fmtTime(r.src_at) : ''} by ${r.src_user || ''}`}>
+              <b>{plantLabel(r.plant)} · Pick {r.round}</b><span>{fmt(r.lines)} lines{r.src_at ? ` · ${fmtTime(r.src_at)}` : ''}</span></button>
+          ))}
+        </nav>
+      )}
 
       {!isDay && data && dates.length > 1 && (
         <nav className="days" aria-label="Day plan">
@@ -313,18 +338,18 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
         })}
       </div>}
 
-      {tab === 'summary' && data?.week && rows.length > 0 && (
-        <PlantSummary rows={date ? rows.filter((r) => r.date === date) : rows} plants={data.plants || []}
-          received={(data.received || []).filter((r) => (r.period ?? data.week) === (date || (isDay ? data.day : null) || data.week))} week={date || (isDay ? data.day : null) || data.week!} day={date || (isDay ? data.day : null)}
-          canTarget={!guest && user.role === 'admin'} canEdit={canEdit} time={data.time} live={live === 'live'} updatedAt={data.generatedAt}
+      {tab === 'summary' && period && rows.length > 0 && (
+        <PlantSummary rows={date ? rows.filter((r) => r.date === date) : rows} plants={data!.plants || []} byRound={isDay}
+          received={isDay ? (data!.received || []) : (data!.received || []).filter((r) => (r.period ?? data!.week) === (date || data!.week))} week={isDay ? period : date || data!.week!} day={isDay ? data!.day : date}
+          canTarget={!guest && user.role === 'admin'} canEdit={canEdit} time={data!.time} live={live === 'live'} updatedAt={data!.generatedAt}
           onPlant={(c) => { setPlant(rows.some((r) => (r.plant || '').toUpperCase() === c) ? (rows.find((r) => (r.plant || '').toUpperCase() === c)!.plant || '') : ''); setView({ kind: 'all' }); setTab('details'); }}
           onSaved={(m) => { toast(m); load(); }} />
       )}
 
 
-      {tab === 'picks' && !guest && data?.week && rows.length > 0 && (
-        <PlanPicks rows={date ? rows.filter((r) => r.date === date) : rows} label={date || (isDay ? data.day : null) || data.week!} reloadKey={data.generatedAt}
-          plantName={(c) => (data.plants || []).find((p) => p.code.toUpperCase() === c.toUpperCase())?.name || c} />
+      {tab === 'picks' && !guest && period && rows.length > 0 && (
+        <PlanPicks rows={date ? rows.filter((r) => r.date === date) : rows} label={isDay ? `${data!.day}${data!.week ? ' ' + roundLabel(data!.week) : ''}` : date || data!.week!} reloadKey={data!.generatedAt}
+          plantName={(c) => plantLabel(c)} />
       )}
 
       {!data && !err && <PageLoading label={isDay ? 'Loading the day plan…' : 'Calculating the week plan from the latest uploads…'} tiles={8} rows={8} />}
@@ -371,7 +396,7 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
                   <h2>Plan lines</h2>
                   <p className="sub" style={{ margin: 0 }}>{fmt(tableRows.length)} lines{canEdit ? ' · click Status, Comment or Vehicle to edit — everyone sees it instantly' : guest ? ' · view only — sign in to edit' : ''}</p>
                 </div>
-                {canEdit && data?.week && <button type="button" className="btn" onClick={() => setEditing('new')}>+ Add line</button>}
+                {canEdit && period && <button type="button" className="btn" onClick={() => setEditing('new')}>+ Add line</button>}
                 <div className="seg" role="group" aria-label="Columns">
                   <button className={!full ? 'on' : ''} onClick={() => setFull(false)}>Key columns</button>
                   <button className={full ? 'on' : ''} onClick={() => setFull(true)}>All columns</button>
@@ -379,7 +404,7 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
               </div>
               <div className="views" role="group" aria-label="Smart views">
                 {([['all', 'All lines', { kind: 'all' }], ['urgent', 'Urgent', { kind: 'urgent' }], ['priority', 'Priority', { kind: 'priority' }], ['carried', 'Carried over', { kind: 'carried' }],
-                  ['Ready to pull', 'Ready to pull', { kind: 'action', value: 'Ready to pull' }], ['Release QI / Block', 'Release QI / Block', { kind: 'action', value: 'Release QI / Block' }],
+                  ['Ready to pull', 'Ready to pull', { kind: 'action', value: 'Ready to pull' }], ['Not in Korber', 'Not in Korber', { kind: 'action', value: 'Not in Korber' }], ['Release QI / Block', 'Release QI / Block', { kind: 'action', value: 'Release QI / Block' }],
                   ['Partial pull', 'Partial pull', { kind: 'action', value: 'Partial pull' }], ['Follow up TN', 'Follow up TN', { kind: 'action', value: 'Follow up TN' }],
                   ['No stock', 'No stock', { kind: 'action', value: 'No stock' }],
                   ...((data?.dispatch?.items.length ? [['partdisp', 'Part dispatched', { kind: 'partdisp' }], ['Dispatched', 'Dispatched ✓', { kind: 'action', value: 'Dispatched' }]] : []) as [string, string, View][])] as [string, string, View][]).map(([k, label, v]) => (
@@ -398,16 +423,16 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
           </>}
         </>
       )}
-      {openInsight?.view && data?.week && (
-        <InsightDrawer insight={openInsight} week={data.week} canEdit={canEdit}
+      {openInsight?.view && period && (
+        <InsightDrawer insight={openInsight} week={period} canEdit={canEdit}
           rows={scoped.filter((r) => matchView(r, openInsight.view!, today))}
           onEdit={(l) => setEditing(l)}
           onShowInTable={() => { const v = openInsight.view!; setOpenInsight(null); openView(v); }}
           onReleased={(m) => { toast(m); load(); }}
           onClose={() => setOpenInsight(null)} />
       )}
-      {editing && data?.week && (
-        <EditLine line={editing === 'new' ? null : editing} week={data.week} planType={planType}
+      {editing && period && (
+        <EditLine line={editing === 'new' ? null : editing} week={editing !== 'new' && isDay ? editing.week : isDay ? data?.week || '' : period} planType={planType} day={isDay ? data?.day || '' : undefined}
           onClose={() => setEditing(null)}
           onSaved={(msg) => { toast(msg); load(); }} />
       )}

@@ -26,7 +26,7 @@ const ALL_SRCS = ['plan', ...STOCK_SRCS, 'trr'] as const;
 type Src = (typeof ALL_SRCS)[number];
 
 const SRC_LABEL: Record<Src, string> = {
-  plan: 'Weekly plan', zmmbe: 'ZMMBE', kfc: 'ZMMBE KFC', pfc: 'ZMMBE PFC', plant: 'PLANT report', trr: 'TRR',
+  plan: 'Day plan', zmmbe: 'ZMMBE', kfc: 'ZMMBE KFC', pfc: 'ZMMBE PFC', plant: 'PLANT report', trr: 'TRR',
 };
 
 // ---------------------------------------------------------------- helpers
@@ -147,7 +147,7 @@ const thisWeek = () => weekId(new Date(Date.now() + 5.5 * 3600 * 1000).toISOStri
  * adds plan.week, fills it from the dates, and moves dashboard edits to week-scoped keys ("2026-W42#SO|LI|Item").
  */
 let schemaReady = false;
-const SCHEMA_V = '19';
+const SCHEMA_V = '20';
 async function ensureSchema(env: Env) {
   if (schemaReady || !env.DB) return;
   try {
@@ -234,8 +234,31 @@ async function ensureSchema(env: Env) {
   await env.DB.prepare(`INSERT OR IGNORE INTO line_status (key, status, comment, vehicle, qi_note, updated_by, updated_at)
     SELECT DISTINCT p.week || '#' || p.key || '@' || COALESCE(p.date, ''), ls.status, ls.comment, ls.vehicle, ls.qi_note, ls.updated_by, ls.updated_at
     FROM plan p JOIN line_status ls ON ls.key = p.week || '#' || p.key WHERE COALESCE(p.plan_type, 'week') = 'week'`).run();
+  // v20: a day plan comes in rounds per plant — Pick 1, Pick 2 … The round is the plan's period ("week" column):
+  // "<day>~<plant>~<n>". Older day plans become Pick 1 of their plant; their picks and statuses move with them.
+  const RID = `p.date || '~' || COALESCE(NULLIF(upper(trim(p.plant)), ''), '-') || '~1'`;
+  const OLD = "p.plan_type = 'day' AND instr(p.week, '~') = 0";
+  await env.DB.batch([
+    ...['picks', 'pick_req'].map((t) => env.DB.prepare(`UPDATE ${t} SET week = (SELECT ${RID} FROM plan p WHERE ${OLD} AND p.week = ${t}.week AND p.key || '|' || COALESCE(p.date, '') = ${t}.line LIMIT 1)
+      WHERE EXISTS (SELECT 1 FROM plan p WHERE ${OLD} AND p.week = ${t}.week AND p.key || '|' || COALESCE(p.date, '') = ${t}.line)
+        AND NOT EXISTS (SELECT 1 FROM plan w WHERE COALESCE(w.plan_type, 'week') = 'week' AND w.week = ${t}.week AND w.key || '|' || COALESCE(w.date, '') = ${t}.line)`)),
+    env.DB.prepare(`INSERT OR IGNORE INTO line_status (key, status, comment, vehicle, qi_note, updated_by, updated_at)
+      SELECT ${RID} || '#' || p.key, ls.status, ls.comment, ls.vehicle, ls.qi_note, ls.updated_by, ls.updated_at
+      FROM plan p JOIN line_status ls ON ls.key = p.date || '#' || p.key WHERE ${OLD}`),
+    env.DB.prepare(`UPDATE plan SET week = date || '~' || COALESCE(NULLIF(upper(trim(plant)), ''), '-') || '~1' WHERE plan_type = 'day' AND instr(week, '~') = 0 AND date IS NOT NULL`),
+    env.DB.prepare("DELETE FROM config WHERE k IN ('c_counts', 'c_pick_counts', 'c_weeks') OR k LIKE 'c_weeks:%'"),
+  ]);
   await env.DB.prepare("INSERT INTO config (k, v) VALUES ('schema_v', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(SCHEMA_V).run();
   schemaReady = true;
+}
+
+/** A day plan round (Pick 1, 2 … of a plant on a day) is kept as the plan's period: "<day>~<plant>~<n>". */
+/** "W47" for a week, "2026-10-20 C064 Pick 2" for a day plan round */
+const periodLabel = (w: unknown) => { const r = parseRound(w); return r ? `${r.day} ${r.plant ?? ''} Pick ${r.round}`.replace(/\s+/g, ' ') : /W\d{2}$/.test(String(w)) ? 'W' + String(w).slice(-2) : String(w ?? ''); };
+const roundId = (day: string, plant: string | null | undefined, n: number) => `${day}~${(plant || '').trim().toUpperCase() || '-'}~${n}`;
+function parseRound(w: unknown): { day: string; plant: string | null; round: number } | null {
+  const m = /^(\d{4}-\d{2}-\d{2})~([^~]*)~(\d+)$/.exec(String(w ?? ''));
+  return m ? { day: m[1], plant: m[2] === '-' ? null : m[2], round: Number(m[3]) } : null;
 }
 
 function corsHeaders(env: Env, req: Request): Record<string, string> {
@@ -287,7 +310,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 37; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 38; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -371,7 +394,7 @@ async function diffReplace(env: Env, table: string, cols: string[], rows: Row[],
 /** A plan line is the same line when week, SO, LI, Item and date all match. */
 const lineId = (r: Row) => `${r.week}|${r.key}|${r.date ?? ''}`;
 const cleanPlant = (v: unknown) => { const t = txt(v); return t && !/^#/.test(t) ? t.toUpperCase() : null; };
-type PlanMode = 'merge' | 'replace-plant' | 'replace-week' | 'replace-day';
+type PlanMode = 'merge' | 'replace-plant' | 'replace-week' | 'replace-day' | 'replace-round';
 
 async function userPlant(env: Env, u: string) {
   return (await env.DB.prepare('SELECT plant FROM users WHERE username = ?').bind(u).first<{ plant: string | null }>())?.plant || null;
@@ -379,7 +402,9 @@ async function userPlant(env: Env, u: string) {
 
 async function handleUpload(env: Env, req: Request) {
   const s = await requireUser(env, req, 'editor');
-  const body = (await req.json()) as { src: Src; fileName?: string; sheetName?: string; rows: Row[]; week?: string; forceWeek?: boolean; mode?: PlanMode | 'add'; plant?: string; dryRun?: boolean; planType?: string; owner?: string };
+  const body = (await req.json()) as { src: Src; fileName?: string; sheetName?: string; rows: Row[]; week?: string; forceWeek?: boolean; mode?: PlanMode | 'add'; plant?: string; dryRun?: boolean; planType?: string; owner?: string;
+    /** a day plan round: the day, and Pick 1, 2 … of the plant (`plant`) on that day */
+    day?: string; round?: number };
   let stockDups = 0;
   let stockDiff: { added: number; removed: number; unchanged: number } | null = null;
   let derived: { kfc: number; pfc: number; plant: number | null; plantKept?: number } | null = null;
@@ -407,14 +432,27 @@ async function handleUpload(env: Env, req: Request) {
     if (body.forceWeek && !chosen) throw new HttpError(400, 'Pick a week (like 2026-W43) or use "Auto from dates".');
     mapped = mapPlan(body.rows, chosen || thisWeek());
     if (body.forceWeek && chosen) for (const r of mapped) r.week = chosen; // the person chose the week: every line goes there
-    const mode: PlanMode = body.mode === 'replace-week' || body.mode === 'replace-plant' || body.mode === 'replace-day' ? body.mode : 'merge';
+    // a day plan round: every line goes to that day, that plant and that Pick No; uploading it again replaces the round
+    const rDay = planType === 'day' ? normDate(body.day) : null;
+    let rid: string | null = null;
+    if (planType === 'day' && body.day !== undefined) {
+      const n = Math.floor(Number(body.round));
+      if (!rDay) throw new HttpError(400, 'Choose the day of this plan.');
+      if (!(n >= 1 && n <= 50)) throw new HttpError(400, 'Choose the Pick No (1, 2, 3 …) of this plan.');
+      const pl = cleanPlant(body.plant);
+      if (!pl) throw new HttpError(400, 'Choose the plant of this plan.');
+      rid = roundId(rDay, pl, n);
+      for (const r of mapped) { r.date = rDay; r.week = rid; r.plant = pl; }
+    }
+    const mode: PlanMode = rid ? (body.mode === 'merge' ? 'merge' : 'replace-round')
+      : body.mode === 'replace-week' || body.mode === 'replace-plant' || body.mode === 'replace-day' ? body.mode : 'merge';
     // day plan: the days in the file are replaced, the other days of the week stay
     const days = Array.from(new Set(mapped.map((r) => String(r.date ?? '')).filter(Boolean)));
     if (mode === 'replace-day' && !days.length) throw new HttpError(400, 'A day plan needs a date on its lines.');
     const plant = cleanPlant(body.plant) || (mode === 'replace-plant' ? null : await userPlant(env, s.u));
     if (mode === 'replace-plant' && !plant) throw new HttpError(400, 'Choose the plant whose lines this file replaces.');
     if (planType === 'day' && mapped.some((r) => !r.date)) throw new HttpError(400, 'A day plan needs a date on every line.');
-    for (const r of mapped) { r.plant = cleanPlant(r.plant) || plant; r.src_user = s.u; r.src_at = now(); r.owner = owner; r.plan_type = planType; }
+    for (const r of mapped) { r.plant = rid ? r.plant : cleanPlant(r.plant) || plant; r.src_user = s.u; r.src_at = now(); r.owner = owner; r.plan_type = planType; }
     // the same line twice in one file: keep the last one
     const byId = new Map<string, Row>();
     // repeats whose QTY differs: the last row wins — listed so the person can check
@@ -435,13 +473,15 @@ async function handleUpload(env: Env, req: Request) {
     const incomingIds = new Set(mapped.map(lineId));
     const updated = mapped.filter((r) => existingIds.has(lineId(r))).length;
     const added = mapped.length - updated;
-    const removedRows = existing.filter((r) => !incomingIds.has(lineId(r)) && (mode === 'replace-week' || (mode === 'replace-plant' && cleanPlant(r.plant) === plant) || (mode === 'replace-day' && days.includes(String(r.date ?? '')))));
+    const removedRows = existing.filter((r) => !incomingIds.has(lineId(r)) && (mode === 'replace-week' || mode === 'replace-round' || (mode === 'replace-plant' && cleanPlant(r.plant) === plant) || (mode === 'replace-day' && days.includes(String(r.date ?? '')))));
     const kept = existing.length - updated - removedRows.length;
-    const preview = { mode, plant, weeks, days: days.sort(), owner, planType, added, updated, removed: removedRows.length, kept, inFileDups, dupQty: dupQty.slice(0, 30), dupQtyCount: dupQty.length, lines: mapped.length };
+    const rinfo = rid ? parseRound(rid) : null;
+    const preview = { mode, plant: rinfo?.plant ?? plant, weeks, days: rid ? [rDay] : days.sort(), owner, planType, ...(rinfo ? { round: rinfo.round, rid } : {}), added, updated, removed: removedRows.length, kept, inFileDups, dupQty: dupQty.slice(0, 30), dupQtyCount: dupQty.length, lines: mapped.length };
     if (body.dryRun) return json({ ok: true, dryRun: true, ...preview });
 
     const ids = JSON.stringify(mapped.map(lineId));
     if (mode === 'replace-day') stmts.push(env.DB.prepare('DELETE FROM plan WHERE week IN (SELECT value FROM json_each(?1)) AND date IN (SELECT value FROM json_each(?2)) AND owner = ?3 AND plan_type = ?4').bind(JSON.stringify(weeks), JSON.stringify(days), owner, planType));
+    if (mode === 'replace-round') stmts.push(env.DB.prepare('DELETE FROM plan WHERE week = ?1 AND owner = ?2 AND plan_type = ?3').bind(rid, owner, planType));
     if (mode === 'replace-week') stmts.push(env.DB.prepare('DELETE FROM plan WHERE week IN (SELECT value FROM json_each(?1)) AND owner = ?2 AND plan_type = ?3').bind(JSON.stringify(weeks), owner, planType));
     if (mode === 'replace-plant') stmts.push(env.DB.prepare('DELETE FROM plan WHERE week IN (SELECT value FROM json_each(?1)) AND upper(COALESCE(plant, \'\')) = ?2 AND owner = ?3 AND plan_type = ?4').bind(JSON.stringify(weeks), plant, owner, planType));
     // merge (and the replace modes): a line of this user's plan that is already there is replaced, never duplicated
@@ -510,7 +550,7 @@ async function handleUpload(env: Env, req: Request) {
   stmts.push(env.DB.prepare('INSERT INTO uploads (src, file_name, sheet_name, row_count, uploaded_by, uploaded_at, mode) VALUES (?,?,?,?,?,?,?)')
     .bind(body.src, body.fileName || null, body.sheetName || null, mapped.length, s.u, now(), body.src !== 'plan' && body.mode === 'add' ? 'add' : null));
   stmts.push(env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)')
-    .bind(now(), s.u, 'upload', `${SRC_LABEL[body.src]}${body.mode === 'add' && body.src !== 'plan' ? ' (added to current)' : ''}${weeks.length ? ' ' + weeks.map((w) => 'W' + w.slice(-2)).join(', ') : ''}${planSummary?.plant ? ' · ' + planSummary.plant : ''}: ${planSummary ? `${planSummary.added} new, ${planSummary.updated} updated${planSummary.removed ? `, ${planSummary.removed} removed` : ''}` : mapped.length + ' rows'}${body.fileName ? ' from ' + body.fileName : ''}`));
+    .bind(now(), s.u, 'upload', `${SRC_LABEL[body.src]}${body.mode === 'add' && body.src !== 'plan' ? ' (added to current)' : ''}${weeks.length ? ' ' + weeks.map((w) => periodLabel(w)).join(', ') : ''}${planSummary?.plant && !weeks.some((w) => parseRound(w)) ? ' · ' + planSummary.plant : ''}: ${planSummary ? `${planSummary.added} new, ${planSummary.updated} updated${planSummary.removed ? `, ${planSummary.removed} removed` : ''}` : mapped.length + ' rows'}${body.fileName ? ' from ' + body.fileName : ''}`));
   await env.DB.batch(stmts); // all or nothing
 
   await broadcast(env, { type: 'data', src: body.src, by: s.u, rows: mapped.length, weeks });
@@ -531,9 +571,9 @@ async function handleUpload(env: Env, req: Request) {
  * The line_status key of a plan line: a day plan line is "<day>#SO|LI|Item"; a week plan line is
  * "<week>#SO|LI|Item@<date>", so the same SO / LI / Item on two days of one week keeps its own status.
  */
-const SK = (a: string) => `(CASE WHEN ${a}.plan_type = 'day' THEN ${a}.date || '#' || ${a}.key ELSE ${a}.week || '#' || ${a}.key || '@' || COALESCE(${a}.date, '') END)`;
+const SK = (a: string) => `(CASE WHEN ${a}.plan_type = 'day' AND instr(${a}.week, '~') > 0 THEN ${a}.week || '#' || ${a}.key WHEN ${a}.plan_type = 'day' THEN ${a}.date || '#' || ${a}.key ELSE ${a}.week || '#' || ${a}.key || '@' || COALESCE(${a}.date, '') END)`;
 const statusKey = (r: { plan_type?: unknown; week?: unknown; date?: unknown; key?: unknown }) =>
-  r.plan_type === 'day' ? `${r.date}#${r.key}` : `${r.week}#${r.key}@${r.date ?? ''}`;
+  r.plan_type === 'day' ? (parseRound(r.week) ? `${r.week}#${r.key}` : `${r.date}#${r.key}`) : `${r.week}#${r.key}@${r.date ?? ''}`;
 
 const PULL_PLAN_SQL = `
 WITH s AS (
@@ -552,10 +592,10 @@ WITH s AS (
     GROUP_CONCAT(DISTINCT CASE WHEN src='zmmbe' THEN plant END) AS stock_plant,
     GROUP_CONCAT(DISTINCT CASE WHEN src='zmmbe' THEN sloc END)  AS stock_sloc,
     GROUP_CONCAT(DISTINCT CASE WHEN src='plant' THEN plant END) AS at_plant
-  FROM stock WHERE key IN (SELECT key FROM plan WHERE week = ?1) GROUP BY key
+  FROM stock WHERE key IN (SELECT key FROM plan WHERE (?1 IS NULL OR week = ?1) AND (?5 IS NULL OR date = ?5)) GROUP BY key
 ),
-t AS (SELECT key, SUM(qty) AS tn_qty, GROUP_CONCAT(DISTINCT tn) AS tn_number FROM trr WHERE key IN (SELECT key FROM plan WHERE week = ?1) GROUP BY key),
-d AS (SELECT key, COUNT(*) AS dup FROM plan WHERE week = ?1 AND (?3 IS NULL OR owner = ?3) AND plan_type = ?4 AND (?5 IS NULL OR date = ?5) GROUP BY key)
+t AS (SELECT key, SUM(qty) AS tn_qty, GROUP_CONCAT(DISTINCT tn) AS tn_number FROM trr WHERE key IN (SELECT key FROM plan WHERE (?1 IS NULL OR week = ?1) AND (?5 IS NULL OR date = ?5)) GROUP BY key),
+d AS (SELECT week, key, COUNT(*) AS dup FROM plan WHERE (?1 IS NULL OR week = ?1) AND (?3 IS NULL OR owner = ?3) AND plan_type = ?4 AND (?5 IS NULL OR date = ?5) GROUP BY week, key)
 SELECT p.rowid AS id, p.row_no, p.key, p.week, p.owner, p.plan_type, p.src_user, p.src_at, p.so, p.li, p.item, p.date, p.qty, p.plant, p.remarks,
   COALESCE(s.ur,0) AS ur, COALESCE(s.qi,0) AS qi, COALESCE(s.block,0) AS block, COALESCE(s.assigned,0) AS assigned,
   p.qty - COALESCE(s.assigned,0) AS variance,
@@ -571,10 +611,10 @@ SELECT p.rowid AS id, p.row_no, p.key, p.week, p.owner, p.plan_type, p.src_user,
 FROM plan p
 LEFT JOIN s  ON s.key = p.key
 LEFT JOIN t  ON t.key = p.key
-LEFT JOIN d  ON d.key = p.key
+LEFT JOIN d  ON d.key = p.key AND d.week = p.week
 LEFT JOIN line_status ls ON ls.key = ${SK('p')}
-WHERE p.week = ?1 AND (?3 IS NULL OR p.owner = ?3) AND p.plan_type = ?4 AND (?5 IS NULL OR p.date = ?5)
-ORDER BY p.date, p.row_no`;
+WHERE (?1 IS NULL OR p.week = ?1) AND (?3 IS NULL OR p.owner = ?3) AND p.plan_type = ?4 AND (?5 IS NULL OR p.date = ?5)
+ORDER BY p.date, p.week, p.row_no`;
 
 const WEEKS_SQL = `
 SELECT p.week, COUNT(*) AS lines, MIN(p.date) AS start, MAX(p.date) AS end, SUM(p.qty) AS qty,
@@ -634,6 +674,95 @@ async function cached<T>(env: Env, k: string, make: () => Promise<T>): Promise<T
   return v;
 }
 
+/**
+ * Backup / Restore (admin). Done table by table in pages, so a big database never has to fit in one request:
+ *   GET  /api/backup                         → the tables and their row counts
+ *   GET  /api/backup/rows?table=&after=&limit= → { cols, rows (arrays), last } by rowid
+ *   POST /api/restore/begin {tables}          → empties those tables (the backup replaces them)
+ *   POST /api/restore/rows {table, cols, rows} → adds rows (columns the table no longer has are left out)
+ *   POST /api/restore/end {file}              → caches cleared, every open page reloads
+ * Never in a backup: the users and their passwords, the login key and the database link (config).
+ */
+const BACKUP_SKIP = new Set(['users', 'sqlite_sequence', '_cf_METADATA', '_cf_KV']);
+const CONFIG_SECRET = "k IN ('jwt_secret', 'database_url', 'schema_v', 'rev') OR k LIKE 'c\\_%' ESCAPE '\\'";
+async function backupTables(env: Env) {
+  const t = (await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\' ORDER BY name").all<{ name: string }>()).results;
+  return t.map((x) => x.name).filter((n) => !BACKUP_SKIP.has(n) && /^[a-z_][a-z0-9_]*$/i.test(n));
+}
+async function tableCols(env: Env, table: string) {
+  return (await env.DB.prepare(`SELECT name FROM pragma_table_info(?)`).bind(table).all<{ name: string }>()).results.map((c) => c.name);
+}
+async function handleBackup(env: Env, req: Request, p: string) {
+  const s = await requireUser(env, req, 'admin');
+  const url = new URL(req.url);
+  const tables = await backupTables(env);
+  const cfgWhere = (t: string) => (t === 'config' ? ` WHERE NOT (${CONFIG_SECRET})` : '');
+  if (p === '/api/backup' && req.method === 'GET') {
+    const counts: { name: string; rows: number }[] = [];
+    for (const t of tables) counts.push({ name: t, rows: Number((await env.DB.prepare(`SELECT COUNT(*) n FROM ${t}${cfgWhere(t)}`).first<{ n: number }>())?.n ?? 0) });
+    return json({ app: 'mas-weekly-plan-tracker', api: API_VERSION, schema: SCHEMA_V, at: now(), by: s.u, tables: counts });
+  }
+  if (p === '/api/backup/rows' && req.method === 'GET') {
+    const t = url.searchParams.get('table') || '';
+    if (!tables.includes(t)) throw new HttpError(400, 'Unknown table.');
+    const after = Math.max(0, Number(url.searchParams.get('after')) || 0);
+    const limit = Math.min(5000, Math.max(100, Number(url.searchParams.get('limit')) || 2000));
+    const cols = await tableCols(env, t);
+    const rows = (await env.DB.prepare(`SELECT rowid AS _rid, * FROM ${t} WHERE rowid > ?1${t === 'config' ? ` AND NOT (${CONFIG_SECRET})` : ''} ORDER BY rowid LIMIT ?2`).bind(after, limit).all<Row>()).results;
+    return json({ table: t, cols, rows: rows.map((r) => cols.map((c) => r[c] ?? null)), last: rows.length ? Number(rows[rows.length - 1]._rid) : after, done: rows.length < limit });
+  }
+  if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed.');
+  const b = (await req.json()) as { tables?: string[]; table?: string; cols?: string[]; rows?: unknown[][]; file?: string };
+  if (p === '/api/restore/begin') {
+    const list = (b.tables || []).filter((t) => tables.includes(t));
+    if (!list.length) throw new HttpError(400, 'The file has no tables of this system. Is it a MAS Weekly Plan Tracker backup?');
+    await env.DB.batch(list.map((t) => env.DB.prepare(`DELETE FROM ${t}${cfgWhere(t)}`)));
+    await logActivity(env, s.u, 'restore', `Restore started: ${list.length} tables emptied (${list.join(', ')})`);
+    return json({ ok: true, tables: list });
+  }
+  if (p === '/api/restore/rows') {
+    const t = String(b.table || '');
+    if (!tables.includes(t)) throw new HttpError(400, `Unknown table ${t}.`);
+    const have = new Set(await tableCols(env, t));
+    const cols = (b.cols || []).map(String);
+    const keep = cols.map((c, i) => [c, i] as const).filter(([c]) => have.has(c) && /^[a-z_][a-z0-9_]*$/i.test(c));
+    if (!keep.length) throw new HttpError(400, `No columns of ${t} in the file.`);
+    let rows = (b.rows || []).map((r) => Object.fromEntries(keep.map(([c, i]) => [c, (r as unknown[])[i] ?? null])) as Row);
+    if (t === 'config') rows = rows.filter((r) => !/^(jwt_secret|database_url|schema_v|rev)$|^c_/.test(String(r.k ?? '')));
+    // INSERT OR REPLACE: a row sent twice (a retried page) or a config key the system wrote meanwhile is not an error
+    const names = keep.map(([c]) => c);
+    const sel = names.map((c) => `json_extract(value, '$.${c}')`).join(', ');
+    const chunk = t === 'korber' ? 150 : 400;
+    const stmts: D1PreparedStatement[] = [];
+    for (let i = 0; i < rows.length; i += chunk) stmts.push(env.DB.prepare(`INSERT OR REPLACE INTO ${t} (${names.join(', ')}) SELECT ${sel} FROM json_each(?)`).bind(JSON.stringify(rows.slice(i, i + chunk))));
+    for (let i = 0; i < stmts.length; i += 40) await env.DB.batch(stmts.slice(i, i + 40));
+    return json({ ok: true, table: t, rows: rows.length });
+  }
+  if (p === '/api/restore/end') {
+    await env.DB.prepare("DELETE FROM config WHERE k LIKE 'c\\_%' ESCAPE '\\'").run();
+    await logActivity(env, s.u, 'restore', `Restored from backup ${String(b.file || '').slice(0, 120)}`);
+    await broadcast(env, { type: 'data', src: 'clear', by: s.u, rows: 0, weeks: [] });
+    return json({ ok: true });
+  }
+  throw new HttpError(404, 'Not found.');
+}
+
+/** GET /api/rounds?day=yyyy-mm-dd[&plant=] — the day plan rounds (Pick 1, 2 …) already uploaded for that day, per plant. */
+async function handleRounds(env: Env, req: Request) {
+  const { owner } = await viewScope(env, req);
+  const sp = new URL(req.url).searchParams;
+  const day = normDate(sp.get('day'));
+  if (!day) throw new HttpError(400, 'Choose a day.');
+  const plant = cleanPlant(sp.get('plant'));
+  const rows = (await env.DB.prepare(`SELECT week AS id, MAX(plant) AS plant, COUNT(*) AS lines, ROUND(SUM(qty), 3) AS qty, MAX(src_at) AS src_at, MAX(src_user) AS src_user
+    FROM plan WHERE plan_type = 'day' AND date = ?1 AND (?2 IS NULL OR owner = ?2) AND instr(week, '~') > 0 GROUP BY week`).bind(day, owner).all<Row>()).results
+    .map((r) => ({ ...r, round: parseRound(r.id)?.round ?? 1 }) as Row & { round: number })
+    .filter((r) => !plant || String(r.plant ?? '').toUpperCase() === plant)
+    .sort((a, b) => String(a.plant ?? '').localeCompare(String(b.plant ?? '')) || a.round - b.round);
+  const next = plant ? Math.max(0, ...rows.map((r) => r.round)) + 1 : 1;
+  return json({ day, plant, rounds: rows, next });
+}
+
 async function handlePullPlan(env: Env, req: Request) {
   // public: the dashboard can be viewed without signing in (uploads and edits still need a login)
   const { owner } = await viewScope(env, req);
@@ -645,28 +774,57 @@ async function handlePullPlan(env: Env, req: Request) {
   let day: string | null = null;
   let week: string | null;
   let prevWeek: string | null = null;
+  let rounds: (Row & { round: number })[] = [];
   if (ptype === 'day') {
     days = await cached(env, `c_weeks:${owner ?? '*'}:days`, async () => (await env.DB.prepare(DAYS_SQL).bind(owner).all<Row>()).results);
     const askedDay = sp.get('day');
     const dRow = (askedDay && days.find((d) => d.day === askedDay)) || days.find((d) => String(d.day) <= colomboDay()) || days[days.length - 1];
     day = dRow ? String(dRow.day) : null;
-    week = dRow ? String(dRow.week) : null;
+    // the rounds of the day (Pick 1, 2 … per plant); ?round=<id> shows one of them, none = the whole day
+    if (day) rounds = (await env.DB.prepare(`SELECT p.week AS id, MAX(p.plant) AS plant, COUNT(*) AS lines, SUM(p.qty) AS qty, MAX(p.src_at) AS src_at, MAX(p.src_user) AS src_user,
+        SUM(CASE WHEN lower(COALESCE(ls.status, '')) LIKE '%done%' THEN 1 ELSE 0 END) AS done
+      FROM plan p LEFT JOIN line_status ls ON ls.key = ${SK('p')} WHERE p.plan_type = 'day' AND p.date = ?1 AND (?2 IS NULL OR p.owner = ?2) GROUP BY p.week`).bind(day, owner).all<Row>()).results
+      .map((r) => ({ ...r, round: parseRound(r.id)?.round ?? 1 }) as Row & { round: number }).sort((a, b) => String(a.plant ?? '').localeCompare(String(b.plant ?? '')) || a.round - b.round);
+    const askedRound = sp.get('round');
+    week = askedRound && rounds.some((r) => r.id === askedRound) ? askedRound : null;
   } else {
     const asked = sp.get('week');
     week = asked && weeks.some((w) => w.week === asked) ? asked : weeks[0]?.week ?? null; // default: most recent week
     prevWeek = weeks[weeks.findIndex((w) => w.week === week) + 1]?.week ?? null; // the week before it (weeks are newest first)
   }
   const [rows, uploads] = await env.DB.batch([
-    env.DB.prepare(PULL_PLAN_SQL).bind(week, prevWeek, owner, ptype, day),
+    // a day plan with no day yet: nothing (week = null would mean every round)
+    env.DB.prepare(PULL_PLAN_SQL).bind(week, prevWeek, owner, ptype, ptype === 'day' ? day ?? '~none~' : day),
     env.DB.prepare(`SELECT u.src, u.file_name, u.sheet_name, u.row_count, u.uploaded_by, u.uploaded_at FROM uploads u
                     JOIN (SELECT src, MAX(id) id FROM uploads GROUP BY src) m ON m.id = u.id`),
   ]);
   const counts = { results: await cached(env, 'c_counts', async () => (await env.DB.prepare(`SELECT 'plan' src, COUNT(*) n FROM plan UNION ALL SELECT src, COUNT(*) FROM stock GROUP BY src UNION ALL SELECT 'trr', COUNT(*) FROM trr`).all()).results) };
   const plan = rows.results as Row[];
+  // Korber: what is on the shelf for each line — rolls of its ZINR lots (Item + Lot Number = Vendor Batch, same invoice) or
+  // its Shade Report barcodes, less what was picked from them. "Ready to pull" needs this too (null = no Korber uploaded).
+  try {
+    const keys = Array.from(new Set(plan.map((r) => String(r.key))));
+    if (keys.length && (await env.DB.prepare('SELECT 1 FROM korber LIMIT 1').first())) {
+      const kr = (await env.DB.prepare(`WITH lk AS (SELECT DISTINCT value AS key, substr(value, 1, instr(value, '|') - 1) AS so,
+          substr(substr(value, instr(value, '|') + 1), 1, instr(substr(value, instr(value, '|') + 1), '|') - 1) AS li,
+          substr(substr(value, instr(value, '|') + 1), instr(substr(value, instr(value, '|') + 1), '|') + 1) AS item FROM json_each(?1)),
+        zl AS (SELECT lk.key, lk.item, z.lot, upper(z.vendor_batch) vb, upper(z.invoice) inv FROM lk JOIN zinr z ON z.so = lk.so AND z.li = lk.li AND z.material = lk.item),
+        kp AS (SELECT zl.key, k.pallet, k.qty FROM zl JOIN korber k ON k.item = zl.item AND upper(k.lot) = zl.vb AND (zl.inv IS NULL OR k.invoice IS NULL OR upper(k.invoice) = zl.inv)
+          UNION SELECT zl.key, k.pallet, k.qty FROM zl JOIN zcoment c ON c.lot = zl.lot JOIN korber k ON k.pallet = c.barcode),
+        pk AS (SELECT pallet, SUM(qty) q, MAX(roll_qty) base FROM picks WHERE cancelled_at IS NULL AND pallet IN (SELECT pallet FROM kp) GROUP BY pallet)
+        SELECT kp.key, ROUND(SUM(MAX(0, COALESCE(pk.base, kp.qty) - COALESCE(pk.q, 0))), 3) AS avail,
+          SUM(CASE WHEN COALESCE(pk.base, kp.qty) - COALESCE(pk.q, 0) > 0.0005 THEN 1 ELSE 0 END) AS rolls
+        FROM kp LEFT JOIN pk ON pk.pallet = kp.pallet GROUP BY kp.key`).bind(JSON.stringify(keys)).all<{ key: string; avail: number; rolls: number }>()).results;
+      const by = new Map(kr.map((x) => [x.key, x]));
+      for (const r of plan) { const x = by.get(String(r.key)); r.korber_avail = x ? Number(x.avail) : 0; r.korber_rolls = x ? Number(x.rolls) : 0; }
+    }
+  } catch { /* pick tables not there yet */ }
   // QI / Block released to UR by hand: counts until a newer ZMMBE upload (which then shows the stock as UR itself)
   // stock "as of": the latest FULL ZMMBE upload (a part file added to it does not refresh the other rows)
   const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND COALESCE(mode, '') <> 'add'").first<{ at: string | null }>())?.at ?? undefined;
-  const rels = week ? (await env.DB.prepare('SELECT key, qi, block, by_user, at FROM stock_release WHERE week = ?').bind(week).all<Row>()).results : [];
+  // the periods on screen: the week, the round, or every round of the day
+  const periods = ptype === 'day' ? (week ? [week] : rounds.map((r) => String(r.id))) : week ? [week] : [];
+  const rels = periods.length ? (await env.DB.prepare('SELECT key, qi, block, by_user, at FROM stock_release WHERE week IN (SELECT value FROM json_each(?1))').bind(JSON.stringify(periods)).all<Row>()).results : [];
   const releases: Row[] = [];
   for (const rl of rels) {
     const active = !zAt || String(rl.at) > zAt;
@@ -682,7 +840,9 @@ async function handlePullPlan(env: Env, req: Request) {
   const assignOf = (w: string | null) => assignAll.filter((a) => a.week === w);
   const plants = (await env.DB.prepare('SELECT code, name, responsible, target, sort FROM plant_info ORDER BY sort, code').all<Row>()).results;
   // received times typed for the week, and for each day of it (day plans)
-  const received = week ? (await env.DB.prepare('SELECT week AS period, code, received FROM plant_received WHERE week = ?1 OR week IN (SELECT DISTINCT date FROM plan WHERE week = ?1)').bind(week).all<Row>()).results : [];
+  const received = ptype === 'day'
+    ? (periods.length ? (await env.DB.prepare('SELECT week AS period, code, received FROM plant_received WHERE week IN (SELECT value FROM json_each(?1)) OR week = ?2').bind(JSON.stringify(periods), day).all<Row>()).results : [])
+    : week ? (await env.DB.prepare('SELECT week AS period, code, received FROM plant_received WHERE week = ?1 OR week IN (SELECT DISTINCT date FROM plan WHERE week = ?1)').bind(week).all<Row>()).results : [];
   // dispatch, all weeks at once: [week, item] totals
   // qty_after = dispatch first uploaded after the latest ZMMBE: that stock is still in ZMMBE's UR, so it comes off UR here.
   // Dispatch before that ZMMBE is already gone from its UR and is not taken off again.
@@ -707,7 +867,7 @@ async function handlePullPlan(env: Env, req: Request) {
       MAX(COALESCE(r.closed, 0)) closed, MAX(p.at) last_at, COUNT(DISTINCT p.req_id) reqs FROM picks p LEFT JOIN pick_req r ON r.id = p.req_id WHERE p.cancelled_at IS NULL GROUP BY p.week, p.line`).bind(zAt ?? null).all<{ week: string; line: string; qty: number; qty_after: number; rolls: number; closed: number; last_at: string | null; reqs: number }>()).results;
   } catch { /* pick tables not created yet */ }
   const picksOf = (w: string | null) => pickAll.filter((x) => x.week === w);
-  applyPicks(plan, picksOf(week));
+  applyPicks(plan, ptype === 'day' ? pickAll.filter((x) => periods.includes(x.week)) : picksOf(week));
   // UR is stock of the SO / LI / Item, not of one plan line: every pick after the latest ZMMBE takes from it —
   // also picks of its other lines (another date, another week). The full picked QTY counts (a full roll over the plan is gone too).
   const takenAfter = new Map<string, number>();
@@ -741,7 +901,7 @@ async function handlePullPlan(env: Env, req: Request) {
   let rev: string | null = null;
   try { rev = (await env.DB.prepare("SELECT v FROM config WHERE k = 'rev'").first<{ v: string }>())?.v ?? null; } catch { /* none yet */ }
   const st = await getSettings(env);
-  return json({ type: ptype, day, days, week, prevWeek, owner, weeks, rev, time: { soliPerHour: st.soliPerHour, lateGraceMin: st.lateGraceMin, defaultTarget: st.defaultTarget }, rows: plan, dispatch, stockAt: zAt ?? null, releases, plants, received, uploads: uploads.results, counts: counts.results, generatedAt: now() });
+  return json({ type: ptype, day, days, rounds, week, prevWeek, owner, weeks, rev, time: { soliPerHour: st.soliPerHour, lateGraceMin: st.lateGraceMin, defaultTarget: st.defaultTarget }, rows: plan, dispatch, stockAt: zAt ?? null, releases, plants, received, uploads: uploads.results, counts: counts.results, generatedAt: now() });
 }
 
 /**
@@ -750,10 +910,11 @@ async function handlePullPlan(env: Env, req: Request) {
  * Whatever is left after every line of the item is full is reported as over-dispatched.
  */
 /** Picked QTY counts as dispatched on its plan line; picks after the latest ZMMBE also come off UR left. */
-function applyPicks(plan: Row[], picks: { line: string; qty: number; qty_after: number; rolls: number; closed?: number; last_at?: string | null; reqs?: number }[]) {
-  const byLine = new Map(picks.map((x) => [x.line, x]));
+function applyPicks(plan: Row[], picks: { week?: string; line: string; qty: number; qty_after: number; rolls: number; closed?: number; last_at?: string | null; reqs?: number }[]) {
+  // a pick belongs to its plan line: the period (week / day round) and SO / LI / Item / date
+  const byLine = new Map(picks.map((x) => [`${x.week ?? ''}\u0001${x.line}`, x]));
   for (const r of plan) {
-    const x = byLine.get(`${r.key}|${r.date ?? ''}`);
+    const x = byLine.get(`${r.week ?? ''}\u0001${r.key}|${r.date ?? ''}`);
     r.picked = x ? r3(Number(x.qty)) : 0;
     r.picked_rolls = x ? Number(x.rolls) : 0;
     r.last_pick_at = x?.last_at ?? null;
@@ -847,7 +1008,7 @@ async function handleReceived(env: Env, req: Request) {
   const b = (await req.json()) as { week?: string; code?: string; received?: string | null };
   const code = String(b.code || '').trim().toUpperCase();
   // period: a week (2026-W47) or, for a day plan, the day (2026-11-17)
-  if (!b.week || !code || !/^(\d{4}-W\d{2}|\d{4}-\d{2}-\d{2})$/.test(b.week)) throw new HttpError(400, 'Choose the week or day and plant.');
+  if (!b.week || !code || !(/^(\d{4}-W\d{2}|\d{4}-\d{2}-\d{2})$/.test(b.week) || parseRound(b.week))) throw new HttpError(400, 'Choose the week or day and plant.');
   const v = String(b.received ?? '').trim();
   if (!v) await env.DB.prepare('DELETE FROM plant_received WHERE week = ? AND code = ?').bind(b.week, code).run();
   else await env.DB.prepare('INSERT OR REPLACE INTO plant_received (week, code, received, by_user, at) VALUES (?,?,?,?,?)').bind(b.week, code, v.slice(0, 20), s.u, now()).run();
@@ -1925,9 +2086,10 @@ async function handleStatus(env: Env, req: Request) {
   const b = (await req.json()) as { key: string; week?: string; date?: string | null; status?: string | null; comment?: string | null; vehicle?: string | null; qi_note?: string | null };
   if (!b.key) throw new HttpError(400, 'Missing line key.');
   // the plan the status belongs to: a week (2026-W47) or, for a day plan, the day (2026-11-17)
-  const week = b.week && /^(\d{4}-W\d{2}|\d{4}-\d{2}-\d{2})$/.test(b.week) ? b.week
+  const week = b.week && (/^(\d{4}-W\d{2}|\d{4}-\d{2}-\d{2})$/.test(b.week) || parseRound(b.week)) ? b.week
     : (await env.DB.prepare('SELECT MAX(week) w FROM plan WHERE key = ?').bind(b.key).first<{ w: string | null }>())?.w || thisWeek();
-  const isDay = /^\d{4}-\d{2}-\d{2}$/.test(week);
+  const rnd = parseRound(week);
+  const isDay = /^\d{4}-\d{2}-\d{2}$/.test(week) || !!rnd;
   // a week plan line is one date of the week ("date" in the body); without it (an older page) every line of that SO / LI / Item in the week
   let sKeys = [`${week}#${b.key}`];
   if (!isDay) {
@@ -1940,14 +2102,14 @@ async function handleStatus(env: Env, req: Request) {
   const cur = await env.DB.prepare('SELECT status, comment, vehicle, qi_note FROM line_status WHERE key = ?').bind(sKeys[0]).first<Row>();
   const next: Row = { status: null, comment: null, vehicle: null, qi_note: null, ...(cur || {}) };
   for (const f of fields) next[f] = txt(b[f]);
-  const date = isDay ? week : 'date' in b ? normDate(b.date) : undefined;
+  const date = rnd ? rnd.day : isDay ? week : 'date' in b ? normDate(b.date) : undefined;
   await env.DB.batch([
     ...sKeys.map((k) => env.DB.prepare(`INSERT INTO line_status (key, status, comment, vehicle, qi_note, updated_by, updated_at) VALUES (?,?,?,?,?,?,?)
                     ON CONFLICT(key) DO UPDATE SET status=excluded.status, comment=excluded.comment, vehicle=excluded.vehicle,
                     qi_note=excluded.qi_note, updated_by=excluded.updated_by, updated_at=excluded.updated_at`)
       .bind(k, next.status, next.comment, next.vehicle, next.qi_note, s.u, now())),
     env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)')
-      .bind(now(), s.u, 'edit', `${week.includes('W') ? 'W' + week.slice(-2) : week} ${b.key.replace(/\|/g, ' / ')}${!isDay && date ? ' ' + date : ''}: ${fields.map((f) => `${f} → ${next[f] ?? '(blank)'}`).join(', ')}`),
+      .bind(now(), s.u, 'edit', `${rnd ? `${rnd.day} ${rnd.plant ?? ''} Pick ${rnd.round}` : week.includes('W') ? 'W' + week.slice(-2) : week} ${b.key.replace(/\|/g, ' / ')}${!isDay && date ? ' ' + date : ''}: ${fields.map((f) => `${f} → ${next[f] ?? '(blank)'}`).join(', ')}`),
   ]);
   // period = the week or the day; date = the line's date (undefined: every line of the key in that week)
   const line = { key: b.key, period: week, ...(date !== undefined ? { date } : {}), status: next.status, comment: next.comment, vehicle: next.vehicle, qi_note: next.qi_note, updated_by: s.u, updated_at: now() };
@@ -1960,28 +2122,33 @@ async function handlePlanLine(env: Env, req: Request, idPart: string) {
   const s = await requireUser(env, req, 'editor');
   if (req.method === 'POST') {
     const b = (await req.json()) as Row;
-    const so = normId(b.so), li = normId(b.li), item = normId(b.item), date = normDate(b.date);
+    const so = normId(b.so), li = normId(b.li), item = normId(b.item);
+    let date = normDate(b.date);
+    { const r0 = b.planType === 'day' ? parseRound(b.week) : null; if (r0) date = r0.day; } // a round's lines are on its day
     if (!/^[A-Za-z]{0,4}\d/.test(so) || !li || !item) throw new HttpError(400, 'SO (e.g. 1001234567 or E101697207), LI and Item Code are required.');
     if (!(num(b.qty) > 0)) throw new HttpError(400, 'QTY must be more than 0.');
-    const week = typeof b.week === 'string' && /^\d{4}-W\d{2}$/.test(b.week) ? b.week : weekId(date) || thisWeek();
-    const key = lineKey(so, li, item);
     const planType = b.planType === 'day' ? 'day' : 'week';
+    // a day plan line goes to a round (Pick No of a plant): the round on screen, or Pick 1 of its plant on its day
+    const rnd = planType === 'day' ? parseRound(b.week) : null;
+    const week = rnd ? String(b.week) : planType === 'day' && date ? roundId(date, cleanPlant(b.plant) || (await userPlant(env, s.u)), 1)
+      : typeof b.week === 'string' && /^\d{4}-W\d{2}$/.test(b.week) ? b.week : weekId(date) || thisWeek();
+    const key = lineKey(so, li, item);
     if (planType === 'day' && !date) throw new HttpError(400, 'A day plan line needs a date.');
     const dupe = await env.DB.prepare('SELECT rowid FROM plan WHERE week = ? AND key = ? AND COALESCE(date, \'\') = ? AND owner = ? AND plan_type = ?').bind(week, key, date ?? '', s.u, planType).first();
     if (dupe) throw new HttpError(409, 'That line (same SO, LI, Item and date) is already in this week. Edit it instead.');
     const r = await env.DB.prepare(`INSERT INTO plan (key, so, li, item, date, week, qty, plant, remarks, row_no, src_user, src_at, owner, plan_type)
       VALUES (?,?,?,?,?,?,?,?,?, (SELECT COALESCE(MAX(row_no), 0) + 1 FROM plan WHERE week = ?), ?, ?, ?, ?)`)
       .bind(key, so, li, item, date, week, num(b.qty), cleanPlant(b.plant) || (await userPlant(env, s.u)), txt(b.remarks), week, s.u, now(), s.u, planType).run();
-    await logActivity(env, s.u, 'line', `Added W${week.slice(-2)} ${so} / ${li} / ${item}: ${num(b.qty)}`);
+    await logActivity(env, s.u, 'line', `Added ${periodLabel(week)} ${so} / ${li} / ${item}: ${num(b.qty)}`);
     await broadcast(env, { type: 'data', src: 'plan', by: s.u, rows: 1, weeks: [week] });
-    return json({ ok: true, id: r.meta.last_row_id });
+    return json({ ok: true, id: r.meta.last_row_id, week });
   }
   const id = Number(idPart);
   if (!Number.isInteger(id) || id <= 0) throw new HttpError(400, 'Unknown line.');
   const cur = await env.DB.prepare('SELECT rowid AS id, * FROM plan WHERE rowid = ?').bind(id).first<Row>();
   if (!cur) throw new HttpError(404, 'That line is no longer in the plan. Refresh the page.');
   if (!isBoss(s) && cur.owner && cur.owner !== s.u) throw new HttpError(403, `That line is in ${cur.owner}'s plan.`);
-  const label = `W${String(cur.week).slice(-2)} ${cur.so} / ${cur.li} / ${cur.item}`;
+  const label = `${periodLabel(cur.week)} ${cur.so} / ${cur.li} / ${cur.item}`;
   if (req.method === 'DELETE') {
     await env.DB.batch([
       env.DB.prepare('DELETE FROM plan WHERE rowid = ?').bind(id),
@@ -2097,10 +2264,11 @@ async function handleClear(env: Env, req: Request, src: string) {
   if (!ALL_SRCS.includes(src as Src)) throw new HttpError(400, 'Unknown report type.');
   const wk = new URL(req.url).searchParams.get('week');
   if (src === 'plan' && wk) {
-    if (!/^\d{4}-W\d{2}$/.test(wk)) throw new HttpError(400, 'Week must look like 2026-W42.');
+    // a week (2026-W42) or a day plan round (2026-10-20~C064~2)
+    if (!/^\d{4}-W\d{2}$/.test(wk) && !parseRound(wk)) throw new HttpError(400, 'Week must look like 2026-W42.');
     await env.DB.batch([
       env.DB.prepare('DELETE FROM plan WHERE week = ?').bind(wk),
-      env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'clear', `Deleted weekly plan ${wk}`),
+      env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'clear', `Deleted ${parseRound(wk) ? 'day plan ' + periodLabel(wk) : 'weekly plan ' + wk}`),
     ]);
     await broadcast(env, { type: 'data', src, by: s.u, rows: 0, weeks: [wk] });
     return json({ ok: true });
@@ -2145,7 +2313,7 @@ async function handleAdminPlans(env: Env, req: Request) {
   if (!b.owner || !b.week) throw new HttpError(400, 'Choose the plan.');
   const where = `owner = ?1 AND plan_type = ?2 AND week = ?3${type === 'day' && b.day ? ' AND date = ?4' : ''}`;
   const binds = [b.owner, type, b.week, ...(type === 'day' && b.day ? [b.day] : [])];
-  const label = `${type === 'day' ? 'day plan ' + (b.day || b.week) : 'week plan ' + b.week} of ${b.owner}`;
+  const label = `${type === 'day' ? (parseRound(b.week) ? 'day plan ' + periodLabel(b.week) : 'day plan ' + (b.day || b.week)) : 'week plan ' + b.week} of ${b.owner}`;
   if (b.action === 'reassign') {
     const to = String(b.to || '').trim().toLowerCase();
     if (!(await env.DB.prepare('SELECT 1 FROM users WHERE username = ?').bind(to).first())) throw new HttpError(400, `There is no user "${to}".`);
@@ -2276,6 +2444,8 @@ export default {
       }
       else if (p === '/api/plants/received') res = await handleReceived(env, req);
       else if (p === '/api/pullplan' && req.method === 'GET') res = await handlePullPlan(env, req);
+      else if (p === '/api/rounds' && req.method === 'GET') res = await handleRounds(env, req);
+      else if (p === '/api/backup' || p.startsWith('/api/backup/') || p.startsWith('/api/restore/')) res = await handleBackup(env, req, p);
       else if (p === '/api/upload' && req.method === 'POST') res = await handleUpload(env, req);
       else if (p === '/api/status' && req.method === 'PATCH') res = await handleStatus(env, req);
       else if (p === '/api/activity') {

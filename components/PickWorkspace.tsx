@@ -14,8 +14,8 @@ type LineP = Line & { picked?: number; picked_rolls?: number };
 const today = () => new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
 
 /** Why a plan line is still pending, in the order the work is done. */
-const PENDING_ORDER = ['Part picked', 'Ready to pull', 'Partial pull', 'Release QI / Block', 'Follow up TN', 'No stock'];
-const PENDING_TONE: Record<string, string> = { 'Part picked': 'accent', 'Ready to pull': 'ok', 'Partial pull': 'info', 'Release QI / Block': 'warn', 'Follow up TN': 'warn', 'No stock': 'bad' };
+const PENDING_ORDER = ['Part picked', 'Ready to pull', 'Not in Korber', 'Partial pull', 'Release QI / Block', 'Follow up TN', 'No stock'];
+const PENDING_TONE: Record<string, string> = { 'Part picked': 'accent', 'Ready to pull': 'ok', 'Not in Korber': 'warn', 'Partial pull': 'info', 'Release QI / Block': 'warn', 'Follow up TN': 'warn', 'No stock': 'bad' };
 function pendingWhy(l: LineP): string {
   if ((l.picked ?? 0) > 0) return 'Part picked';
   const a = action(l);
@@ -23,7 +23,7 @@ function pendingWhy(l: LineP): string {
 }
 
 /** Pick tab of the Dispatch page: the three pick reports, Ready-to-pull lines with Pick, and the pick history / Packing List. */
-export default function PickWorkspace({ week, rows, canEdit, toast, reload }: { week: string; rows: LineP[]; canEdit: boolean; toast: (m: string) => void; reload: () => void }) {
+export default function PickWorkspace({ week, rows, canEdit, toast, reload, label }: { week: string; rows: LineP[]; canEdit: boolean; toast: (m: string) => void; reload: () => void; /** what is on screen, e.g. "20 Oct · ASIALINE Pick 2" */ label?: string }) {
   const [status, setStatus] = useState<{ counts: { src: string; n: number }[]; uploads: { src: string; file_name: string | null; row_count: number; uploaded_by: string; uploaded_at: string }[] } | null>(null);
   const [busy, setBusy] = useState<PickSrc | null>(null);
   const [scope, setScope] = useState<'pending' | 'ready' | 'open' | 'picked' | 'done'>('pending');
@@ -119,7 +119,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload }: { 
             ))}
           </div>
         )}
-        {!list.length ? <p className="muted">No lines {scope === 'ready' ? 'are ready to pull' : scope === 'picked' ? 'picked yet' : scope === 'pending' ? 'pending' : 'with UR stock'} in {week}.</p> : (
+        {!list.length ? <p className="muted">No lines {scope === 'ready' ? 'are ready to pull' : scope === 'picked' ? 'picked yet' : scope === 'pending' ? 'pending' : 'with UR stock'} in {label || week}.</p> : (
           <div className="table-wrap" style={{ maxHeight: 460 }}>
             <table className="mini">
               <thead><tr><th>SO</th><th>LI</th><th>Item</th><th>Date</th><th>Plant</th><th className="n">QTY</th><th className="n">Picked = Dispatched</th><th className="n">Balance</th><th className="n">UR left</th><th>State</th><th /></tr></thead>
@@ -144,7 +144,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload }: { 
 
       <PickHistoryCard key={histKey} canEdit={canEdit} toast={toast} onChanged={() => { reload(); setHistKey((k) => k + 1); }} />
 
-      {picking && <PickModal week={week} line={picking} onClose={() => setPicking(null)}
+      {picking && <PickModal week={picking.week || week} line={picking} onClose={() => setPicking(null)}
         onDone={(m) => { setPicking(null); toast(m); reload(); setHistKey((k) => k + 1); }} />}
     </>
   );

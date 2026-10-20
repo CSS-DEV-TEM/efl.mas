@@ -24,6 +24,7 @@ const COLS: Col[] = [
   { id: 'balance', label: 'Balance', grp: 'Dispatch', n: true, get: (l) => need(l), render: (l) => (l.dispatched ? <b className={need(l) > 0 ? '' : 'pos'}>{need(l) > 0 ? q(need(l)) : '0'}</b> : q(need(l))) },
   { id: 'ur', label: 'UR', grp: 'Full', n: true, get: (l) => l.ur, render: (l) => (l.released ? <span title={`Includes ${q(l.released)} QI / Block released to UR`}>{q(l.ur)}<span className="rel-tag">+rel</span></span> : q(l.ur)) },
   { id: 'ur_left', label: 'UR left', grp: 'Full', n: true, full: true, get: (l) => avail(l), render: (l) => <span title={(l.ur_take_key ?? l.ur_take ?? 0) > 0 ? `UR − ${q(l.ur_take_key ?? l.ur_take ?? 0)} picked after the latest ZMMBE (every line of this SO / LI / Item; picks before that ZMMBE are already out of its UR)` : ''}>{q(avail(l))}</span> },
+  { id: 'korber', label: 'Korber', grp: 'Shelf', n: true, get: (l) => l.korber_avail ?? -1, render: (l) => (l.korber_avail == null ? '' : <span className={l.korber_avail < need(l) - 1e-6 ? 'kb-short' : ''} title={`${l.korber_rolls ?? 0} roll${l.korber_rolls === 1 ? '' : 's'} of this SO / LI / Item's lots on the Korber shelf (less picks)`}>{q(l.korber_avail)}</span>) },
   { id: 'qi', label: 'QI', grp: 'Full', n: true, get: (l) => l.qi, render: (l) => q(l.qi) },
   { id: 'block', label: 'Block', grp: 'Full', n: true, get: (l) => l.block, render: (l) => q(l.block) },
   { id: 'assigned', label: 'Assigned', n: true, full: true, get: (l) => l.assigned, render: (l) => q(l.assigned) },

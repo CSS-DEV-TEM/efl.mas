@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Loader } from '@/components/Loader';
 import Shell, { useShell } from '@/components/Shell';
 import { ClearDatabase, UsersAdmin } from '@/components/AdminUsers';
+import BackupRestore from '@/components/BackupRestore';
 import { api } from '@/lib/api';
 import type { PlantInfo } from '@/lib/summary';
 
@@ -12,7 +13,7 @@ export default function Page() {
 
 export interface SystemSettings { fullRollPct: number; defaultPickKind: 'normal' | 'offsite'; allowOffsite: boolean; allowNormalShort: boolean; allowNormalFull: boolean; deriveFromZmmbe: boolean; pfcSlocs: string[]; plantSlocs: string[]; soliPerHour: number; lateGraceMin: number; defaultTarget: string }
 
-const TABS = [['plants', 'Plants'], ['reports', 'Locations'], ['time', 'Time setup'], ['plans', 'Plans (data change)'], ['pick', 'Pick rules'], ['users', 'Users & roles'], ['database', 'Database']] as const;
+const TABS = [['plants', 'Plants'], ['reports', 'Locations'], ['time', 'Time setup'], ['plans', 'Plans (data change)'], ['pick', 'Pick rules'], ['users', 'Users & roles'], ['backup', 'Backup & Restore'], ['database', 'Database']] as const;
 type Tab = (typeof TABS)[number][0];
 
 /** Admin only: the system settings. Head accounts can do everything else but cannot open this page. */
@@ -38,6 +39,7 @@ function Settings() {
       {tab === 'time' && <TimeSetup toast={toast} />}
       {tab === 'plans' && <PlansAdmin toast={toast} />}
       {tab === 'users' && <UsersAdmin />}
+      {tab === 'backup' && <BackupRestore toast={toast} />}
       {tab === 'database' && <ClearDatabase toast={toast} />}
     </main>
   );
@@ -225,7 +227,7 @@ function PlansAdmin({ toast }: { toast: (m: string) => void }) {
   }, [toast]);
   useEffect(() => { load(); }, [load]);
   const act = async (p: PlanRow, action: 'reassign' | 'delete', to?: string) => {
-    const label = `${p.type === 'day' ? 'day plan ' + p.day : 'week plan ' + p.week} of ${p.owner}`;
+    const label = `${p.type === 'day' ? 'day plan ' + planPeriod(p) : 'week plan ' + p.week} of ${p.owner}`;
     if (action === 'delete' && !confirm(`Delete the ${label} (${p.lines} lines)? Picks already made stay in the pick history.`)) return;
     setBusy(`${p.owner}${p.type}${p.week}${p.day}`);
     try { const r = await api<{ lines: number }>('/api/admin/plans', { method: 'POST', body: { action, owner: p.owner, type: p.type, week: p.week, day: p.day, to } }); toast(`${action === 'delete' ? 'Deleted' : 'Moved'} ${label}: ${r.lines} lines`); load(); }
@@ -248,7 +250,7 @@ function PlansAdmin({ toast }: { toast: (m: string) => void }) {
                 <tr key={id}>
                   <td className="mono">{p.owner}</td>
                   <td><span className={`pill ${p.type === 'day' ? 'accent' : 'mute'}`}>{p.type === 'day' ? 'Day plan' : 'Week plan'}</span></td>
-                  <td>{p.type === 'day' ? p.day : `Week ${Number(p.week.slice(-2))}`}</td>
+                  <td>{p.type === 'day' ? planPeriod(p) : `Week ${Number(p.week.slice(-2))}`}</td>
                   <td className="muted small">{p.start}{p.end && p.end !== p.start ? ` – ${p.end}` : ''}</td>
                   <td className="n">{p.lines}</td><td className="n">{Number(p.qty).toLocaleString()}</td>
                   <td>{p.done >= p.lines ? <span className="pill ok">Completed</span> : `${p.done} / ${p.lines}`}</td>
@@ -265,4 +267,10 @@ function PlansAdmin({ toast }: { toast: (m: string) => void }) {
       )}
     </section>
   );
+}
+
+/** a day plan round "2026-10-20~C064~2" → "2026-10-20 · C064 · Pick 2" */
+function planPeriod(p: { week: string; day?: string | null }) {
+  const m = /^(\d{4}-\d{2}-\d{2})~([^~]*)~(\d+)$/.exec(p.week);
+  return m ? `${m[1]} · ${m[2] === '-' ? 'no plant' : m[2]} · Pick ${m[3]}` : p.day || p.week;
 }

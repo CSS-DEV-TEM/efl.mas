@@ -9,12 +9,12 @@ import { canRelease, releaseFor, releaseLines, undoRelease } from '@/lib/release
  * Edit one plan line (QTY, date, plant, remarks + tracking fields), add a new one, or delete it.
  * Pass `line` to edit, or `week` only to add.
  */
-export default function EditLine({ line, week, planType = 'week', onClose, onSaved }: {
-  line?: Line | null; week: string; planType?: 'week' | 'day'; onClose: () => void; onSaved: (msg: string) => void;
+export default function EditLine({ line, week, planType = 'week', day, onClose, onSaved }: {
+  line?: Line | null; week: string; planType?: 'week' | 'day'; /** day plan: the day on screen (a new line's date) */ day?: string; onClose: () => void; onSaved: (msg: string) => void;
 }) {
   const adding = !line;
   const [f, setF] = useState({
-    so: line?.so ?? '', li: line?.li ?? '', item: line?.item ?? '', date: line?.date ?? '', qty: line ? String(Math.round(line.qty * 1000) / 1000) : '',
+    so: line?.so ?? '', li: line?.li ?? '', item: line?.item ?? '', date: line?.date ?? day ?? '', qty: line ? String(Math.round(line.qty * 1000) / 1000) : '',
     plant: line?.plant ?? '', remarks: line?.remarks ?? '', status: line?.status ?? '', comment: line?.comment ?? '', vehicle: line?.vehicle ?? '',
   });
   const [busy, setBusy] = useState(false);
@@ -36,9 +36,9 @@ export default function EditLine({ line, week, planType = 'week', onClose, onSav
     setErr(''); setBusy(true);
     try {
       if (adding) {
-        await api('/api/plan', { method: 'POST', body: { week, planType, so: f.so, li: f.li, item: f.item, date: f.date || null, qty: f.qty, plant: f.plant, remarks: f.remarks } });
+        const added = await api<{ week?: string }>('/api/plan', { method: 'POST', body: { week, planType, so: f.so, li: f.li, item: f.item, date: f.date || null, qty: f.qty, plant: f.plant, remarks: f.remarks } });
         if (f.status || f.comment || f.vehicle) {
-          await api('/api/status', { method: 'PATCH', body: { key: `${f.so.trim().toUpperCase().replace(/^0+/, '')}|${f.li.trim().replace(/^0+(?=\d)/, '')}|${f.item.trim().replace(/^0+/, '')}`, week: planType === 'day' && f.date ? f.date : week, date: f.date || null, status: f.status || null, comment: f.comment || null, vehicle: f.vehicle || null } });
+          await api('/api/status', { method: 'PATCH', body: { key: `${f.so.trim().toUpperCase().replace(/^0+/, '')}|${f.li.trim().replace(/^0+(?=\d)/, '')}|${f.item.trim().replace(/^0+/, '')}`, week: added.week || (planType === 'day' && f.date ? f.date : week), date: f.date || null, status: f.status || null, comment: f.comment || null, vehicle: f.vehicle || null } });
         }
         onSaved(`Added ${f.so} / ${f.li}`);
       } else {
@@ -48,7 +48,7 @@ export default function EditLine({ line, week, planType = 'week', onClose, onSav
         if ((f.status || '') !== (line.status || '')) st.status = f.status || null;
         if ((f.comment || '') !== (line.comment || '')) st.comment = f.comment || null;
         if ((f.vehicle || '') !== (line.vehicle || '')) st.vehicle = f.vehicle || null;
-        if (Object.keys(st).length) await api('/api/status', { method: 'PATCH', body: { key: line.key, week: (line as Line & { plan_type?: string }).plan_type === 'day' && (f.date || line.date) ? f.date || line.date : line.week, date: f.date || null, ...st } });
+        if (Object.keys(st).length) await api('/api/status', { method: 'PATCH', body: { key: line.key, week: (line as Line & { plan_type?: string }).plan_type === 'day' ? (line.week?.includes('~') ? line.week : f.date || line.date || line.week) : line.week, date: f.date || null, ...st } });
         onSaved(planChanged || Object.keys(st).length ? `Saved ${line.so} / ${line.li}` : 'No changes');
       }
       onClose();

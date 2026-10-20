@@ -41,7 +41,9 @@ function MyWork() {
   const today = todayLocal();
   const load = useCallback(async () => {
     try {
-      const [w, d] = await Promise.all([api<PP>('/api/pullplan' + userParam(true)), api<PP>('/api/pullplan?type=day' + userParam())]);
+      // the week plan is retired: only the day plan (every Pick of the day)
+      const d = await api<PP>('/api/pullplan?type=day' + userParam());
+      const w: PP = { week: null, rev: d.rev, rows: [] };
       setWeek(w); setDay(d); setErr('');
     } catch (e) { setErr(e instanceof Error ? e.message : 'Could not load.'); }
   }, []);
@@ -66,7 +68,7 @@ function MyWork() {
       <div className="page-head">
         <div>
           <h1>My work <span className="h1-sub">{user.username}</span></h1>
-          <p>Your open plan lines — week plans and day plans — by day, with what to do first. Lines that can be picked now come first.</p>
+          <p>Your open day plan lines — every Pick of the day — with what to do first. Lines that can be picked now come first.</p>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           <Link className="btn" href="/dispatch/">Pick &amp; Dispatch</Link>
@@ -92,7 +94,7 @@ function MyWork() {
                   return (
                     <li key={`${l.plan_type}-${l.id}`}>
                       <span className={`pill ${n.tone}`}>{n.step}</span>
-                      <b>{l.so} / {l.li}</b><span className="muted">{l.item} · {l.plant || '–'} · {l.plan_type === 'day' ? 'day plan' : 'week plan'}</span>
+                      <b>{l.so} / {l.li}</b><span className="muted">{l.item} · {l.plant || '–'} · {l.plan_type === 'day' ? (/~(\d+)$/.exec(l.week || '') ? `Pick ${/~(\d+)$/.exec(l.week || '')![1]}` : 'day plan') : 'week plan'}</span>
                       <span className={`pill ${d === 'Overdue' ? 'bad' : d === 'Today' ? 'warn' : 'mute'}`}>{d}{l.date ? ` · ${fmtDate(l.date)}` : ''}</span>
                       <span className="n"><b>{fmtQty(need(l))}</b> to send · UR {fmtQty(avail(l))}</span>
                       {canEdit && <button className="btn sm primary" onClick={() => setPicking(l)}>Pick</button>}

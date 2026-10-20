@@ -8,8 +8,8 @@ const STOCK_HEADERS = ['Plant', 'St Location', 'SO Plant', 'SO', 'LI', 'UR', 'Ma
 
 export const TEMPLATES: Record<Src, Template> = {
   plan: {
-    file: 'Plan_Format.xlsx', title: 'Weekly plan',
-    note: 'One row per SO line. Date decides the week (Mon–Sun). Plant and Remarks are optional.',
+    file: 'Day_Plan_Format.xlsx', title: 'Day plan',
+    note: 'One row per SO line. On upload you choose the day, the plant and the Pick No (1, 2 …); Date and Plant in the file are optional.',
     headers: ['SO', 'LI', 'Item Code', 'Date', 'QTY', 'Plant', 'Remarks'],
     rows: [[1001724370, 10, 1000042935, '2026-10-12', 3, 'C051', ''], [1001733165, 10, 1000256506, '2026-10-13', 40, 'C051', '1st priority Last pallet']],
   },

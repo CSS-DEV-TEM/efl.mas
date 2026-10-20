@@ -27,8 +27,10 @@ interface SheetJob {
   state: 'ready' | 'sending' | 'done' | 'error'; msg?: string;
   /** plan only: '' = auto from dates, or a week id like 2026-W43 */
   week?: string;
-  /** plan only: how the file joins what is already there */
-  mode?: 'merge' | 'replace-plant' | 'replace-week' | 'replace-day';
+  /** plan only: how the file joins what is already there (a day plan round: replace the round, or merge into it) */
+  mode?: 'merge' | 'replace-plant' | 'replace-week' | 'replace-day' | 'replace-round';
+  /** plan only: the day and the Pick No (1, 2 …) of the plant on that day */
+  day?: string; round?: number;
   /** plan only: plant for lines that have none (and the plant a replace-plant upload replaces) */
   plant?: string;
   /** stock reports: 'replace' the whole report (default) or 'add' this file to what is there (another part of the same report) */
@@ -37,6 +39,8 @@ interface SheetJob {
   planType?: 'week' | 'day';
   /** plan only: Admin / Head upload a plan for a user ('' = own plan) */
   owner?: string;
+  /** the Pick No was chosen by hand (not the suggested next one) */
+  roundTouched?: boolean;
 }
 
 function Uploads() {
@@ -54,6 +58,7 @@ function Uploads() {
   const [owners, setOwners] = useState<string[] | null>(null);
   useEffect(() => { if (isBossRole(user.role)) api<{ owners: string[] }>('/api/owners').then((r) => setOwners(r.owners)).catch(() => {}); }, [user.role]);
   const [plants, setPlants] = useState<string[]>([]);
+  const [plantNames, setPlantNames] = useState<Record<string, string>>({});
   useEffect(() => { api<{ user: { plant?: string | null } }>('/api/me').then((m) => setMyPlant(m.user.plant || '')).catch(() => {}); }, []);
   const input = useRef<HTMLInputElement>(null);
   const router = useRouter();
@@ -64,9 +69,10 @@ function Uploads() {
 
   const loadStatus = useCallback(async () => {
     try {
-      const p = await api<{ week: string | null; rev?: string | null; uploads: Upload[]; counts: { src: string; n: number }[]; weeks: WeekInfo[]; rows: Line[] }>('/api/pullplan' + userParam(true));
-      if (p.week) setReadyNow({ week: p.week, n: p.rows.filter((l) => action(l) === 'Ready to pull').length });
-      setPlants(Array.from(new Set(p.rows.map((r) => r.plant || '').filter(Boolean))).sort());
+      const p = await api<{ week: string | null; day?: string | null; rev?: string | null; uploads: Upload[]; counts: { src: string; n: number }[]; weeks: WeekInfo[]; rows: Line[]; plants?: { code: string; name: string | null }[] }>('/api/pullplan?type=day' + userParam());
+      if (p.day) setReadyNow({ week: p.day, n: p.rows.filter((l) => action(l) === 'Ready to pull').length });
+      setPlants(Array.from(new Set([...(p.plants || []).map((x) => x.code.toUpperCase()), ...p.rows.map((r) => r.plant || '')].filter(Boolean))).sort());
+      setPlantNames(Object.fromEntries((p.plants || []).map((x) => [x.code.toUpperCase(), x.name || ''])));
       setUploads(p.uploads);
       setRev(p.rev ?? null);
       setWeeks(p.weeks || []);
@@ -99,7 +105,7 @@ function Uploads() {
           const byFile = dataSheets.filter((x) => !guessSrc(x.name)).length === 1 ? guessSrc(f.name.replace(/\.\w+$/, '').replace(/\(\d+\)/g, '')) : null;
           const src = byName ?? byFile ?? guessSrcFromGrid(s.grid) ?? '';
           if (src === 'kfc' || src === 'pfc' || src === 'trr') { skipped.push(f.name); continue; }
-          next.push({ id: f.name + '::' + s.name + '::' + Math.random(), file: f.name, sheet: s.name, grid: s.grid, src, map: src ? detectMapping(src, s.grid) : null, state: 'ready', planType: /day/i.test(f.name + ' ' + s.name) ? 'day' : 'week' });
+          next.push({ id: f.name + '::' + s.name + '::' + Math.random(), file: f.name, sheet: s.name, grid: s.grid, src, map: src ? detectMapping(src, s.grid) : null, state: 'ready', planType: 'day', mode: 'replace-round' });
         }
       } catch {
         toast(`Could not read ${f.name}. Save it as .xlsx and try again.`);
@@ -119,7 +125,7 @@ function Uploads() {
     try {
       const rows = applyMapping(j.src, j.grid, j.map);
       const r = await api<PlanPreview & { accepted: number; skipped: number; weeks?: string[]; stockDups?: number; changes?: { added: number; removed: number; unchanged: number }; derived?: { kfc: number; pfc: number; plant: number | null; plantKept?: number } }>('/api/upload', { method: 'POST', body: { src: j.src, fileName: j.file, sheetName: j.sheet, rows, ...planOpts(j, myPlant) } });
-      const wk = r.weeks?.length ? ` to ${r.weeks.map((w) => 'Week ' + Number(w.slice(-2))).join(', ')}` : '';
+      const wk = r.weeks?.length ? ` to ${r.weeks.map((w) => roundName(w, plantNames)).join(', ')}` : '';
       await loadStatus();
       if (j.src === 'zmmbe' || j.src === 'plan') setShowReady(true);
       const plan = j.src === 'plan' && r.added !== undefined ? `${fmt(r.added)} new, ${fmt(r.updated)} updated${r.removed ? `, ${fmt(r.removed)} removed` : ''}${r.inFileDups ? `, ${fmt(r.inFileDups)} repeated rows (last row kept${r.dupQtyCount ? `; ${fmt(r.dupQtyCount)} had a different QTY` : ''})` : ''}` : `${fmt(r.accepted)} rows saved — ${j.stockMode === 'add' ? 'added to the current report' : 'whole report replaced, no duplicates'}${r.stockDups ? ` · ${fmt(r.stockDups)} repeated rows counted once` : ''}${r.changes ? ` · ${fmt(r.changes.unchanged)} unchanged, ${fmt(r.changes.added)} new or changed, ${fmt(r.changes.removed)} removed` : ''}${r.derived ? ` · also built ZMMBE KFC (${fmt(r.derived.kfc)}) and PFC (${fmt(r.derived.pfc)})${r.derived.plant ? ` · ${fmt(r.derived.plant)} plant-location row${r.derived.plant === 1 ? '' : 's'} left out` : ''}` : ''}`;
@@ -142,8 +148,8 @@ function Uploads() {
   }
 
   async function deleteWeek(w: string) {
-    if (!window.confirm(`Delete the plan for ${w}? Stock reports and other weeks stay.`)) return;
-    try { await api('/api/data/plan?week=' + encodeURIComponent(w), { method: 'DELETE' }); toast(`${w} deleted`); loadStatus(); }
+    if (!window.confirm(`Delete the plan ${roundName(w, plantNames)}? Stock reports and the other Picks stay.`)) return;
+    try { await api('/api/data/plan?week=' + encodeURIComponent(w), { method: 'DELETE' }); toast(`${roundName(w, plantNames)} deleted`); loadStatus(); }
     catch (e) { toast(e instanceof Error ? e.message : 'Could not delete.'); }
   }
 
@@ -166,7 +172,7 @@ function Uploads() {
       <div className="page-head">
         <div>
           <h1>Upload reports</h1>
-          <p>Dispatch / pick files (JAN0190…) go on the <Link href="/dispatch/">Dispatch page</Link>. Drop the weekly plan and the SAP reports here. Each upload replaces that report's previous data, the calculation runs again and every open dashboard updates live.</p>
+          <p>Dispatch / pick files (JAN0190…) go on the <Link href="/dispatch/">Dispatch page</Link>. Drop the day plan (choose its day, plant and Pick No) and the ZMMBE report here. Each upload replaces that report's previous data, the calculation runs again and every open dashboard updates live.</p>
         </div>
       </div>
 
@@ -200,15 +206,15 @@ function Uploads() {
 
       {weeks.length > 0 && (
         <section className="card" aria-labelledby="wk-title">
-          <h2 id="wk-title">Weekly plans in the system</h2>
-          <p className="sub">Uploading a plan replaces only the week(s) in that file. Older weeks stay for history.</p>
+          <h2 id="wk-title">Day plans in the system</h2>
+          <p className="sub">One plan per day, plant and Pick No. Uploading a Pick again replaces only that Pick; the others stay.</p>
           <div className="wk-list">
-            {weeks.map((w, i) => (
+            {weeks.slice(0, 30).map((w, i) => (
               <div key={w.week} className="wk-row">
-                <b>Week {Number(w.week.slice(-2))}</b>{i === 0 && <span className="pill accent">Latest</span>}
-                <span className="muted">{w.week} · {w.start ? `${fmtDate(w.start)} – ${fmtDate(w.end)}` : 'no dates'}</span>
+                <b>{roundName(w.week, plantNames)}</b>{i === 0 && <span className="pill accent">Latest</span>}
+                <span className="muted">{w.start ? fmtDate(w.start) : 'no date'}</span>
                 <span className="num">{fmt(w.lines)} lines · {fmt(w.done)} done</span>
-                {user.role === 'admin' && <button className="btn sm danger" onClick={() => deleteWeek(w.week)}>Delete week</button>}
+                {user.role === 'admin' && <button className="btn sm danger" onClick={() => deleteWeek(w.week)}>Delete</button>}
               </div>
             ))}
           </div>
@@ -239,13 +245,13 @@ function Uploads() {
             onDrop={(e) => { e.preventDefault(); setOver(false); if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files); }}
           >
             <strong>{reading ? <Loader inline label="Reading the file…" /> : 'Drop Excel files here, or click to choose'}</strong>
-            <span className="muted">One workbook with all sheets (Weekly plan, ZMMBE) or separate files. .xlsx, .xls, .csv</span>
+            <span className="muted">One workbook with all sheets (Day plan, ZMMBE) or separate files. .xlsx, .xls, .csv</span>
             <input ref={input} type="file" hidden multiple accept=".xlsx,.xlsm,.xls,.csv" onChange={(e) => { if (e.target.files?.length) addFiles(e.target.files); e.target.value = ''; }} />
           </div>
 
           {showReady && readyNow && (
             <div className="notice ok" style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-              <span>ZMMBE updated: <b>{fmt(readyNow.n)}</b> line{readyNow.n === 1 ? ' is' : 's are'} Ready to pull in Week {Number(readyNow.week.slice(-2))} — they are on the Pick list now.</span>
+              <span>ZMMBE updated: <b>{fmt(readyNow.n)}</b> line{readyNow.n === 1 ? ' is' : 's are'} Ready to pull on {fmtDate(readyNow.week)} — they are on the Pick list now.</span>
               <Link className="btn sm primary" href="/dispatch/">Open Pick list →</Link>
             </div>
           )}
@@ -257,7 +263,7 @@ function Uploads() {
             </div>
           )}
 
-          {jobs.map((j) => <SheetCard key={j.id} job={j} myPlant={myPlant} plants={plants} owners={owners} me={user.username} onChange={(p) => setJob(j.id, p)} onSend={() => send(j)} onRemove={() => setJobs((js) => js.filter((x) => x.id !== j.id))} />)}
+          {jobs.map((j) => <SheetCard key={j.id} job={j} myPlant={myPlant} plants={plants} plantNames={plantNames} owners={owners} me={user.username} onChange={(p) => setJob(j.id, p)} onSend={() => send(j)} onRemove={() => setJobs((js) => js.filter((x) => x.id !== j.id))} />)}
         </>
       )}
     </main>
@@ -288,7 +294,7 @@ function planWeeks(rows: Record<string, unknown>[]) {
 }
 
 /** Problems worth knowing before a plan goes in. */
-function planChecks(rows: Record<string, unknown>[], fixedWeek: string) {
+function planChecks(rows: Record<string, unknown>[], fixedWeek: string, dayPlan = false) {
   const out: string[] = [];
   const usable = rows.filter((r) => /^[A-Za-z]{0,4}\d/.test(String(r.so ?? '').trim()) && String(r.li ?? '').trim() && String(r.item ?? '').trim());
   const noDate = usable.filter((r) => !toIsoDate(r.date)).length;
@@ -297,7 +303,7 @@ function planChecks(rows: Record<string, unknown>[], fixedWeek: string) {
   for (const r of usable) { const k = `${r.so}|${r.li}|${r.item}`; seen.set(k, (seen.get(k) || 0) + 1); }
   const dups = Array.from(seen.values()).filter((n) => n > 1).length;
   if (badQty) out.push(`${fmt(badQty)} line${badQty > 1 ? 's have' : ' has'} QTY 0 or blank`);
-  if (noDate) out.push(`${fmt(noDate)} line${noDate > 1 ? 's have' : ' has'} no readable date${fixedWeek ? '' : ' (they go to the current week)'}`);
+  if (noDate && !dayPlan) out.push(`${fmt(noDate)} line${noDate > 1 ? 's have' : ' has'} no readable date${fixedWeek ? '' : ' (they go to the current week)'}`);
   if (dups) out.push(`${fmt(dups)} SO / LI / Item combination${dups > 1 ? 's appear' : ' appears'} more than once`);
   if (fixedWeek) {
     const [mon, sun] = weekDays(fixedWeek);
@@ -318,29 +324,47 @@ function show(v: unknown, id: string) {
   return String(v);
 }
 
-interface PlanPreview { owner?: string; planType?: string; days?: string[]; added: number; updated: number; removed: number; kept: number; inFileDups: number; dupQty?: { so: string; li: string; item: string; date: string | null; was: number; now: number }[]; dupQtyCount?: number; lines: number; plant: string | null; mode: string }
+interface PlanPreview { owner?: string; planType?: string; days?: string[]; round?: number; added: number; updated: number; removed: number; kept: number; inFileDups: number; dupQty?: { so: string; li: string; item: string; date: string | null; was: number; now: number }[]; dupQtyCount?: number; lines: number; plant: string | null; mode: string }
 function planOpts(j: SheetJob, myPlant: string) {
   if (j.src !== 'plan') return j.stockMode === 'add' ? { mode: 'add' } : {};
   const plant = (j.plant ?? myPlant).trim();
-  const planType = j.planType || 'week';
-  // a day plan only adds / replaces its own days; the week modes do not apply to it
-  const mode = planType === 'day' ? (j.mode === 'replace-day' ? 'replace-day' : 'merge') : j.mode === 'replace-day' ? 'merge' : j.mode || 'merge';
-  return { ...(j.week ? { week: j.week, forceWeek: true } : {}), mode, planType, ...(j.owner ? { owner: j.owner } : {}), ...(plant ? { plant } : {}) };
+  // a day plan round: the day, the plant and its Pick No; uploading the same round again replaces it (or merges into it)
+  return { planType: 'day', day: j.day || todayLocal(), round: j.round || 1, mode: j.mode === 'merge' ? 'merge' : 'replace-round', ...(j.owner ? { owner: j.owner } : {}), ...(plant ? { plant } : {}) };
 }
+interface RoundInfo { id: string; plant: string | null; round: number; lines: number; qty: number; src_at: string | null; src_user: string | null }
 
-function SheetCard({ job, myPlant, plants, owners, me, onChange, onSend, onRemove }: { job: SheetJob; myPlant: string; plants: string[]; owners: string[] | null; me: string; onChange: (p: Partial<SheetJob>) => void; onSend: () => void; onRemove: () => void }) {
+function SheetCard({ job, myPlant, plants, plantNames, owners, me, onChange, onSend, onRemove }: { job: SheetJob; myPlant: string; plants: string[]; plantNames: Record<string, string>; owners: string[] | null; me: string; onChange: (p: Partial<SheetJob>) => void; onSend: () => void; onRemove: () => void }) {
   const fields = job.src ? FIELDS[job.src] : [];
   const width = Math.max(0, ...job.grid.slice(0, 50).map((r) => r?.length || 0));
   const header = job.map?.how === 'header' && job.map.headerRow !== undefined ? job.grid[job.map.headerRow] : null;
   const colName = (c: number) => `${colLetter(c)}${header && header[c] ? ' · ' + String(header[c]).slice(0, 18) : ''}`;
   const rows = useMemo(() => (job.src && job.map ? applyMapping(job.src, job.grid, job.map) : []), [job.src, job.map, job.grid]);
   const usable = job.src ? usableCount(job.src, rows) : 0;
-  const wks = useMemo(() => (job.src === 'plan' ? planWeeks(rows) : []), [job.src, rows]);
-  const checks = useMemo(() => (job.src === 'plan' ? planChecks(rows, job.week || '') : []), [job.src, rows, job.week]);
+  const checks = useMemo(() => (job.src === 'plan' ? planChecks(rows, '', true) : []), [job.src, rows]);
+  // the day: the one date of the file's lines, else today
+  const fileDays = useMemo(() => (job.src === 'plan' ? Array.from(new Set(rows.map((r) => toIsoDate(r.date)).filter(Boolean) as string[])).sort() : []), [job.src, rows]);
+  const dayVal = job.day || (fileDays.length === 1 ? fileDays[0] : todayLocal());
+  useEffect(() => { if (job.src === 'plan' && !job.day) onChange({ day: dayVal }); }, [job.src, job.day, dayVal]); // eslint-disable-line react-hooks/exhaustive-deps
+  // the rounds already there for the day + plant: the next Pick No is suggested
+  const [rounds, setRounds] = useState<RoundInfo[]>([]);
+  const filePlants = useMemo(() => (job.src === 'plan' ? Array.from(new Set(rows.map((r) => String(r.plant ?? '').trim().toUpperCase()).filter((x) => x && !x.startsWith('#')))) : []), [job.src, rows]);
+  const plantSel = (job.plant ?? (filePlants.length === 1 ? filePlants[0] : myPlant)).trim().toUpperCase();
+  // the file's one plant (or the user's plant) becomes the plan's plant, so the preview and the upload use it
+  useEffect(() => { if (job.src === 'plan' && job.plant === undefined && plantSel) onChange({ plant: plantSel }); }, [job.src, job.plant, plantSel]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (job.src !== 'plan' || !dayVal || !plantSel) { setRounds([]); return; }
+    let stop = false;
+    api<{ rounds: RoundInfo[]; next: number }>(`/api/rounds?day=${dayVal}&plant=${encodeURIComponent(plantSel)}${job.owner ? '&user=' + encodeURIComponent(job.owner) : ''}`).then((r) => {
+      if (stop) return;
+      setRounds(r.rounds);
+      if (!job.round || job.state === 'ready' && !job.roundTouched) onChange({ round: r.next });
+    }).catch(() => {});
+    return () => { stop = true; };
+  }, [job.src, dayVal, plantSel, job.owner, job.state === 'done']); // eslint-disable-line react-hooks/exhaustive-deps
   // ask the server what this upload would do (new / updated / removed) before it is sent
   const [preview, setPreview] = useState<PlanPreview | null>(null);
   const [previewErr, setPreviewErr] = useState('');
-  const plantVal = job.plant ?? myPlant;
+  const plantVal = job.plant ?? (filePlants.length === 1 ? filePlants[0] : myPlant);
   useEffect(() => {
     if (job.src !== 'plan' || job.state === 'done' || !usable) { setPreview(null); return; }
     let stop = false;
@@ -351,7 +375,7 @@ function SheetCard({ job, myPlant, plants, owners, me, onChange, onSend, onRemov
       } catch (e) { if (!stop) { setPreview(null); setPreviewErr(e instanceof Error ? e.message : ''); } }
     }, 350);
     return () => { stop = true; clearTimeout(t); };
-  }, [job.src, job.state, job.week, job.mode, job.planType, job.owner, plantVal, rows, usable, myPlant]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [job.src, job.state, job.day, job.round, job.mode, job.owner, plantVal, rows, usable, myPlant]); // eslint-disable-line react-hooks/exhaustive-deps
   const missing = fields.filter((f) => f.required && (job.map?.cols[f.id] ?? -1) < 0);
   const how = job.map?.how === 'header' ? `header row ${(job.map.headerRow ?? 0) + 1}` : job.map?.how === 'keyed' ? 'your workbook layout (key in column A)' : 'SAP layout without key column';
 
@@ -368,7 +392,7 @@ function SheetCard({ job, myPlant, plants, owners, me, onChange, onSend, onRemov
             <option value="">Skip this sheet</option>
             {SRC_ORDER.map((s) => <option key={s} value={s}>{SRC_INFO[s].title}</option>)}
           </select>
-          <button className="btn primary" aria-busy={job.state === 'sending' || undefined} disabled={!job.src || !usable || missing.length > 0 || job.state === 'sending'} onClick={onSend}>
+          <button className="btn primary" aria-busy={job.state === 'sending' || undefined} disabled={!job.src || !usable || missing.length > 0 || job.state === 'sending' || (job.src === 'plan' && !plantSel)} onClick={onSend}>
             {job.state === 'sending' ? 'Uploading…' : job.state === 'done' ? 'Upload again' : 'Upload'}
           </button>
           <button className="btn sm" onClick={onRemove} aria-label="Remove">✕</button>
@@ -383,26 +407,29 @@ function SheetCard({ job, myPlant, plants, owners, me, onChange, onSend, onRemov
         </div>
       )}
       {job.src === 'plan' && job.state !== 'done' && (
-        <div className="week-pick">
-          <label htmlFor={`wk-${job.id}`}>Save this plan to</label>
-          <select id={`wk-${job.id}`} value={job.week || ''} onChange={(e) => onChange({ week: e.target.value, state: 'ready', msg: undefined })}>
-            <option value="">Auto: week from each line's date{wks.length ? ` (${wks.map(([w]) => 'Week ' + Number(w.slice(-2))).join(', ')})` : ''}</option>
-            {weekOptions(wks[0]?.[0] || weekIdOf(todayLocal())).map((w) => <option key={w} value={w}>{wkLabel(w)}</option>)}
-          </select>
-          <span className="muted">
-            {job.week
-              ? `All ${fmt(usable)} lines go to Week ${Number(job.week.slice(-2))}. Only that week is replaced.`
-              : wks.length ? `Lines go to ${wks.map(([w, o]) => `Week ${Number(w.slice(-2))} (${fmt(o.n)})`).join(', ')} by date. Only ${wks.length > 1 ? 'those weeks are' : 'that week is'} replaced.` : 'No dates found: lines go to the current week.'}
-          </span>
-        </div>
-      )}
-      {job.src === 'plan' && job.state !== 'done' && (
         <div className="plan-opts">
-          <div className="ptype" role="radiogroup" aria-label="Plan type">
-            {([['week', 'Week plan', 'Goes to the Week plan dashboard'], ['day', 'Day plan', 'Goes to the Day plan dashboard — every line needs a date']] as const).map(([v, label, help]) => (
-              <button key={v} type="button" role="radio" aria-checked={(job.planType || 'week') === v} className={(job.planType || 'week') === v ? 'on' : ''}
-                onClick={() => onChange({ planType: v, mode: v === 'day' ? 'replace-day' : 'merge', state: 'ready', msg: undefined })}><b>{label}</b><span>{help}</span></button>
-            ))}
+          <div className="round-pick">
+            <label>Day
+              <input type="date" value={dayVal} onChange={(e) => onChange({ day: e.target.value, roundTouched: false, state: 'ready', msg: undefined })} />
+            </label>
+            <label>Plant
+              <select value={plantSel} onChange={(e) => onChange({ plant: e.target.value, roundTouched: false, state: 'ready', msg: undefined })}>
+                <option value="">Choose the plant…</option>
+                {Array.from(new Set([...plants, ...(plantSel ? [plantSel] : [])])).map((p) => <option key={p} value={p}>{plantNames[p] ? `${plantNames[p]} (${p})` : p}</option>)}
+              </select>
+            </label>
+            <label>Pick No
+              <select value={job.round || 1} onChange={(e) => onChange({ round: Number(e.target.value), roundTouched: true, state: 'ready', msg: undefined })}>
+                {Array.from({ length: Math.max(6, (rounds.at(-1)?.round || 0) + 2) }, (_, i) => i + 1).map((n) => {
+                  const had = rounds.find((r) => r.round === n);
+                  return <option key={n} value={n}>Pick {n}{had ? ` — uploaded ${fmt(had.lines)} lines (replace)` : n === (rounds.at(-1)?.round || 0) + 1 ? ' — next' : ''}</option>;
+                })}
+              </select>
+            </label>
+            <span className="muted">
+              {plantSel ? <>All {fmt(usable)} lines go to <b>{fmtDate(dayVal)} · {plantNames[plantSel] || plantSel} · Pick {job.round || 1}</b>.{fileDays.length > 1 ? ` The file has ${fileDays.length} dates — every line is saved to this day.` : ''}
+                {rounds.length ? ` Already uploaded today: ${rounds.map((r) => `Pick ${r.round} (${r.lines})`).join(', ')}.` : ''}</> : 'Choose the plant of this plan.'}
+            </span>
           </div>
           {owners && (
             <label className="plant-pick">Plan of
@@ -413,27 +440,20 @@ function SheetCard({ job, myPlant, plants, owners, me, onChange, onSend, onRemov
               <span className="muted">Admin / Head: upload this plan for a user. It becomes that user&apos;s plan.</span>
             </label>
           )}
-          <div className="mode-pick" role="radiogroup" aria-label="How to add this file">
-            {((job.planType || 'week') === 'day'
-              ? [['replace-day', 'Replace the day(s)', 'The plan\'s lines on the dates in this file are removed, then the file is added. Other days stay.'],
-                ['merge', 'Merge', 'Add new lines and update matching ones. Nothing else is touched.']] as const
-              : [['merge', 'Merge', 'Add new lines and update matching ones. Nothing else is touched. Use this when each plant uploads its own file.'],
-                ['replace-plant', 'Replace my plant', 'Remove this plant\'s lines for the week, then add the file. Other plants stay.'],
-                ['replace-week', 'Replace whole week', 'Remove every line of the week plan, then add the file.']] as const).map(([v, label, help]) => {
-              const cur = (job.planType || 'week') === 'day' ? (job.mode === 'merge' ? 'merge' : 'replace-day') : job.mode === 'replace-day' ? 'merge' : job.mode || 'merge';
-              return (
-                <label key={v} className={`mode ${cur === v ? 'on' : ''}`}>
-                  <input type="radio" name={`mode-${job.id}`} value={v} checked={cur === v} onChange={() => onChange({ mode: v, state: 'ready', msg: undefined })} />
-                  <b>{label}</b><span>{help}</span>
-                </label>
-              );
-            })}
-          </div>
-          <label className="plant-pick">Plant
-            <input list={`plants-${job.id}`} value={plantVal} placeholder="e.g. C051" onChange={(e) => onChange({ plant: e.target.value.toUpperCase(), state: 'ready', msg: undefined })} />
-            <datalist id={`plants-${job.id}`}>{plants.map((p) => <option key={p} value={p} />)}</datalist>
-            <span className="muted">{(job.mode || 'merge') === 'replace-plant' ? 'Required: only this plant\'s lines are replaced.' : 'Given to lines that have no plant in the file.'}</span>
-          </label>
+          {rounds.some((r) => r.round === (job.round || 1)) && (
+            <div className="mode-pick" role="radiogroup" aria-label="How to add this file">
+              {([['replace-round', `Replace Pick ${job.round || 1}`, 'The lines of this Pick are removed, then the file is added. Other Picks stay.'],
+                ['merge', `Add to Pick ${job.round || 1}`, 'Add new lines and update matching ones in this Pick. Nothing else is touched.']] as const).map(([v, label, help]) => {
+                const cur = job.mode === 'merge' ? 'merge' : 'replace-round';
+                return (
+                  <label key={v} className={`mode ${cur === v ? 'on' : ''}`}>
+                    <input type="radio" name={`mode-${job.id}`} value={v} checked={cur === v} onChange={() => onChange({ mode: v, state: 'ready', msg: undefined })} />
+                    <b>{label}</b><span>{help}</span>
+                  </label>
+                );
+              })}
+            </div>
+          )}
           <div className={`preview-counts ${previewErr ? 'bad' : ''}`} aria-live="polite">
             {previewErr ? previewErr : preview ? (
               <>
@@ -442,9 +462,9 @@ function SheetCard({ job, myPlant, plants, owners, me, onChange, onSend, onRemov
                 <span className="pc del"><b>{fmt(preview.removed)}</b> removed</span>
                 <span className="pc keep"><b>{fmt(preview.kept)}</b> other lines kept</span>
                 {preview.inFileDups > 0 && <span className="pc">{fmt(preview.inFileDups)} line{preview.inFileDups === 1 ? ' is' : 's are'} in the file twice — the last row is kept</span>}
-                {(job.planType || 'week') === 'day' && preview.days?.length ? <span className="pc">Day plan for {preview.days.map((d) => fmtDate(d)).join(', ')}</span> : null}
+                {preview.days?.length ? <span className="pc">Day plan {preview.days.map((d) => fmtDate(d)).join(', ')}{preview.round ? ` · Pick ${preview.round}` : ''}</span> : null}
                 {preview.owner && preview.owner !== me ? <span className="pc">Plan of <b>{preview.owner}</b></span> : null}
-                <span className="muted">No line is ever added twice: a line with the same week, SO, LI, Item and date is updated.</span>
+                <span className="muted">No line is ever added twice: a line with the same SO, LI and Item in this Pick is updated.</span>
                 {!!preview.dupQtyCount && (
                   <div className="notice warn dup-qty" style={{ width: '100%' }}>
                     <b>{preview.dupQtyCount} repeated line{preview.dupQtyCount === 1 ? '' : 's'} with a different QTY</b> — the last row&apos;s QTY is used. Check these in the file:
@@ -496,4 +516,12 @@ function SheetCard({ job, myPlant, plants, owners, me, onChange, onSend, onRemov
       )}
     </section>
   );
+}
+
+/** "2026-10-20~C064~2" → "20 Oct · SHADELINE · Pick 2" (a week id stays "Week 43") */
+function roundName(w: string, names: Record<string, string>) {
+  const m = /^(\d{4}-\d{2}-\d{2})~([^~]*)~(\d+)$/.exec(w);
+  if (!m) return /W\d{2}$/.test(w) ? `Week ${Number(w.slice(-2))}` : w;
+  const pl = m[2] === '-' ? 'No plant' : names[m[2]] || m[2];
+  return `${fmtDate(m[1])} · ${pl} · Pick ${m[3]}`;
 }

@@ -2,7 +2,7 @@
 import Shell from '@/components/Shell';
 import Dashboard from '@/components/Dashboard';
 
-/** Week plan dashboard. */
+/** Home: the Day plan dashboard (plans come per day, plant and Pick No). The week plan is no longer used. */
 export default function Page() {
-  return <Shell allowGuest><Dashboard planType="week" /></Shell>;
+  return <Shell allowGuest><Dashboard planType="day" /></Shell>;
 }

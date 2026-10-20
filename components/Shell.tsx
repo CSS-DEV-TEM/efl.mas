@@ -5,6 +5,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import { NEEDS_API, ROLE_NAME, api, clearSession, getSession, getViewUser, onApiBusy, setViewUser, type User } from '@/lib/api';
 import { useLive, type LiveMessage, type LiveState } from '@/lib/live';
 import { Credit, Logo } from '@/components/Brand';
+import TableFilters from '@/components/TableFilters';
 
 interface Ctx {
   user: User;
@@ -89,9 +90,9 @@ export default function Shell({ children, admin, allowGuest }: { children: React
 
   if (!user) return null;
 
-  const nav = guest ? [{ href: '/', label: 'Week plan' }, { href: '/day/', label: 'Day plan' }] : [
-    { href: '/', label: 'Week plan' },
-    { href: '/day/', label: 'Day plan' },
+  // the week plan is retired: the home page is the day plan (Pick 1, 2 … per plant)
+  const nav = guest ? [{ href: '/', label: 'Day plan' }] : [
+    { href: '/', label: 'Day plan' },
     ...(user.role !== 'viewer' ? [{ href: '/my/', label: 'My work' }] : []),
     { href: '/upload/', label: 'Uploads' },
     { href: '/dispatch/', label: 'Pick & Dispatch' },
@@ -102,6 +103,7 @@ export default function Shell({ children, admin, allowGuest }: { children: React
   return (
     <ShellCtx.Provider value={{ user, guest, live: state, online, subscribe, toast }}>
       {netBusy && <div className="net-bar" role="progressbar" aria-label="Loading" />}
+      <TableFilters />
       <header className="bar">
         <div className="bar-in">
           <Link href="/" className="brand"><Logo size={30} /><span className="brand-text">MAS Weekly Plan <small>Tracker</small></span></Link>

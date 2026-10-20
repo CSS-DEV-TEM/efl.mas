@@ -15,12 +15,14 @@ const pickDay = (iso: string) => { const d = new Date(new Date(iso).getTime() + 
  * `week` is the period the received times belong to: the week (2026-W47), or the day for a day plan (2026-11-17).
  * Target times are system settings (admin only); received times are typed by the users.
  */
-export default function PlantSummary({ rows, plants, received = [], week, day, canTarget, canEdit, time, onPlant, onSaved, live, updatedAt }: {
-  rows: Line[]; plants: PlantInfo[]; received?: { code: string; received: string | null }[]; week: string; day?: string | null; canTarget: boolean; canEdit: boolean; time?: TimeSetup; onPlant: (code: string) => void; onSaved: (msg: string) => void;
+export default function PlantSummary({ rows, plants, received = [], week, day, canTarget, canEdit, time, onPlant, onSaved, live, updatedAt, byRound = false }: {
+  rows: Line[]; plants: PlantInfo[]; received?: { code: string; received: string | null; period?: string }[];
+  /** a day plan: a row per plant per Pick No */
+  byRound?: boolean; week: string; day?: string | null; canTarget: boolean; canEdit: boolean; time?: TimeSetup; onPlant: (code: string) => void; onSaved: (msg: string) => void;
   /** realtime connected (updates the moment someone picks / uploads) or not (updates when the page is used, and every minute) */
   live?: boolean; updatedAt?: string;
 }) {
-  const s = useMemo(() => plantSummary(rows, plants, received, time), [rows, plants, received, time]);
+  const s = useMemo(() => plantSummary(rows, plants, received, time, byRound), [rows, plants, received, time, byRound]);
   // cells whose figure changed since the last update flash for a moment, so a live change is seen
   const prev = useRef<Map<string, number> | null>(null);
   const [changed, setChanged] = useState<Set<string>>(new Set());
@@ -43,8 +45,8 @@ export default function PlantSummary({ rows, plants, received = [], week, day, c
     await api('/api/plants', { method: 'POST', body: { plants: [{ ...p, target: v }] } });
     onSaved(`Target time for ${p.name || code} saved`);
   };
-  const saveReceived = async (code: string, v: string) => {
-    await api('/api/plants/received', { method: 'POST', body: { week, code, received: v } });
+  const saveReceived = async (code: string, v: string, period?: string) => {
+    await api('/api/plants/received', { method: 'POST', body: { week: period || week, code, received: v } });
     onSaved(v ? `Received time for ${code} saved` : `Received time for ${code} back to the upload time`);
   };
   const [setup, setSetup] = useState(false);
@@ -53,12 +55,12 @@ export default function PlantSummary({ rows, plants, received = [], week, day, c
     <><td className={`n ${strong ? 'strong' : ''}${fl(r.code, k)}`}>{q(r[k].qty)}</td><td className={`n soli${fl(r.code, k + '#')}`}>{c(r[k].soli)}</td></>);
   const pct = (r: PlantRow) => Math.round(r.progress * 100);
   const row = (r: PlantRow, isTotal = false) => (
-    <tr key={r.code} className={isTotal ? 'total' : ''} onClick={isTotal ? undefined : () => onPlant(r.code)} title={isTotal ? '' : `Show ${r.name} lines`}>
+    <tr key={r.code} className={isTotal ? 'total' : ''} onClick={isTotal ? undefined : () => onPlant(r.plantCode)} title={isTotal ? '' : `Show ${r.name} lines`}>
       <td>{isTotal ? '' : r.responsible}</td>
-      <td className="pname">{r.name}{!isTotal && r.name !== r.code && <small>{r.code}</small>}</td>
-      <td onClick={(e) => e.stopPropagation()}>{isTotal ? '' : <TimeCell value={r.target} canEdit={canTarget} placeholder="10:00 AM" title="Target time (admin setting) — click to change" onSave={(v) => saveTarget(r.code, v)} weekly />}</td>
+      <td className="pname">{r.name}{!isTotal && !r.name.startsWith(r.plantCode) && <small>{r.plantCode}</small>}</td>
+      <td onClick={(e) => e.stopPropagation()}>{isTotal ? '' : <TimeCell value={r.target} canEdit={canTarget} placeholder="10:00 AM" title="Target time (admin setting) — click to change" onSave={(v) => saveTarget(r.plantCode, v)} weekly />}</td>
       <td onClick={(e) => e.stopPropagation()} className={r.late === true ? 'late' : r.late === false ? 'ontime' : ''}>{isTotal ? '' : <TimeCell value={r.receivedText} canEdit={canEdit} placeholder="9:48 AM" manual={r.receivedManual}
-        title={r.receivedManual ? 'Typed on the dashboard — click to change, clear it to use the upload time' : r.received ? 'Plan upload time — click to type the real received time' : 'Click to type the received time'} onSave={(v) => saveReceived(r.code, v)} />}</td>
+        title={r.receivedManual ? 'Typed on the dashboard — click to change, clear it to use the upload time' : r.received ? 'Plan upload time — click to type the real received time' : 'Click to type the received time'} onSave={(v) => saveReceived(r.plantCode, v, r.period)} />}</td>
       {pair(r, 'plan')}{pair(r, 'ur', true)}
       <td className="n">{r.wh ? fmt(r.wh, 2) : isTotal ? '' : '–'}</td>
       {pair(r, 'qi')}{pair(r, 'block')}{pair(r, 'nih')}{pair(r, 'adhoc')}{pair(r, 'sameDay')}

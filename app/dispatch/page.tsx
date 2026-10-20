@@ -4,74 +4,79 @@ import { PageLoading } from '@/components/Loader';
 import Shell, { useShell } from '@/components/Shell';
 import { api, userParam } from '@/lib/api';
 import { useRefreshOnActivity } from '@/lib/freshness';
-import { fmtDate, type Line, type WeekInfo } from '@/lib/calc';
+import { fmtDate, type Line } from '@/lib/calc';
+import { fmtTime } from '@/lib/summary';
 import PickWorkspace from '@/components/PickWorkspace';
+import type { RoundInfo } from '@/components/Dashboard';
 
 export default function Page() {
   return <Shell><Dispatch /></Shell>;
 }
 
-interface PullPlan { type?: 'week' | 'day'; day?: string | null; days?: { day: string; lines: number; done: number }[]; week: string | null; rev?: string | null; weeks: WeekInfo[]; rows: Line[] }
+interface PullPlan { type?: 'week' | 'day'; day?: string | null; days?: { day: string; lines: number; done: number }[]; rounds?: RoundInfo[]; week: string | null; rev?: string | null; rows: Line[]; plants?: { code: string; name: string | null }[] }
 
-/** Pick & Dispatch: Ready-to-pull lines are picked from matched Korber rolls; picked QTY counts as dispatched. */
+/**
+ * Pick & Dispatch: choose the day and the Pick (Pick No of a plant). Only that plan's lines are shown;
+ * Ready-to-pull lines are picked from matched Korber rolls, and picked QTY counts as dispatched.
+ */
 function Dispatch() {
   const { user, subscribe, toast } = useShell();
   const canEdit = user.role !== 'viewer';
-  const [week, setWeek] = useState<string | null>(null);
-  // week plans and day plans are picked from their own lists
-  const [ptype, setPtypeS] = useState<'week' | 'day'>(() => { try { return localStorage.getItem('mas-pick-plan') === 'day' ? 'day' : 'week'; } catch { return 'week'; } });
-  const ptypeRef = useRef(ptype); ptypeRef.current = ptype;
-  const setPtype = (t: 'week' | 'day') => { setPtypeS(t); setWeek(null); setPlan(null); try { localStorage.setItem('mas-pick-plan', t); } catch { /* private mode */ } };
+  const [day, setDay] = useState<string | null>(null);
+  const [round, setRoundS] = useState<string | null>(() => { try { return localStorage.getItem('mas-pick-round'); } catch { return null; } });
+  const setRound = (r: string | null) => { setRoundS(r); try { if (r) localStorage.setItem('mas-pick-round', r); else localStorage.removeItem('mas-pick-round'); } catch { /* private mode */ } };
   const [plan, setPlan] = useState<PullPlan | null>(null);
   const [err, setErr] = useState('');
-  const weekRef = useRef(week); weekRef.current = week;
+  const dayRef = useRef(day); dayRef.current = day;
+  const roundRef = useRef(round); roundRef.current = round;
 
   const load = useCallback(async () => {
     try {
-      const w = weekRef.current, t = ptypeRef.current;
-      const qs = t === 'day' ? `?type=day${w ? '&day=' + encodeURIComponent(w) : ''}` : w ? '?week=' + encodeURIComponent(w) : '';
-      const p = await api<PullPlan>('/api/pullplan' + qs + (qs ? userParam() : userParam(true)));
-      // a slower answer for a week / day no longer picked must not overwrite the current one
-      if (ptypeRef.current !== t || (weekRef.current && (t === 'day' ? p.day : p.week) !== weekRef.current)) return;
+      const d = dayRef.current, rd = roundRef.current;
+      const p = await api<PullPlan>(`/api/pullplan?type=day${d ? '&day=' + encodeURIComponent(d) : ''}${rd ? '&round=' + encodeURIComponent(rd) : ''}` + userParam());
+      // a slower answer for a day / pick no longer chosen must not overwrite the current one
+      if ((dayRef.current && p.day !== dayRef.current) || (roundRef.current || null) !== (rd || null)) return;
       setPlan(p);
-      const cur = t === 'day' ? p.day ?? null : p.week;
-      if (!w && cur) setWeek((x) => x ?? cur);
+      if (!d && p.day) setDay((x) => x ?? p.day ?? null);
+      // a remembered Pick of another day: back to the whole day
+      if (rd && !(p.rounds || []).some((r) => r.id === rd)) setRound(null);
       setErr('');
     } catch (e) { setErr(e instanceof Error ? e.message : 'Could not load.'); }
   }, []);
-  useEffect(() => { load(); }, [load, week, ptype]);
+  useEffect(() => { load(); }, [load, day, round]);
   useEffect(() => subscribe((m) => { if (m.type === 'data') load(); }), [subscribe, load]);
   useRefreshOnActivity(load, plan ? plan.rev ?? null : undefined);
+
+  const plantName = (c: string | null | undefined) => { const k = (c || '').toUpperCase(); return (plan?.plants || []).find((p) => p.code.toUpperCase() === k)?.name || k || 'No plant'; };
+  const rounds = plan?.rounds || [];
+  const cur = rounds.find((r) => r.id === round);
+  const label = `${fmtDate(plan?.day || '')}${cur ? ` · ${plantName(cur.plant)} Pick ${cur.round}` : ' · all picks'}`;
 
   return (
     <main className="page anim">
       <div className="page-head">
         <div>
           <h1>Pick &amp; Dispatch</h1>
-          <p>Lines that become <b>Ready to pull</b> after a ZMMBE upload appear here. Pick the matched Korber rolls; what is picked counts as <b>Dispatched</b> on the plan, and the day&apos;s Packing List is built from the picks.</p>
+          <p>Choose the <b>day</b> and the <b>Pick</b> (Pick No of a plant): only that plan&apos;s lines show. Pick the matched Korber rolls; what is picked counts as <b>Dispatched</b>, and the Packing List is built from the picks.</p>
         </div>
         <div className="week-pick" style={{ margin: 0, display: 'flex', gap: 8, alignItems: 'end', flexWrap: 'wrap' }}>
-          <div className="seg" role="group" aria-label="Plan type">
-            <button className={ptype === 'week' ? 'on' : ''} onClick={() => setPtype('week')}>Week plan</button>
-            <button className={ptype === 'day' ? 'on' : ''} onClick={() => setPtype('day')}>Day plan</button>
-          </div>
-          <label htmlFor="d-week" style={{ display: 'grid', gap: 2 }}>{ptype === 'day' ? 'Day' : 'Plan week'}
-            {ptype === 'day' ? (
-              <select id="d-week" value={week || ''} onChange={(e) => setWeek(e.target.value)}>
-                {(plan?.days || []).map((d) => <option key={d.day} value={d.day}>{fmtDate(d.day)} · {d.lines} lines{d.done >= d.lines ? ' · completed' : ''}</option>)}
-              </select>
-            ) : (
-              <select id="d-week" value={week || ''} onChange={(e) => setWeek(e.target.value)}>
-                {(plan?.weeks || []).map((w, i) => <option key={w.week} value={w.week}>Week {Number(w.week.slice(-2))} · {w.start ? `${fmtDate(w.start)} – ${fmtDate(w.end)}` : w.week}{i === 0 ? ' (latest)' : ''}{w.lines && w.done >= w.lines ? ' · completed' : ''}</option>)}
-              </select>
-            )}
+          <label htmlFor="d-day" style={{ display: 'grid', gap: 2 }}>Day
+            <select id="d-day" value={day || ''} onChange={(e) => { setDay(e.target.value); setRound(null); }}>
+              {(plan?.days || []).map((d) => <option key={d.day} value={d.day}>{fmtDate(d.day)} · {d.lines} lines{d.done >= d.lines ? ' · completed' : ''}</option>)}
+            </select>
+          </label>
+          <label htmlFor="d-round" style={{ display: 'grid', gap: 2 }}>Pick
+            <select id="d-round" value={round || ''} onChange={(e) => setRound(e.target.value || null)}>
+              <option value="">All picks of the day ({rounds.reduce((t, r) => t + r.lines, 0)} lines)</option>
+              {rounds.map((r) => <option key={r.id} value={r.id}>{plantName(r.plant)} · Pick {r.round} · {r.lines} lines{r.src_at ? ` · ${fmtTime(r.src_at)}` : ''}{r.lines && r.done >= r.lines ? ' · completed' : ''}</option>)}
+            </select>
           </label>
         </div>
       </div>
       {err && <div className="notice bad">{err}</div>}
       {!plan && !err && <PageLoading label="Loading the plan lines to pick…" tiles={3} rows={6} />}
-      {plan && !(ptype === 'day' ? plan.days?.length : plan.weeks.length) && <div className="notice warn">There is no {ptype === 'day' ? 'day' : 'week'} plan yet. Upload a plan and ZMMBE first.</div>}
-      {week && plan && plan.week && <PickWorkspace week={plan.week} rows={plan.rows} canEdit={canEdit} toast={toast} reload={load} />}
+      {plan && !plan.days?.length && <div className="notice warn">There is no day plan yet. Upload a plan (day, plant and Pick No) and ZMMBE first.</div>}
+      {plan && plan.day && <PickWorkspace week={plan.week || plan.day} rows={plan.rows} canEdit={canEdit} toast={toast} reload={load} label={label} />}
     </main>
   );
 }

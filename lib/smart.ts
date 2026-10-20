@@ -4,13 +4,14 @@
  */
 import { avail, isDispatched, isDone, need, shortBy, type DispatchSummary, type Line, type Upload } from './calc';
 
-export type Action = 'Dispatched' | 'Done' | 'Ready to pull' | 'Release QI / Block' | 'Partial pull' | 'Follow up TN' | 'No stock';
-export const ACTIONS: Action[] = ['Ready to pull', 'Release QI / Block', 'Partial pull', 'Follow up TN', 'No stock', 'Dispatched', 'Done'];
+export type Action = 'Dispatched' | 'Done' | 'Ready to pull' | 'Not in Korber' | 'Release QI / Block' | 'Partial pull' | 'Follow up TN' | 'No stock';
+export const ACTIONS: Action[] = ['Ready to pull', 'Not in Korber', 'Release QI / Block', 'Partial pull', 'Follow up TN', 'No stock', 'Dispatched', 'Done'];
 export const ACTION_PILL: Record<Action, string> = {
-  'Ready to pull': 'ok', 'Release QI / Block': 'info', 'Partial pull': 'warn', 'Follow up TN': 'accent', 'No stock': 'bad', Dispatched: 'ok', Done: 'mute',
+  'Ready to pull': 'ok', 'Not in Korber': 'warn', 'Release QI / Block': 'info', 'Partial pull': 'warn', 'Follow up TN': 'accent', 'No stock': 'bad', Dispatched: 'ok', Done: 'mute',
 };
 export const ACTION_HELP: Record<Action, string> = {
-  'Ready to pull': 'Full UR stock covers the QTY',
+  'Ready to pull': 'Full UR stock and the Korber rolls (Korber Inventory) cover the QTY',
+  'Not in Korber': 'UR covers the QTY, but the Korber Inventory does not have enough rolls of its lots on the shelf',
   'Release QI / Block': 'UR alone is short, but UR + QI + Block covers the QTY',
   'Partial pull': 'Some UR stock, not enough for the QTY',
   'Follow up TN': 'No stock in ZMMBE, but a transfer note exists',
@@ -24,7 +25,8 @@ export function action(l: Line): Action {
   if (isDispatched(l)) return 'Dispatched';
   if (isDone(l)) return 'Done';
   const n = need(l), u = avail(l);
-  if (n > 0 && u >= n - 1e-9) return 'Ready to pull';
+  // UR covers it; the rolls must be on the Korber shelf too (no Korber upload yet: UR only)
+  if (n > 0 && u >= n - 1e-9) return l.korber_avail == null || l.korber_avail >= n - 1e-6 ? 'Ready to pull' : 'Not in Korber';
   if (l.qi + l.block > 0 && u + l.qi + l.block >= n - 1e-9) return 'Release QI / Block';
   if (u > 0) return 'Partial pull';
   if (l.tn_qty > 0 || l.tn_number) return 'Follow up TN';
@@ -57,7 +59,7 @@ export function priority(l: Line, today = todayLocal()): number {
   const a = action(l);
   if (a === 'Done' || a === 'Dispatched') return 0;
   const dueScore: Record<Due, number> = { Overdue: 45, Today: 38, Tomorrow: 26, 'This week': 14, Later: 6, 'No date': 10 };
-  const actScore: Record<Action, number> = { Dispatched: 0, 'No stock': 30, 'Follow up TN': 22, 'Partial pull': 20, 'Release QI / Block': 18, 'Ready to pull': 12, Done: 0 };
+  const actScore: Record<Action, number> = { 'Not in Korber': 16, Dispatched: 0, 'No stock': 30, 'Follow up TN': 22, 'Partial pull': 20, 'Release QI / Block': 18, 'Ready to pull': 12, Done: 0 };
   let s = dueScore[due(l, today)] + actScore[a];
   if (isPriority(l)) s += 15;
   if (l.carried) s += 10; // already slipped once
@@ -163,7 +165,9 @@ export function insights(rows: Line[], uploads: Upload[], today = todayLocal(), 
   if (urgent.length) out.push({ id: 'urgent', tone: 'bad', count: urgent.length, label: 'Due / overdue & short', title: `${L(urgent.length)} due today or overdue ${are(urgent.length)} short of stock`, detail: `${n0(urgent.reduce((s, l) => s + shortBy(l), 0))} QTY still to find. Start here.`, view: { kind: 'urgent' } });
 
   const ready = open.filter((l) => action(l) === 'Ready to pull');
-  if (ready.length) out.push({ id: 'ready', tone: 'ok', count: ready.length, label: 'Ready to pull', title: `${L(ready.length)} ${are(ready.length)} ready to pull`, detail: `Full UR stock covers ${n0(ready.reduce((s, l) => s + l.qty, 0))} QTY. Mark them Done when loaded.`, view: { kind: 'action', value: 'Ready to pull' } });
+  const noKorber = open.filter((l) => action(l) === 'Not in Korber');
+  if (noKorber.length) out.push({ id: 'nokorber', tone: 'warn', count: noKorber.length, label: 'Not in Korber', title: `${L(noKorber.length)} ${are(noKorber.length)} covered by UR but not on the Korber shelf`, detail: `UR covers them, but the Korber Inventory has only ${n0(noKorber.reduce((s, l) => s + (l.korber_avail ?? 0), 0))} of the ${n0(noKorber.reduce((s, l) => s + need(l), 0))} QTY in rolls of their lots. Upload the latest Korber Inventory or check the GRN.`, view: { kind: 'action', value: 'Not in Korber' } });
+  if (ready.length) out.push({ id: 'ready', tone: 'ok', count: ready.length, label: 'Ready to pull', title: `${L(ready.length)} ${are(ready.length)} ready to pull`, detail: `Full UR stock and the Korber rolls cover ${n0(ready.reduce((s, l) => s + l.qty, 0))} QTY. Pick them on Pick & Dispatch.`, view: { kind: 'action', value: 'Ready to pull' } });
 
   const qi = open.filter((l) => action(l) === 'Release QI / Block');
   if (qi.length) out.push({ id: 'qi', tone: 'info', count: qi.length, label: 'Release QI / Block', title: `${L(qi.length)} can be covered by releasing QI / Block`, detail: `${n0(qi.reduce((s, l) => s + Math.min(l.qi + l.block, shortBy(l)), 0))} QTY waiting in QI or blocked stock.`, view: { kind: 'action', value: 'Release QI / Block' } });
