@@ -26,6 +26,8 @@ export interface Candidate {
   direct?: boolean;
   /** ZCOMENT barcode not a Korber pallet: found by Supplier Hu = Vendor Roll No */
   byHu?: boolean;
+  /** this lot's ZCOMENT row had no barcode: taken from the same roll under another inspection lot */
+  borrowed?: boolean;
   /** that PO / invoice / lot is shared by this many SO lines: the user ticks the rolls */
   pool?: number;
   /** how much of the roll is in each batch of this line */

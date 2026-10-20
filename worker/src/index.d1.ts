@@ -287,7 +287,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 33; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 34; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1472,13 +1472,13 @@ async function noBarcodeOptions(env: Env, sh: Row, lot: Row, skip: Set<string>) 
     if (hu ? !checks.hu : !checks.lot) continue;
     if (checks.invoice === false || checks.po === false) continue;
     // a lot with no Purchasing Document (a transfer lot): a roll whose Po Number is another SO line's PO in ZINR is that line's roll
-    if (!lot.po && kpo) {
+    if (!lot.po && kpo && !checks.hu) {
       const zpo = up(kpo).replace(/^[A-Z]{2,10}-(?=[A-Z0-9])/, '');
       if (await env.DB.prepare('SELECT 1 FROM zinr WHERE upper(po) IN (?1, ?4) AND NOT (so = ?2 AND li = ?3) LIMIT 1').bind(zpo, lot.so, lot.li, poCanon(zpo)).first()) continue;
     }
     // another shade-report roll has this pallet as its barcode: not this roll
     const core = palletCore(k.pallet);
-    if (await env.DB.prepare('SELECT 1 FROM zcoment WHERE barcode = ?1 OR (?2 IS NOT NULL AND barcode LIKE \'%\' || ?2 || \'%\') LIMIT 1').bind(up(k.pallet), core).first()) continue;
+    if (await env.DB.prepare('SELECT 1 FROM zcoment WHERE (barcode = ?1 OR (?2 IS NOT NULL AND barcode LIKE \'%\' || ?2 || \'%\')) AND NOT (upper(COALESCE(roll_no, \'\')) = ?3 AND ?3 <> \'\') LIMIT 1').bind(up(k.pallet), core, hu).first()) continue;
     const ph = (await env.DB.prepare('SELECT qty, roll_qty FROM picks WHERE pallet = ? AND cancelled_at IS NULL ORDER BY id').bind(k.pallet).all<Row>()).results;
     const base = ph.length ? Number(ph[0].roll_qty ?? k.qty) : Number(k.qty);
     const before = r3(ph.reduce((t, x) => t + Number(x.qty), 0));
@@ -1535,6 +1535,8 @@ interface Candidate {
   direct?: boolean;
   /** the ZCOMENT barcode is not a Korber pallet: found by Supplier Hu = Vendor Roll No (+ Lot, Invoice, Po) */
   byHu?: boolean;
+  /** this lot's ZCOMENT row had no barcode: taken from the same roll's row under another inspection lot */
+  borrowed?: boolean;
   /** that PO / invoice / lot is shared by several SO lines: the user ticks the rolls (the system does not) */
   pool?: number;
   /** the barcode was found under another pallet label (e.g. COMPCP… for CP…) */
@@ -1612,6 +1614,14 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
       // a roll is matched only when its Korber pallet agrees on all five:
       // Barcode Number = Pallet, Vendor Batch = Lot Number, Vendor Roll No = Supplier Hu (ZCOMENT),
       // Vendor Invoice No = Invoice Number, Purchasing Document = Po Number (ZINR)
+      // no Barcode Number here, but the same roll (item + Vendor Batch + Vendor Roll No) is in ZCOMENT under another inspection lot
+      // with one: that is this roll's barcode (a roll shared by several SO lines / a transfer lot lists it without one)
+      let borrowed: string | null = null;
+      if (!sh.barcode && sh.roll_no && sh.vendor_batch) {
+        const bcs = (await env.DB.prepare("SELECT DISTINCT barcode FROM zcoment WHERE material = ?1 AND upper(vendor_batch) = ?2 AND upper(roll_no) = ?3 AND COALESCE(barcode, '') <> ''")
+          .bind(normId(sh.material), up(sh.vendor_batch), up(sh.roll_no)).all<{ barcode: string }>()).results;
+        if (bcs.length === 1) { borrowed = String(bcs[0].barcode); sh.barcode = borrowed; }
+      }
       const found = sh.barcode ? await korberForBarcode(env, sh, lot) : { k: null, via: null, ambiguous: [] as string[] };
       const k = found.k;
       const checks: Record<string, boolean | null> = k ? {
@@ -1677,12 +1687,13 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
       // the roll's QTY is Korber's Actual Qty (what is on the shelf now); a different ZCOMENT Roll qty is shown, not a stop
       const korberQty = checks.qty === false;
       if (korberQty) qtyNote = `ZCOMENT Roll qty ${sh.roll_qty} · Korber Actual Qty ${k.qty} is used`;
+      if (borrowed) qtyNote = [qtyNote, `No Barcode Number under lot ${lot.lot} — the same roll ${sh.roll_no} (Vendor Batch ${sh.vendor_batch}) has barcode ${borrowed} in ZCOMENT`].filter(Boolean).join(' · ');
       if (returned) warnings.push(returned);
       rolls.set(pallet, {
         pallet, item: String(k.item), lot: k.lot as string | null, supplier_hu: k.supplier_hu as string | null, location: k.location as string | null, uom: k.uom as string | null,
         invoice: k.invoice as string | null, actual_qty: Number(k.qty), base_qty: Number(k.qty), picked_before: 0, available: Number(k.qty), roll_qty: Number(sh.roll_qty),
         shade: sh.shade as string | null, insp_lots: [String(lot.lot)], batches: [String(lot.batch)], checks, warnings, needsConfirm: warnings.length > 0, raw: k.raw as string | null, picks: [],
-        via: found.via, barcode: sh.barcode as string | null, qtyNote, korberQty, ...(found.byHu ? { byHu: true } : {}),
+        via: found.via, barcode: sh.barcode as string | null, qtyNote, korberQty, ...(found.byHu ? { byHu: true } : {}), ...(borrowed ? { borrowed: true } : {}),
         parts: [{ batch: String(lot.batch), lot: String(lot.lot), qty: checks.qty === true ? Number(sh.roll_qty) : Number(k.qty) }],
       });
     }
