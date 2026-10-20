@@ -22,7 +22,7 @@ export interface Candidate {
   /** how much of the roll is in each batch of this line */
   parts?: { batch: string; lot: string; qty: number }[];
 }
-export interface LotInfo { lot: string; batch: string; qty: number; ur: number; qty_ok: boolean; invoice: string | null; vendor_batch: string | null; sloc: string | null; rolls: number; roll_sum: number }
+export interface LotInfo { via?: string | null; noShade?: boolean; lot: string; batch: string; qty: number; ur: number; qty_ok: boolean; invoice: string | null; vendor_batch: string | null; sloc: string | null; rolls: number; roll_sum: number }
 /** A shade-report roll whose Korber pallet does not agree on Pallet, Lot, Supplier Hu, Invoice and Po: the Korber roll is chosen by hand. */
 export interface ManualRoll { lot: string; batch: string; material: string; vendor_batch: string | null; roll_no: string | null; barcode: string | null; roll_qty: number; shade: string | null; invoice: string | null; po?: string | null; reason: string;
   /** Korber rolls with the same item, Lot Number, Supplier Hu, Invoice and Po (another pallet). */
@@ -31,7 +31,7 @@ export interface KorberRow { pallet: string; item: string; lot: string | null; q
 /** A Korber roll offered for a shade-report roll with no Barcode Number (same item; Lot / Supplier Hu agree). */
 export interface NbOption extends KorberRow { checks: Record<string, boolean | null>; exact: boolean }
 /** A shade-report roll with no Barcode Number: the user chooses its Korber roll from `options`. */
-export interface NoBarcodeRoll extends Omit<ManualRoll, 'reason' | 'suggest'> { options: NbOption[]; /** its Korber roll was picked in full already */ done?: boolean }
+export interface NoBarcodeRoll extends Omit<ManualRoll, 'reason' | 'suggest'> { options: NbOption[]; /** its Korber roll was picked in full already */ done?: boolean; /** an inspection lot with no Shade Report in ZCOMENT: roll_qty = the lot QTY */ noShade?: boolean }
 export interface Candidates {
   manual?: ManualRoll[];
   /** rolls without a Barcode Number, each with the Korber rolls that match its other fields */

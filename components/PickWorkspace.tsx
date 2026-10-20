@@ -367,7 +367,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
             <div className="pk-chain">
               {c.lots.map((l) => (
                 <span key={l.lot} className={`pk-lot ${l.qty_ok ? '' : 'warn'}`} title={`Batch ${l.batch}${l.sloc ? ' · St Loc ' + l.sloc : ''}${l.invoice ? ' · invoice ' + l.invoice : ''}`}>
-                  Lot <b>{l.lot}</b> · batch {l.batch} · {fmtQty(l.qty)} {l.qty_ok ? '= UR ✓' : `≠ UR ${fmtQty(l.ur)}`} · {l.rolls} roll{l.rolls === 1 ? '' : 's'}
+                  Lot <b>{l.lot}</b> · batch {l.batch} · {fmtQty(l.qty)} {l.qty_ok ? '= UR ✓' : `≠ UR ${fmtQty(l.ur)}`} · {l.noShade ? 'no Shade Report' : `${l.rolls} roll${l.rolls === 1 ? '' : 's'}${l.via ? ' (by batch)' : ''}`}
                 </span>
               ))}
               {!c.lots.length && <span className="pk-lot warn">No ZINR lot matched</span>}
@@ -442,16 +442,16 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
             {(c.nobarcode?.length ?? 0) > 0 && (
               <div className="nb-pick">
                 <h3>No Barcode — choose the roll <span className="pill info">{c.nobarcode!.length}</span>{nbSel.length > 0 && <span className="muted small"> · {nbSel.length} chosen</span>}</h3>
-                <p className="sub" style={{ margin: '0 0 6px' }}>These Shade Report rolls have no Barcode Number in ZCOMENT. Listed: Korber rolls of the same item with <b>Supplier Hu = Vendor Roll No</b> (only <b>Lot Number = Vendor Batch</b> when there is no roll no), Invoice and Po not different, and not the barcode of another roll. Choose the right one — a roll whose Lot or Qty differs needs “I checked”.</p>
+                <p className="sub" style={{ margin: '0 0 6px' }}>These Shade Report rolls have no Barcode Number in ZCOMENT. Listed: Korber rolls of the same item with <b>Supplier Hu = Vendor Roll No</b> (only <b>Lot Number = Vendor Batch</b> when there is no roll no), Invoice and Po not different, and not the barcode of another roll. Choose the right one — a roll whose Lot or Qty differs needs “I checked”. An inspection lot with <b>no Shade Report</b> in ZCOMENT is listed here too: its Korber rolls with the same Lot Number, the one whose Actual Qty is the lot QTY first.</p>
                 <table className="mini">
-                  <thead><tr><th>Vendor Roll No</th><th>Vendor Batch</th><th>Batch</th><th>Shade</th><th className="n">Roll qty</th><th>Korber roll</th><th className="n">Pick qty</th></tr></thead>
+                  <thead><tr><th>Vendor Roll No</th><th>Vendor Batch</th><th>Batch</th><th>Shade</th><th className="n">Roll / lot qty</th><th>Korber roll</th><th className="n">Pick qty</th></tr></thead>
                   <tbody>{c.nobarcode!.map((m, i) => {
                     const chosen = nbSel.find(([, x]) => x.nb === m);
                     const co = chosen?.[1].korber as NbOption | undefined;
                     const takenElsewhere = (p: string) => !!sel[p] && sel[p].nb !== m;
                     return (
                       <tr key={i} className={chosen ? 'picked' : ''}>
-                        <td><b>{m.roll_no || '–'}</b></td><td>{m.vendor_batch || '–'}</td><td className="mono">{m.batch}</td><td><b>{m.shade}</b></td><td className="n">{fmtQty(m.roll_qty)}</td>
+                        <td>{m.noShade ? <span className="pill warn" title={`Inspection lot ${m.lot} has no Shade Report rolls in ZCOMENT VIEW. Rolls with Lot Number = ${m.vendor_batch ?? '–'} and Actual Qty = the lot QTY come first.`}>no Shade Report · lot {m.lot}</span> : <b>{m.roll_no || '–'}</b>}</td><td>{m.vendor_batch || '–'}</td><td className="mono">{m.batch}</td><td><b>{m.shade}</b></td><td className="n">{fmtQty(m.roll_qty)}</td>
                         <td>{m.done ? <span className="pill mute">picked · {m.options[0]?.pallet}</span> : <>
                           <select className="as-search nb-select" value={chosen?.[0] ?? ''} onChange={(e) => chooseNb(m, e.target.value)} aria-label={`Korber roll for ${m.roll_no || 'roll'}`}>
                             <option value="">— choose a Korber roll ({m.options.length} match{m.options.length === 1 ? '' : 'es'}) —</option>

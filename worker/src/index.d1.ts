@@ -287,7 +287,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 27; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 28; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1142,23 +1142,26 @@ async function handlePick(env: Env, req: Request, p: string) {
     const day = colomboDay(), at = now();
     const picks: Row[] = [];
     // a roll chosen for a shade-report roll with no Barcode Number is one of its offered Korber rolls (not a manual pick)
-    const nbOption = (pallet: string) => {
-      for (const m of (cand.nobarcode || []) as Row[]) { const o = (m.options as Row[]).find((x) => up(x.pallet) === up(pallet)); if (o) return { m, o }; }
+    // the shade-report roll (or lot without Shade Report) it was chosen for: the same Korber roll can be offered for several
+    const nbOption = (pallet: string, mf?: ManualFor) => {
+      const all = (cand.nobarcode || []) as Row[];
+      const mine = mf ? all.filter((m) => String(m.lot) === String(mf.lot ?? '') && String(m.roll_no ?? '') === String(mf.roll_no ?? '')) : [];
+      for (const m of [...mine, ...all]) { const o = (m.options as Row[]).find((x) => up(x.pallet) === up(pallet)); if (o) return { m, o }; }
       return null;
     };
-    const manualQty = r3(b.rolls.filter((x) => x.manual && !byPallet.has(up(x.pallet)) && !(x.nobarcode && nbOption(x.pallet))).reduce((t, x) => t + num(x.qty), 0));
+    const manualQty = r3(b.rolls.filter((x) => x.manual && !byPallet.has(up(x.pallet)) && !(x.nobarcode && nbOption(x.pallet, x.manual))).reduce((t, x) => t + num(x.qty), 0));
     if (manualQty > 0 && cand.shortfall <= 0) throw new HttpError(400, 'Manual pick is only for a balance: the matched rolls already cover this line. Pick those rolls.');
     if (manualQty > cand.shortfall + 1e-6) throw new HttpError(400, `Manual pick is only for the balance of ${cand.shortfall} that the matched rolls cannot cover.`);
     for (const x of b.rolls) {
       let r = byPallet.get(up(x.pallet));
-      const nb = !r && x.nobarcode ? nbOption(x.pallet) : null;
+      const nb = !r && x.nobarcode ? nbOption(x.pallet, x.manual) : null;
       if (!r && x.nobarcode && !nb) throw new HttpError(400, `Roll ${x.pallet} is not one of the Korber rolls offered for a roll with no barcode (refresh and try again).`);
       if (!r && (x.manual || nb)) r = await manualCandidate(env, x.pallet, nb ? { ...nb.m, ...(x.manual || {}), barcode: null } as ManualFor : x.manual!, String(line.item));
       if (r && nb) {
         // chosen by the user from the matching rolls: confirmation is needed only when a field did not match
         const ck = nb.o.checks as Record<string, boolean | null>;
         const miss = [ck.lot === false ? 'Lot' : '', ck.hu === false ? 'Supplier Hu' : '', ck.qty === false ? 'Qty' : ''].filter(Boolean);
-        r.warnings = [`No Barcode Number in ZCOMENT — roll ${nb.m.roll_no ?? '?'} chosen by ${s.u} (matched on ${['lot', 'hu', 'invoice', 'po'].filter((f) => ck[f]).map((f) => ({ lot: 'Lot', hu: 'Supplier Hu', invoice: 'Invoice', po: 'Po' } as Record<string, string>)[f]).join(', ')})`, ...(miss.length ? [`${miss.join(', ')} not the same`] : [])];
+        r.warnings = [`${nb.m.noShade ? `Inspection lot ${nb.m.lot} has no Shade Report — Korber roll` : `No Barcode Number in ZCOMENT — roll ${nb.m.roll_no ?? "?"}`} chosen by ${s.u} (matched on ${['lot', 'hu', 'invoice', 'po'].filter((f) => ck[f]).map((f) => ({ lot: 'Lot', hu: 'Supplier Hu', invoice: 'Invoice', po: 'Po' } as Record<string, string>)[f]).join(', ')})`, ...(miss.length ? [`${miss.join(', ')} not the same`] : [])];
         r.needsConfirm = miss.length > 0;
       }
       if (!r) throw new HttpError(400, `Roll ${x.pallet} is not a candidate for this line (refresh and try again).`);
@@ -1390,8 +1393,9 @@ async function suggestKorber(env: Env, sh: Row, lot: Row) {
 async function noBarcodeOptions(env: Env, sh: Row, lot: Row, skip: Set<string>) {
   const vb = up(sh.vendor_batch), hu = up(sh.roll_no);
   if (!vb && !hu) return [];
-  const ks = (await env.DB.prepare('SELECT * FROM korber WHERE item = ?1 AND ((?2 <> \'\' AND supplier_hu = ?2) OR (?3 <> \'\' AND upper(lot) = ?3)) LIMIT 80')
-    .bind(normId(sh.material), hu, vb).all<Row>()).results;
+  // rolls whose Actual Qty is the roll / lot QTY first (a common Lot like "*1-1" has many rolls)
+  const ks = (await env.DB.prepare('SELECT * FROM korber WHERE item = ?1 AND ((?2 <> \'\' AND supplier_hu = ?2) OR (?3 <> \'\' AND upper(lot) = ?3)) ORDER BY ABS(qty - ?4) < 0.0005 DESC, ABS(qty - ?4) LIMIT 80')
+    .bind(normId(sh.material), hu, vb, Number(sh.roll_qty) || 0).all<Row>()).results;
   const out: Row[] = [];
   for (const k of ks) {
     if (skip.has(String(k.pallet))) continue; // already the matched roll of another shade-report roll
@@ -1412,8 +1416,9 @@ async function noBarcodeOptions(env: Env, sh: Row, lot: Row, skip: Set<string>) 
     const ph = (await env.DB.prepare('SELECT qty, roll_qty FROM picks WHERE pallet = ? AND cancelled_at IS NULL ORDER BY id').bind(k.pallet).all<Row>()).results;
     const base = ph.length ? Number(ph[0].roll_qty ?? k.qty) : Number(k.qty);
     const before = r3(ph.reduce((t, x) => t + Number(x.qty), 0));
-    const exact = !!checks.hu && checks.lot !== false;
-    const score = (checks.lot ? 20 : 0) + (checks.hu ? 20 : 0) + (checks.invoice ? 10 : 0) + (checks.po ? 10 : 0) + (checks.qty ? 5 : 0) + (base - before > 1e-9 ? 3 : 0);
+    // with a roll number: Supplier Hu (and Lot) decide; without one (no Shade Report): Lot and the lot's QTY
+    const exact = hu ? !!checks.hu && checks.lot !== false : !!checks.lot && !!checks.qty;
+    const score = (checks.lot ? 20 : 0) + (checks.hu ? 20 : 0) + (checks.invoice ? 10 : 0) + (checks.po ? 10 : 0) + (checks.qty ? (hu ? 5 : 30) : 0) + (base - before > 1e-9 ? 3 : 0);
     out.push({ pallet: k.pallet, item: k.item, lot: k.lot, supplier_hu: k.supplier_hu, qty: k.qty, uom: k.uom, location: k.location, status: k.status, invoice: k.invoice,
       picked_before: before, available: Math.max(0, r3(base - before)), checks, exact, score });
   }
@@ -1488,7 +1493,9 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
     const inLoc = zAll.filter((x) => x.sloc && normId(x.sloc) === normId(st.sloc));
     const z = inLoc.length ? inLoc : zAll.filter((x) => !x.sloc || !stock.some((o) => o !== st && o.batch === st.batch && normId(o.sloc) === normId(x.sloc)));
     // UR = Insp. Lot Quantity (when several lots share the batch, keep the one with the same quantity)
-    const same = z.filter((x) => Math.abs(Number(x.qty) - Number(st.ur)) < 0.0005);
+    let same = z.filter((x) => Math.abs(Number(x.qty) - Number(st.ur)) < 0.0005);
+    // several lots of the batch that together are the UR (65.04 + 17.78 + 3.68 = 86.5): all of them
+    if (!same.length && z.length > 1 && Math.abs(r3(z.reduce((t, x) => t + Number(x.qty), 0)) - Number(st.ur)) < 0.0005) same = z;
     if (!zAll.length) steps.push(`Batch ${st.batch}: no ZINR inspection lot.`);
     else if (!same.length) steps.push(`Batch ${st.batch}${st.sloc ? ` (St Loc ${st.sloc})` : ''}: ZINR lot qty ${(z.length ? z : zAll).map((x) => x.qty).join(', ')} ≠ ZMMBE UR ${st.ur}.`);
     // each inspection lot once, even when its batch is in several rows
@@ -1496,19 +1503,38 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
   }
   const rolls = new Map<string, Candidate>();
   const lotInfo: Row[] = [];
-  const noPo = lots.filter((l) => !l.po).map((l) => l.lot), noInv = lots.filter((l) => !l.invoice).map((l) => l.lot);
-  if (noPo.length) steps.push(`ZINR lot ${noPo.join(', ')}: no Purchasing Document, so Po Number was not checked${noPo.length === lots.length ? ' (upload ZINR again with the Purchasing Document column)' : ''}.`);
-  if (noInv.length) steps.push(`ZINR lot ${noInv.join(', ')}: no Vendor Invoice No, so Invoice Number was not checked.`);
+  // a lot without Purchasing Document / Vendor Invoice No (a transfer lot, 8000…) simply has no Po / Invoice check (shown as –).
+  // Only when the whole ZINR upload has none is the column missing.
+  if (lots.length) {
+    const [anyPo, anyInv] = await Promise.all([env.DB.prepare('SELECT 1 FROM zinr WHERE po IS NOT NULL LIMIT 1').first(), env.DB.prepare('SELECT 1 FROM zinr WHERE invoice IS NOT NULL LIMIT 1').first()]);
+    if (!anyPo) steps.push('ZINR has no Purchasing Document column: Po Number is not checked (upload ZINR again with it).');
+    if (!anyInv) steps.push('ZINR has no Vendor Invoice No column: Invoice Number is not checked (upload ZINR again with it).');
+  }
   /** Shade-report rolls whose Barcode Number is not a Korber Pallet: picked by hand */
   const manual: Row[] = [];
   /** Shade-report rolls with no Barcode Number: the user chooses among the Korber rolls that match the other fields */
-  const noBc: { sh: Row; lot: Row }[] = [];
+  const noBc: { sh: Row; lot: Row; noShade?: boolean }[] = [];
+  const seenByBatch = new Set<string>();
   const nobarcode: Row[] = [];
   for (const lot of lots) {
-    const shades = (await env.DB.prepare('SELECT * FROM zcoment WHERE lot = ? ORDER BY sys_roll, roll_no').bind(lot.lot).all<Row>()).results;
+    let shades = (await env.DB.prepare('SELECT * FROM zcoment WHERE lot = ? ORDER BY sys_roll, roll_no').bind(lot.lot).all<Row>()).results;
+    let via: string | null = null;
+    if (!shades.length) {
+      // the Shade Report of the same System Batch under another inspection lot — only a lot that ZINR does not give to any
+      // SO line (e.g. the first lot before a transfer); a batch shared by several SO lines keeps each line's own rolls
+      shades = (await env.DB.prepare('SELECT * FROM zcoment WHERE material = ?1 AND batch = ?2 AND lot NOT IN (SELECT lot FROM zinr) ORDER BY sys_roll, roll_no')
+        .bind(lot.material, lot.batch).all<Row>()).results.filter((x) => !seenByBatch.has(`${x.lot}|${x.roll_no}|${x.barcode}`));
+      for (const x of shades) seenByBatch.add(`${x.lot}|${x.roll_no}|${x.barcode}`);
+      if (shades.length) via = `batch ${lot.batch} (lot ${Array.from(new Set(shades.map((x) => x.lot))).join(', ')})`;
+    }
     const sum = r3(shades.reduce((t, x) => t + Number(x.roll_qty || 0), 0));
-    lotInfo.push({ lot: lot.lot, batch: lot.batch, qty: lot.qty, ur: lot.zmmbe_ur, qty_ok: lot.qty_ok, invoice: lot.invoice, vendor_batch: lot.vendor_batch, sloc: lot.sloc, rolls: shades.length, roll_sum: sum });
-    if (!shades.length) { steps.push(`Inspection lot ${lot.lot}: no Shade Report rolls in ZCOMENT VIEW.`); continue; }
+    lotInfo.push({ lot: lot.lot, batch: lot.batch, qty: lot.qty, ur: lot.zmmbe_ur, qty_ok: lot.qty_ok, invoice: lot.invoice, vendor_batch: lot.vendor_batch, sloc: lot.sloc, rolls: shades.length, roll_sum: sum, via, noShade: !shades.length });
+    if (via) steps.push(`Inspection lot ${lot.lot}: no Shade Report under this lot — the rolls of ${via} are used.`);
+    if (!shades.length) {
+      // no rolls in ZCOMENT at all: the user chooses the Korber roll (same item, Lot Number = Vendor Batch; Actual Qty = lot QTY first)
+      noBc.push({ sh: { lot: lot.lot, material: lot.material, batch: lot.batch, vendor_batch: lot.vendor_batch, roll_no: null, barcode: null, roll_qty: lot.qty, shade: null }, lot, noShade: true });
+      continue;
+    }
     for (const sh of shades) {
       // a roll is matched only when its Korber pallet agrees on all five:
       // Barcode Number = Pallet, Vendor Batch = Lot Number, Vendor Roll No = Supplier Hu (ZCOMENT),
@@ -1576,13 +1602,16 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
       });
     }
   }
-  for (const { sh, lot } of noBc) {
+  for (const { sh, lot, noShade } of noBc) {
     const options = await noBarcodeOptions(env, sh, lot, new Set(rolls.keys()));
-    const base = { lot: lot.lot, batch: lot.batch, material: sh.material, vendor_batch: sh.vendor_batch, roll_no: sh.roll_no, barcode: null, roll_qty: sh.roll_qty, shade: sh.shade, invoice: lot.invoice, po: lot.po };
+    const base = { lot: lot.lot, batch: lot.batch, material: sh.material, vendor_batch: sh.vendor_batch, roll_no: sh.roll_no, barcode: null, roll_qty: sh.roll_qty, shade: sh.shade, invoice: lot.invoice, po: lot.po, noShade: !!noShade };
     if (options.length) nobarcode.push({ ...base, options, done: options.every((o) => Number(o.picked_before) > 0 && Number(o.available) <= 1e-9) });
-    else manual.push({ ...base, reason: `No Barcode Number in ZCOMENT, and no Korber roll of item ${sh.material} has Lot ${sh.vendor_batch ?? '–'} or Supplier Hu ${sh.roll_no ?? '–'}`, suggest: [] });
+    else manual.push({ ...base, reason: noShade ? `Inspection lot ${lot.lot} has no Shade Report in ZCOMENT, and no Korber roll of item ${sh.material} has Lot ${sh.vendor_batch ?? '–'}`
+      : `No Barcode Number in ZCOMENT, and no Korber roll of item ${sh.material} has Lot ${sh.vendor_batch ?? '–'} or Supplier Hu ${sh.roll_no ?? '–'}`, suggest: [] });
   }
-  if (nobarcode.length) steps.push(`${nobarcode.length} shade-report roll${nobarcode.length === 1 ? ' has' : 's have'} no Barcode Number: choose the Korber roll under “No Barcode — choose the roll” (matched on Lot, Supplier Hu, Invoice and Po).`);
+  const nNoShade = nobarcode.filter((m) => m.noShade).length, nNoBc = nobarcode.length - nNoShade;
+  if (nNoBc) steps.push(`${nNoBc} shade-report roll${nNoBc === 1 ? ' has' : 's have'} no Barcode Number: choose the Korber roll under “No Barcode — choose the roll”.`);
+  if (nNoShade) steps.push(`${nNoShade} inspection lot${nNoShade === 1 ? ' has' : 's have'} no Shade Report in ZCOMENT VIEW: choose its Korber roll under “No Barcode — choose the roll” (same item and Lot Number; Actual Qty = lot QTY first).`);
   // pick history: a roll picked in full is gone; a partial pick leaves only its balance (counted from the qty when first picked)
   for (const r of rolls.values()) {
     const ph = (await env.DB.prepare('SELECT day, by_user, qty, roll_qty FROM picks WHERE pallet = ? AND cancelled_at IS NULL ORDER BY id').bind(r.pallet).all<Row>()).results;
