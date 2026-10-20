@@ -287,7 +287,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 32; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 33; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1011,15 +1011,18 @@ const PICK_COLS: Record<'zinr' | 'zcoment' | 'korber', Record<string, string[]>>
     po: ['Purchasing Document', 'Purchasing Doc.', 'Purchase Order', 'PO Number'],
   },
   zcoment: {
-    lot: ['Inspection lot'], material: ['Material'], batch: ['System Batch'], report: ['Report Name'], vendor_batch: ['Vendor Batch'], roll_qty: ['Roll qty.', 'Roll qty'],
-    roll_no: ['Vendor Roll No'], barcode: ['Barcode Number'], shade: ['Shade'], sys_roll: ['System Roll No.'], accept: ['Accept/Reject'], description: ['Material Description'],
+    // two layouts: the detail export (Inspection lot, Material, System Batch, Report Name, Roll qty.) and the roll view
+    // (Inspection #, Batch, Roll No.; no Material — it comes from ZINR — and no Roll qty — Korber's Actual Qty is the QTY)
+    lot: ['Inspection lot', 'Inspection #', 'Inspection No', 'Inspection Lot No'], material: ['Material', 'Material #'], batch: ['System Batch', 'Batch'], report: ['Report Name'],
+    vendor_batch: ['Vendor Batch'], roll_qty: ['Roll qty.', 'Roll qty'], roll_no: ['Vendor Roll No'], barcode: ['Barcode Number'], shade: ['Shade'],
+    sys_roll: ['System Roll No.', 'Roll No.'], accept: ['Accept/Reject'], description: ['Material Description'],
   },
   korber: {
     pallet: ['Pallet'], item: ['Item Number'], display: ['Display Item Number'], lot: ['Lot Number'], qty: ['Actual Qty'], uom: ['Uom'], invoice: ['Invoice Number'], location: ['Location Id'],
     supplier_hu: ['Supplier Hu'], status: ['Status'], po: ['Po Number'],
   },
 };
-const REQUIRED: Record<string, string[]> = { zinr: ['lot', 'batch', 'material', 'qty', 'so', 'li'], zcoment: ['lot', 'material', 'roll_qty', 'barcode'], korber: ['pallet', 'item', 'lot', 'qty'] };
+const REQUIRED: Record<string, string[]> = { zinr: ['lot', 'batch', 'material', 'qty', 'so', 'li'], zcoment: ['lot', 'roll_no', 'shade'], korber: ['pallet', 'item', 'lot', 'qty'] };
 const PICK_LABEL: Record<string, string> = { zinr: 'ZINR', zcoment: 'ZCOMENT VIEW', korber: 'Korber inventory' };
 const up = (v: unknown) => String(v ?? '').trim().toUpperCase();
 const r3 = (n: number) => Math.round(n * 1000) / 1000;
@@ -1086,10 +1089,17 @@ async function handlePick(env: Env, req: Request, p: string) {
       rows = Array.from(seen.values());
     }
     if (!rows.length) throw new HttpError(400, `${PICK_LABEL[b.src]}: no usable rows${b.src === 'zcoment' ? ' (only "Shade Report" rows are kept)' : ''}.`);
+    // the roll view has no Material: take the inspection lot's from ZINR now (unchanged rows stay unchanged on the next upload)
+    if (b.src === 'zcoment' && rows.some((r) => !r.material)) {
+      const mat = new Map((await env.DB.prepare('SELECT lot, material FROM zinr').all<{ lot: string; material: string }>()).results.map((z) => [String(z.lot), z.material]));
+      for (const r of rows) if (!r.material) r.material = mat.get(String(r.lot)) ?? '';
+    }
     const cols = Object.keys(rows[0]);
     const d = await diffReplace(env, b.src, cols, rows, '1 = 1', [], b.src === 'korber' ? 150 : 400);
     const stmts: D1PreparedStatement[] = [...d.stmts];
     if (b.src === 'korber') poIx = null;
+    // ZCOMENT rows without Material (the roll view): the inspection lot's material from ZINR — after a ZINR upload too
+    if (b.src === 'zcoment' || b.src === 'zinr') stmts.push(env.DB.prepare("UPDATE zcoment SET material = (SELECT z.material FROM zinr z WHERE z.lot = zcoment.lot LIMIT 1) WHERE COALESCE(material, '') = '' AND EXISTS (SELECT 1 FROM zinr z WHERE z.lot = zcoment.lot)"));
     if (b.src === 'korber') stmts.push(env.DB.prepare("INSERT INTO config (k, v) VALUES ('korber_header', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(JSON.stringify(b.header)));
     stmts.push(env.DB.prepare('INSERT INTO uploads (src, file_name, sheet_name, row_count, uploaded_by, uploaded_at) VALUES (?,?,?,?,?,?)').bind(b.src, b.fileName || null, null, rows.length, s.u, now()));
     stmts.push(env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'upload',
@@ -1598,6 +1608,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
       continue;
     }
     for (const sh of shades) {
+      if (!sh.material) sh.material = lot.material; // the roll view of ZCOMENT has no Material: the lot's
       // a roll is matched only when its Korber pallet agrees on all five:
       // Barcode Number = Pallet, Vendor Batch = Lot Number, Vendor Roll No = Supplier Hu (ZCOMENT),
       // Vendor Invoice No = Invoice Number, Purchasing Document = Po Number (ZINR)
@@ -1607,7 +1618,8 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
         item: normId(k.item) === normId(sh.material),
         lot: !!sh.vendor_batch && up(k.lot) === up(sh.vendor_batch),
         hu: !!sh.roll_no && up(k.supplier_hu) === up(sh.roll_no),
-        qty: Math.abs(Number(k.qty) - Number(sh.roll_qty)) < 0.0005,
+        // the roll view of ZCOMENT has no Roll qty: then there is nothing to compare (Korber's Actual Qty is the QTY)
+        qty: Number(sh.roll_qty) > 0 ? Math.abs(Number(k.qty) - Number(sh.roll_qty)) < 0.0005 : null,
         // a ZINR lot without Vendor Invoice No / Purchasing Document: that check is not possible (shown as –), it does not block the match
         invoice: lot.invoice ? up(k.invoice) === up(lot.invoice) : null,
         po: lot.po ? poMatch(await korberPo(env, k), lot) : null,
@@ -1648,12 +1660,12 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
       if (prev) {
         if (!prev.insp_lots.includes(String(lot.lot))) prev.insp_lots.push(String(lot.lot));
         if (!prev.batches.includes(String(lot.batch))) prev.batches.push(String(lot.batch));
-        if (!prev.parts!.some((x) => x.batch === String(lot.batch))) prev.parts!.push({ batch: String(lot.batch), lot: String(lot.lot), qty: Number(sh.roll_qty) || 0 });
+        if (Number(sh.roll_qty) > 0 && !prev.parts!.some((x) => x.batch === String(lot.batch))) prev.parts!.push({ batch: String(lot.batch), lot: String(lot.lot), qty: Number(sh.roll_qty) });
         continue;
       }
       const warnings: string[] = [];
       let qtyNote: string | null = null;
-      if (!checks.qty && sh.barcode) {
+      if (checks.qty === false && sh.barcode) {
         // one physical roll inspected under several batches (e.g. 86 in one batch + 1 in another = Korber 87): compare with the total
         const parts = (await env.DB.prepare('SELECT batch, MAX(roll_qty) q FROM zcoment WHERE barcode = ? GROUP BY batch').bind(sh.barcode).all<{ batch: string; q: number }>()).results;
         const sum = r3(parts.reduce((t, x) => t + Number(x.q || 0), 0));
@@ -1663,7 +1675,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
         }
       }
       // the roll's QTY is Korber's Actual Qty (what is on the shelf now); a different ZCOMENT Roll qty is shown, not a stop
-      const korberQty = !checks.qty;
+      const korberQty = checks.qty === false;
       if (korberQty) qtyNote = `ZCOMENT Roll qty ${sh.roll_qty} · Korber Actual Qty ${k.qty} is used`;
       if (returned) warnings.push(returned);
       rolls.set(pallet, {
@@ -1671,7 +1683,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
         invoice: k.invoice as string | null, actual_qty: Number(k.qty), base_qty: Number(k.qty), picked_before: 0, available: Number(k.qty), roll_qty: Number(sh.roll_qty),
         shade: sh.shade as string | null, insp_lots: [String(lot.lot)], batches: [String(lot.batch)], checks, warnings, needsConfirm: warnings.length > 0, raw: k.raw as string | null, picks: [],
         via: found.via, barcode: sh.barcode as string | null, qtyNote, korberQty, ...(found.byHu ? { byHu: true } : {}),
-        parts: [{ batch: String(lot.batch), lot: String(lot.lot), qty: korberQty ? Number(k.qty) : Number(sh.roll_qty) || 0 }],
+        parts: [{ batch: String(lot.batch), lot: String(lot.lot), qty: checks.qty === true ? Number(sh.roll_qty) : Number(k.qty) }],
       });
     }
   }

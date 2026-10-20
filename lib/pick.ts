@@ -7,7 +7,8 @@ import { readWorkbook, type Grid } from './mapping';
 export type PickSrc = 'zinr' | 'zcoment' | 'korber';
 export const PICK_SRCS: { src: PickSrc; title: string; hint: string; needs: string[] }[] = [
   { src: 'zinr', title: 'ZINR', hint: 'Inspection lots: Sales Order, Line Item, Material, Batch, Insp. Lot Quantity, Vendor Invoice No', needs: ['inspection lot', 'insp lot quantity'] },
-  { src: 'zcoment', title: 'ZCOMENT VIEW', hint: 'Only the "Shade Report" rows are kept: one per roll (Roll qty, Vendor Roll No, Barcode, Shade)', needs: ['inspection lot', 'roll qty'] },
+  // either layout: the detail export (Inspection lot, Report Name, Roll qty.) or the roll view (Inspection #, Vendor Roll No, Shade, Barcode Number)
+  { src: 'zcoment', title: 'ZCOMENT VIEW', hint: 'One row per roll: Inspection # / Inspection lot, Vendor Batch, Vendor Roll No, Shade, Barcode Number (only "Shade Report" rows when there is a Report Name)', needs: ['vendor roll no', 'shade'] },
   { src: 'korber', title: 'Korber Inventory', hint: 'Only rolls of items in the plan are uploaded: Pallet, Item Number, Lot Number, Actual Qty, Supplier Hu', needs: ['pallet', 'item number', 'actual qty'] },
 ];
 
