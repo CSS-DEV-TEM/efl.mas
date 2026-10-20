@@ -369,7 +369,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
             <div className="pk-chain">
               {c.lots.map((l) => (
                 <span key={l.lot} className={`pk-lot ${l.qty_ok ? '' : 'warn'}`} title={`Batch ${l.batch}${l.sloc ? ' · St Loc ' + l.sloc : ''}${l.invoice ? ' · invoice ' + l.invoice : ''}`}>
-                  Lot <b>{l.lot}</b> · batch {l.batch} · {fmtQty(l.qty)} {l.qty_ok ? '= UR ✓' : `≠ UR ${fmtQty(l.ur)}`} · {l.noShade ? 'no Shade Report' : `${l.rolls} roll${l.rolls === 1 ? '' : 's'}${l.via ? ' (by batch)' : ''}`}
+                  Lot <b>{l.lot}</b> · batch {l.batch} · {fmtQty(l.qty)} {l.qty_ok ? '= UR ✓' : `≠ UR ${fmtQty(l.ur)}`} · {l.direct ? `${l.direct} Korber roll${l.direct === 1 ? '' : 's'} (ZINR → Korber)` : l.noShade ? 'no Shade Report' : `${l.rolls} roll${l.rolls === 1 ? '' : 's'}${l.via ? ' (by batch)' : ''}`}
                 </span>
               ))}
               {!c.lots.length && <span className="pk-lot warn">No ZINR lot matched</span>}
@@ -448,7 +448,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
               <div className="nb-pick">
                 <h3>No Barcode — choose the roll <span className="pill info">{c.nobarcode!.length}</span>{nbSel.length > 0 && <span className="muted small"> · {nbSel.length} chosen</span>}</h3>
                 <p className="sub" style={{ margin: '0 0 6px' }}>These Shade Report rolls have no Barcode Number in ZCOMENT. Listed: Korber rolls of the same item with <b>Supplier Hu = Vendor Roll No</b> (only <b>Lot Number = Vendor Batch</b> when there is no roll no), Invoice and Po not different, and not the barcode of another roll. Choose the right one — a roll whose Lot or Qty differs needs “I checked”. An inspection lot with <b>no Shade Report</b> in ZCOMENT is listed here too: its Korber rolls with the same Lot Number, the one whose Actual Qty is the lot QTY first.</p>
-                <table className="mini">
+                <div className="table-wrap pk-tbl"><table className="mini">
                   <thead><tr><th>Vendor Roll No</th><th>Vendor Batch</th><th>Batch</th><th>Shade</th><th className="n">Roll / lot qty</th><th>Korber roll</th><th className="n">Pick qty</th></tr></thead>
                   <tbody>{c.nobarcode!.map((m, i) => {
                     const chosen = nbSel.find(([, x]) => x.nb === m);
@@ -476,7 +476,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
                       </tr>
                     );
                   })}</tbody>
-                </table>
+                </table></div>
               </div>
             )}
 
@@ -484,14 +484,14 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
               <div className="manual-pick">
                 <h3>Not matched — pick by hand <span className="pill warn">{c.manual!.length}</span></h3>
                 <p className="sub" style={{ margin: '0 0 6px' }}>The matched rolls leave <b>{fmtQty(shortfall)}</b>{manualTotal > 0 && manualLeft > 1e-9 ? <> (<b>{fmtQty(manualLeft)}</b> still open)</> : ''}. Only this balance can be picked by hand: choose a Korber roll (search or scan pallet, lot or supplier HU).</p>
-                <table className="mini">
+                <div className="table-wrap pk-tbl"><table className="mini">
                   <thead><tr><th>Roll</th><th>ZCOMENT barcode</th><th>Shade</th><th className="n">Roll qty</th><th>Why it did not match</th><th>Korber roll</th><th className="n">Pick qty</th></tr></thead>
                   <tbody>{c.manual!.map((m, i) => {
                     const chosen = manualSel.find(([, x]) => x.manual === m);
                     return (
                       <tr key={i} className={chosen ? 'picked' : ''}>
                         <td><b>{m.roll_no || '–'}</b></td><td className="mono">{m.barcode || <span className="muted">none</span>}</td><td><b>{m.shade}</b></td><td className="n">{fmtQty(m.roll_qty)}</td>
-                        <td className="muted small">{m.reason}</td>
+                        <td className="muted small why" title={m.reason}><span>{m.reason}</span></td>
                         <td>{chosen ? <span className="mono">{chosen[0]} <button className="btn sm" onClick={() => setSel((x) => { const n = { ...x }; delete n[chosen[0]]; return n; })} aria-label="Remove">✕</button></span>
                           : <button className="btn sm" disabled={manualLeft <= 1e-9} title={manualLeft <= 1e-9 ? 'The balance is already covered' : undefined} onClick={() => setChoosing(m)}>Choose Korber roll…</button>}</td>
                         <td className="n">{chosen ? <input className="as-search" type="number" step="0.001" min="0.001" max={Math.min(chosen[1].korber?.available ?? Infinity, r3(shortfall - manualTotal + (Number(chosen[1].qty) || 0)))} style={{ width: 92 }} value={chosen[1].qty}
@@ -499,7 +499,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
                       </tr>
                     );
                   })}</tbody>
-                </table>
+                </table></div>
               </div>
             )}
             {(c.manual?.length ?? 0) > 0 && shortfall <= 1e-9 && (

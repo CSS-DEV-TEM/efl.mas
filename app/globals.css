@@ -695,3 +695,29 @@ table.mini tr.marked > td { background: color-mix(in srgb, var(--accent) 9%, tra
 .nb-select { min-width: 300px; max-width: 520px; width: 100%; }
 .nb-checks { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 .nb-checks .pill { font-size: 11px; }
+
+/* pick window: nothing may be wider than the window (grid children default to their content width) */
+.modal > *, .pkm > *, .manual-pick, .nb-pick, .pk-sec { min-width: 0; }
+.modal { max-width: 100%; }
+.pk-tbl { max-height: 340px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.pk-tbl table.mini th { background: var(--panel-2, var(--panel)); }
+table.mini td.why { white-space: normal; min-width: 220px; max-width: 420px; line-height: 1.35; }
+table.mini td.why span { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.pk-sec-head .muted.small { flex: 1 1 320px; min-width: 0; }
+.pkm .modal-foot { position: sticky; bottom: -24px; background: var(--panel); padding: 10px 0 12px; margin: 0 -20px -18px; padding-left: 20px; padding-right: 20px; border-top: 1px solid var(--line); border-radius: 0 0 10px 10px; z-index: 2; }
+@media (max-width: 720px) { .nb-select { min-width: 200px; } .pk-kind { order: 3; width: 100%; } }
+
+/* phone: the menu scrolls sideways instead of widening the page */
+@media (max-width: 760px) {
+  .nav { order: 3; width: 100%; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+  .nav::-webkit-scrollbar { display: none; }
+  .nav a { white-space: nowrap; flex: none; }
+  .pkm .modal-head { flex-wrap: wrap; }
+  .pkm .modal-head > div:first-child { flex: 1 1 60%; min-width: 0; }
+  .pkm .modal-head h2 { font-size: 16px; }
+  .pk-kind { order: 3; width: 100%; display: grid; grid-template-columns: 1fr 1fr; }
+}
+/* dark: selected rows a calmer tint */
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) table.mini tr.picked td { background: color-mix(in srgb, var(--accent) 8%, transparent); } }
+:root[data-theme="dark"] table.mini tr.picked td { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+table.mini tr.picked td:first-child { box-shadow: inset 3px 0 0 var(--accent); }

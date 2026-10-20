@@ -287,7 +287,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 29; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 30; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1647,6 +1647,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
       });
     }
   }
+  for (const li of lotInfo) { const n = Array.from(rolls.values()).filter((r) => r.direct && r.insp_lots.includes(String(li.lot))).length; if (n) li.direct = n; }
   if (directLots.size) {
     // a lot whose rolls came from Korber this way needs no "choose the roll" for a missing Shade Report
     for (let i = noBc.length - 1; i >= 0; i--) if (noBc[i].noShade && directLots.has(String(noBc[i].lot.lot))) noBc.splice(i, 1);
