@@ -287,7 +287,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 28; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 29; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1160,7 +1160,7 @@ async function handlePick(env: Env, req: Request, p: string) {
       if (r && nb) {
         // chosen by the user from the matching rolls: confirmation is needed only when a field did not match
         const ck = nb.o.checks as Record<string, boolean | null>;
-        const miss = [ck.lot === false ? 'Lot' : '', ck.hu === false ? 'Supplier Hu' : '', ck.qty === false ? 'Qty' : ''].filter(Boolean);
+        const miss = [ck.lot === false ? 'Lot' : '', ck.hu === false ? 'Supplier Hu' : '', ck.qty === false && nb.m.noShade ? 'Qty' : ''].filter(Boolean);
         r.warnings = [`${nb.m.noShade ? `Inspection lot ${nb.m.lot} has no Shade Report — Korber roll` : `No Barcode Number in ZCOMENT — roll ${nb.m.roll_no ?? "?"}`} chosen by ${s.u} (matched on ${['lot', 'hu', 'invoice', 'po'].filter((f) => ck[f]).map((f) => ({ lot: 'Lot', hu: 'Supplier Hu', invoice: 'Invoice', po: 'Po' } as Record<string, string>)[f]).join(', ')})`, ...(miss.length ? [`${miss.join(', ')} not the same`] : [])];
         r.needsConfirm = miss.length > 0;
       }
@@ -1399,7 +1399,7 @@ async function noBarcodeOptions(env: Env, sh: Row, lot: Row, skip: Set<string>) 
   const out: Row[] = [];
   for (const k of ks) {
     if (skip.has(String(k.pallet))) continue; // already the matched roll of another shade-report roll
-    const kpo = lot.po ? await korberPo(env, k) : null;
+    const kpo = await korberPo(env, k);
     const checks: Record<string, boolean | null> = {
       lot: vb ? up(k.lot) === vb : null,
       hu: hu ? up(k.supplier_hu) === hu : null,
@@ -1410,6 +1410,11 @@ async function noBarcodeOptions(env: Env, sh: Row, lot: Row, skip: Set<string>) 
     // the roll number decides; without one, the Lot must agree. Invoice / Po never contradict.
     if (hu ? !checks.hu : !checks.lot) continue;
     if (checks.invoice === false || checks.po === false) continue;
+    // a lot with no Purchasing Document (a transfer lot): a roll whose Po Number is another SO line's PO in ZINR is that line's roll
+    if (!lot.po && kpo) {
+      const zpo = up(kpo).replace(/^[A-Z]{2,10}-(?=[A-Z0-9])/, '');
+      if (await env.DB.prepare('SELECT 1 FROM zinr WHERE upper(po) = ?1 AND NOT (so = ?2 AND li = ?3) LIMIT 1').bind(zpo, lot.so, lot.li).first()) continue;
+    }
     // another shade-report roll has this pallet as its barcode: not this roll
     const core = palletCore(k.pallet);
     if (await env.DB.prepare('SELECT 1 FROM zcoment WHERE barcode = ?1 OR (?2 IS NOT NULL AND barcode LIKE \'%\' || ?2 || \'%\') LIMIT 1').bind(up(k.pallet), core).first()) continue;
@@ -1446,7 +1451,7 @@ async function manualCandidate(env: Env, pallet: string, m: ManualFor, lineItem:
   if (!checks.item) warnings.push(`Item ${k.item} ≠ ${lineItem}`);
   if (checks.lot === false) warnings.push(`Lot ${k.lot} ≠ vendor batch ${m.vendor_batch}`);
   if (checks.hu === false) warnings.push(`Supplier HU ${k.supplier_hu} ≠ roll ${m.roll_no}`);
-  if (checks.qty === false) warnings.push(`Korber Actual Qty ${k.qty} ≠ roll qty ${m.roll_qty}`);
+  // QTY: Korber's Actual Qty is used; a different ZCOMENT Roll qty is not a warning
   if (checks.invoice === false) warnings.push(`Invoice ${k.invoice} ≠ ZINR ${m.invoice}`);
   if (checks.po === false) warnings.push(`Po Number ${(await korberPo(env, k)) ?? '–'} ≠ ZINR ${m.po}`);
   const ph = (await env.DB.prepare('SELECT day, by_user, qty, roll_qty FROM picks WHERE pallet = ? AND cancelled_at IS NULL ORDER BY id').bind(k.pallet).all<Row>()).results;
@@ -1465,10 +1470,14 @@ interface Candidate {
   actual_qty: number; base_qty: number; picked_before: number; available: number; roll_qty: number; shade: string | null;
   insp_lots: string[]; batches: string[]; checks: Record<string, boolean | null>; warnings: string[]; needsConfirm: boolean; raw: string | null;
   picks: { day: string; by_user: string; qty: number }[];
+  /** matched straight from ZINR to Korber: Item + Lot Number = Vendor Batch + Invoice + Po (no ZCOMENT barcode) */
+  direct?: boolean;
+  /** that PO / invoice / lot is shared by several SO lines: the user ticks the rolls (the system does not) */
+  pool?: number;
   /** the barcode was found under another pallet label (e.g. COMPCP… for CP…) */
   via?: string | null; barcode?: string | null;
-  /** the roll's QTY is split over batches in ZCOMENT and adds up to Korber's Actual Qty */
-  qtyNote?: string | null;
+  /** the roll's QTY is split over batches in ZCOMENT and adds up to Korber's Actual Qty — or ZCOMENT differs and Korber's is used */
+  qtyNote?: string | null; korberQty?: boolean;
   /** how much of the roll is in each batch of this line (ZCOMENT roll qty per inspection lot) */
   parts?: { batch: string; lot: string; qty: number }[];
 }
@@ -1592,21 +1601,66 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
           qtyNote = `Korber ${k.qty} = ${parts.map((x) => `${x.q} (batch ${x.batch})`).join(' + ')}`;
         }
       }
-      if (!checks.qty) warnings.push(`Korber Actual Qty ${k.qty} ≠ roll qty ${sh.roll_qty}`);
+      // the roll's QTY is Korber's Actual Qty (what is on the shelf now); a different ZCOMENT Roll qty is shown, not a stop
+      const korberQty = !checks.qty;
+      if (korberQty) qtyNote = `ZCOMENT Roll qty ${sh.roll_qty} · Korber Actual Qty ${k.qty} is used`;
       rolls.set(pallet, {
         pallet, item: String(k.item), lot: k.lot as string | null, supplier_hu: k.supplier_hu as string | null, location: k.location as string | null, uom: k.uom as string | null,
         invoice: k.invoice as string | null, actual_qty: Number(k.qty), base_qty: Number(k.qty), picked_before: 0, available: Number(k.qty), roll_qty: Number(sh.roll_qty),
         shade: sh.shade as string | null, insp_lots: [String(lot.lot)], batches: [String(lot.batch)], checks, warnings, needsConfirm: warnings.length > 0, raw: k.raw as string | null, picks: [],
-        via: found.via, barcode: sh.barcode as string | null, qtyNote,
-        parts: [{ batch: String(lot.batch), lot: String(lot.lot), qty: Number(sh.roll_qty) || 0 }],
+        via: found.via, barcode: sh.barcode as string | null, qtyNote, korberQty,
+        parts: [{ batch: String(lot.batch), lot: String(lot.lot), qty: korberQty ? Number(k.qty) : Number(sh.roll_qty) || 0 }],
       });
     }
+  }
+  // ZINR → Korber straight: the rolls of the same Item with Lot Number = Vendor Batch, Invoice Number = Vendor Invoice No and
+  // Po Number = Purchasing Document. Korber's Actual Qty is the roll QTY. Rolls already matched by barcode, and rolls that are the
+  // barcode of another line's ZCOMENT roll, are left out. When that PO / invoice / lot belongs to one SO line, the system selects them;
+  // when several SO lines share it, they are listed for the user to tick.
+  const directLots = new Set<string>();
+  for (const lot of lots) {
+    if (!lot.po || !lot.invoice || !lot.vendor_batch) continue;
+    const ks = (await env.DB.prepare('SELECT * FROM korber WHERE item = ?1 AND upper(lot) = ?2 AND upper(invoice) = ?3 LIMIT 300')
+      .bind(normId(lot.material), up(lot.vendor_batch), up(lot.invoice)).all<Row>()).results;
+    if (!ks.length) continue;
+    // the SO lines that share this PO / invoice / lot and still have UR in ZMMBE (a line whose stock is gone does not count)
+    const lines = (await env.DB.prepare(`SELECT COUNT(DISTINCT z.so || '|' || z.li) n FROM zinr z WHERE z.material = ?1 AND upper(z.vendor_batch) = ?2 AND upper(z.invoice) = ?3 AND upper(z.po) = ?4
+        AND EXISTS (SELECT 1 FROM stock s WHERE s.src = 'zmmbe' AND s.so = z.so AND s.li = z.li AND s.material = z.material AND s.batch = z.batch AND s.ur > 0)`)
+      .bind(lot.material, up(lot.vendor_batch), up(lot.invoice), up(lot.po)).first<{ n: number }>())?.n ?? 1;
+    for (const k of ks) {
+      const pallet = String(k.pallet);
+      if (rolls.has(pallet)) { const r = rolls.get(pallet)!; if (!r.insp_lots.includes(String(lot.lot)) && r.direct) { r.insp_lots.push(String(lot.lot)); } continue; }
+      if (!poMatch(await korberPo(env, k), lot)) continue;
+      // the barcode of a ZCOMENT roll of a lot that is not this line's: that roll belongs there
+      const owner = await env.DB.prepare(`SELECT c.lot FROM zcoment c WHERE (c.barcode = ?1 OR (?2 IS NOT NULL AND c.barcode LIKE '%' || ?2 || '%'))
+        AND c.lot NOT IN (SELECT value FROM json_each(?3)) LIMIT 1`).bind(up(pallet), palletCore(pallet), JSON.stringify(lots.map((l) => String(l.lot)))).first();
+      if (owner) continue;
+      directLots.add(String(lot.lot));
+      rolls.set(pallet, {
+        pallet, item: String(k.item), lot: k.lot as string | null, supplier_hu: k.supplier_hu as string | null, location: k.location as string | null, uom: k.uom as string | null,
+        invoice: k.invoice as string | null, actual_qty: Number(k.qty), base_qty: Number(k.qty), picked_before: 0, available: Number(k.qty), roll_qty: Number(k.qty),
+        shade: null, insp_lots: [String(lot.lot)], batches: [String(lot.batch)],
+        checks: { item: true, lot: true, invoice: true, po: true, hu: null, qty: null, barcode: null },
+        warnings: [], needsConfirm: false, raw: k.raw as string | null, picks: [], direct: true, ...(lines > 1 ? { pool: lines } : {}),
+        qtyNote: `Matched from ZINR: Item, Lot Number ${k.lot}, Invoice ${k.invoice}, Po ${lot.po}${lines > 1 ? ` — this PO / invoice / lot is shared by ${lines} SO lines: tick the rolls of this line` : ''}`,
+        parts: [{ batch: String(lot.batch), lot: String(lot.lot), qty: Number(k.qty) }],
+      });
+    }
+  }
+  if (directLots.size) {
+    // a lot whose rolls came from Korber this way needs no "choose the roll" for a missing Shade Report
+    for (let i = noBc.length - 1; i >= 0; i--) if (noBc[i].noShade && directLots.has(String(noBc[i].lot.lot))) noBc.splice(i, 1);
+    const pooled = Array.from(rolls.values()).filter((r) => r.pool).length;
+    steps.push(`${Array.from(rolls.values()).filter((r) => r.direct).length} roll${directLots.size === 1 ? '' : 's'} matched straight from ZINR to Korber (Item, Lot Number, Invoice, Po; QTY = Korber Actual Qty)${pooled ? ` — ${pooled} of them are of a PO shared by several SO lines: tick the ones of this line` : ''}.`);
   }
   for (const { sh, lot, noShade } of noBc) {
     const options = await noBarcodeOptions(env, sh, lot, new Set(rolls.keys()));
     const base = { lot: lot.lot, batch: lot.batch, material: sh.material, vendor_batch: sh.vendor_batch, roll_no: sh.roll_no, barcode: null, roll_qty: sh.roll_qty, shade: sh.shade, invoice: lot.invoice, po: lot.po, noShade: !!noShade };
     if (options.length) nobarcode.push({ ...base, options, done: options.every((o) => Number(o.picked_before) > 0 && Number(o.available) <= 1e-9) });
-    else manual.push({ ...base, reason: noShade ? `Inspection lot ${lot.lot} has no Shade Report in ZCOMENT, and no Korber roll of item ${sh.material} has Lot ${sh.vendor_batch ?? '–'}`
+    else manual.push({ ...base, reason: noShade
+      ? ((await env.DB.prepare('SELECT COUNT(*) n FROM korber WHERE item = ? AND upper(lot) = ?').bind(normId(sh.material), up(sh.vendor_batch)).first<{ n: number }>())?.n
+        ? `Inspection lot ${lot.lot} has no Shade Report in ZCOMENT; the Korber rolls of item ${sh.material} with Lot ${sh.vendor_batch ?? '–'} belong to other SO lines (their Po Number / barcode) — this lot's roll is not in the Korber file`
+        : `Inspection lot ${lot.lot} has no Shade Report in ZCOMENT, and no Korber roll of item ${sh.material} has Lot ${sh.vendor_batch ?? '–'}`)
       : `No Barcode Number in ZCOMENT, and no Korber roll of item ${sh.material} has Lot ${sh.vendor_batch ?? '–'} or Supplier Hu ${sh.roll_no ?? '–'}`, suggest: [] });
   }
   const nNoShade = nobarcode.filter((m) => m.noShade).length, nNoBc = nobarcode.length - nNoShade;

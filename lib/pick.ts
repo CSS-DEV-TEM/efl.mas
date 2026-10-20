@@ -19,6 +19,12 @@ export interface Candidate {
   /** found under another pallet label than the ZCOMENT Barcode Number (e.g. COMPCP… for CP…) */
   via?: string | null; barcode?: string | null;
   qtyNote?: string | null;
+  /** ZCOMENT Roll qty differs: Korber's Actual Qty is the roll's QTY */
+  korberQty?: boolean;
+  /** matched straight from ZINR to Korber (Item + Lot + Invoice + Po) */
+  direct?: boolean;
+  /** that PO / invoice / lot is shared by this many SO lines: the user ticks the rolls */
+  pool?: number;
   /** how much of the roll is in each batch of this line */
   parts?: { batch: string; lot: string; qty: number }[];
 }
