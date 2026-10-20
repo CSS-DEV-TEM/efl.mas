@@ -287,7 +287,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 34; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 35; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1537,6 +1537,8 @@ interface Candidate {
   byHu?: boolean;
   /** this lot's ZCOMENT row had no barcode: taken from the same roll's row under another inspection lot */
   borrowed?: boolean;
+  /** the rest of the roll stays with this SO Plant (other SO lines on the roll have the same SO Plant, or none): no need to cut */
+  sameSoPlant?: { plant: string; lines: string[] };
   /** that PO / invoice / lot is shared by several SO lines: the user ticks the rolls (the system does not) */
   pool?: number;
   /** the barcode was found under another pallet label (e.g. COMPCP… for CP…) */
@@ -1656,6 +1658,11 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
         if (/\bRET|\bRTN\b/.test(kp) && misses.every((m) => /^(Invoice|Po Number)/.test(m))) returned = `Returned roll — Korber Po ${kp || '–'}, Invoice ${k.invoice ?? '–'} (ZINR ${lot.po ?? '–'} / ${lot.invoice ?? '–'})`;
       }
       if (returned) misses.length = 0;
+      // the barcode is not a Korber pallet (nor under another label): the same logic as a roll with no barcode
+      if (!k && sh.barcode && !found.ambiguous.length) {
+        if (!noBc.some((m) => m.lot.lot === lot.lot && m.sh.roll_no === sh.roll_no && m.sh.vendor_batch === sh.vendor_batch)) noBc.push({ sh: { ...sh, barcode_missing: sh.barcode }, lot });
+        continue;
+      }
       if (!k || misses.length) {
         if (!manual.some((m) => m.lot === lot.lot && m.roll_no === sh.roll_no && m.barcode === sh.barcode)) {
           manual.push({ lot: lot.lot, batch: lot.batch, material: sh.material, vendor_batch: sh.vendor_batch, roll_no: sh.roll_no, barcode: sh.barcode, roll_qty: sh.roll_qty,
@@ -1753,16 +1760,20 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
   }
   for (const { sh, lot, noShade } of noBc) {
     const options = await noBarcodeOptions(env, sh, lot, new Set(rolls.keys()));
-    const base = { lot: lot.lot, batch: lot.batch, material: sh.material, vendor_batch: sh.vendor_batch, roll_no: sh.roll_no, barcode: null, roll_qty: sh.roll_qty, shade: sh.shade, invoice: lot.invoice, po: lot.po, noShade: !!noShade };
+    const base = { lot: lot.lot, batch: lot.batch, material: sh.material, vendor_batch: sh.vendor_batch, roll_no: sh.roll_no, barcode: null, roll_qty: sh.roll_qty, shade: sh.shade, invoice: lot.invoice, po: lot.po, noShade: !!noShade,
+      ...(sh.barcode_missing ? { zcBarcode: sh.barcode_missing } : {}) };
     if (options.length) nobarcode.push({ ...base, options, done: options.every((o) => Number(o.picked_before) > 0 && Number(o.available) <= 1e-9) });
-    else manual.push({ ...base, reason: noShade
+    else manual.push({ ...base, barcode: sh.barcode_missing ?? null, reason: sh.barcode_missing
+      ? `Pallet ${sh.barcode_missing} is not in Korber, and no Korber roll of item ${sh.material} has Supplier Hu ${sh.roll_no ?? '–'} with Lot ${sh.vendor_batch ?? '–'}`
+      : noShade
       ? ((await env.DB.prepare('SELECT COUNT(*) n FROM korber WHERE item = ? AND upper(lot) = ?').bind(normId(sh.material), up(sh.vendor_batch)).first<{ n: number }>())?.n
         ? `Inspection lot ${lot.lot} has no Shade Report in ZCOMENT; the Korber rolls of item ${sh.material} with Lot ${sh.vendor_batch ?? '–'} belong to other SO lines (their Po Number / barcode) — this lot's roll is not in the Korber file`
         : `Inspection lot ${lot.lot} has no Shade Report in ZCOMENT, and no Korber roll of item ${sh.material} has Lot ${sh.vendor_batch ?? '–'}`)
       : `No Barcode Number in ZCOMENT, and no Korber roll of item ${sh.material} has Lot ${sh.vendor_batch ?? '–'} or Supplier Hu ${sh.roll_no ?? '–'}`, suggest: [] });
   }
-  const nNoShade = nobarcode.filter((m) => m.noShade).length, nNoBc = nobarcode.length - nNoShade;
+  const nNoShade = nobarcode.filter((m) => m.noShade).length, nGone = nobarcode.filter((m) => m.zcBarcode).length, nNoBc = nobarcode.length - nNoShade - nGone;
   if (nNoBc) steps.push(`${nNoBc} shade-report roll${nNoBc === 1 ? ' has' : 's have'} no Barcode Number: choose the Korber roll under “No Barcode — choose the roll”.`);
+  if (nGone) steps.push(`${nGone} shade-report roll${nGone === 1 ? "'s barcode is" : "s' barcodes are"} not in Korber: choose the Korber roll (same Supplier Hu = Vendor Roll No and Lot) under “No Barcode — choose the roll”.`);
   if (nNoShade) steps.push(`${nNoShade} inspection lot${nNoShade === 1 ? ' has' : 's have'} no Shade Report in ZCOMENT VIEW: choose its Korber roll under “No Barcode — choose the roll” (same item and Lot Number; Actual Qty = lot QTY first).`);
   // pick history: a roll picked in full is gone; a partial pick leaves only its balance (counted from the qty when first picked)
   for (const r of rolls.values()) {
@@ -1772,6 +1783,22 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
     r.picked_before = r3(ph.reduce((t, x) => t + Number(x.qty), 0));
     r.available = Math.max(0, r3(r.base_qty - r.picked_before));
     r.picks = ph.map((x) => ({ day: String(x.day), by_user: String(x.by_user), qty: Number(x.qty) }));
+  }
+  // SO Plant: the rest of a roll (after a cut) belongs to the other SO lines that have this roll in ZCOMENT — or stays on this
+  // line. When they all have this line's SO Plant (ZMMBE), the roll need not be cut: the plant gets it anyway.
+  const myPlants = Array.from(new Set(stock.map((x) => String(x.so_plant ?? '')).filter(Boolean)));
+  if (myPlants.length === 1) {
+    for (const r of rolls.values()) {
+      const others = (await env.DB.prepare(`SELECT DISTINCT z.so, z.li, z.material FROM zcoment c JOIN zinr z ON z.lot = c.lot
+        WHERE (c.barcode = ?1 OR (?4 <> '' AND c.material = ?2 AND upper(c.vendor_batch) = ?3 AND upper(c.roll_no) = ?4)) AND NOT (z.so = ?5 AND z.li = ?6)`)
+        .bind(up(r.barcode || r.pallet), normId(line.item), up(r.lot), up(r.supplier_hu), normId(line.so), normId(line.li)).all<Row>()).results;
+      const plants = new Set<string>();
+      for (const o of others) {
+        const ps = (await env.DB.prepare("SELECT DISTINCT so_plant FROM stock WHERE src = 'zmmbe' AND so = ? AND li = ? AND material = ?").bind(o.so, o.li, o.material).all<{ so_plant: string | null }>()).results;
+        if (!ps.length) plants.add('?'); for (const p0 of ps) plants.add(String(p0.so_plant ?? '?'));
+      }
+      if (!plants.size || (plants.size === 1 && plants.has(myPlants[0]))) r.sameSoPlant = { plant: myPlants[0], lines: others.map((o) => `${o.so} / ${o.li}`).slice(0, 6) };
+    }
   }
   const list = Array.from(rolls.values()).sort((a, b) => Number(b.available > 0) - Number(a.available > 0) || String(a.supplier_hu).localeCompare(String(b.supplier_hu), undefined, { numeric: true }));
   // manual pick only for the balance the Barcode = Pallet rolls cannot cover

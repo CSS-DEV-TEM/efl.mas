@@ -242,9 +242,13 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
   const [busy, setBusy] = useState(false);
   const [showNotes, setShowNotes] = useState(false);
 
-  const applyAuto = useCallback((x: Candidates, keepManual: Sel = {}, withPool = false) => {
+  const applyAuto = useCallback((x: Candidates, keepManual: Sel = {}, withPool = false, fullIfSamePlant = true) => {
     const a = autoPlan(x, withPool);
-    setSel({ ...a.sel, ...keepManual }); setLast(a.last); setLastMode('cut'); setOverOk(false); setCloseShort(false);
+    // the rest of the last roll stays with the same SO Plant: no need to cut — the full roll is proposed (Normal pick)
+    const lr = a.last ? x.rolls.find((r) => r.pallet === a.last!.pallet) : undefined;
+    const full = !!(fullIfSamePlant && a.last && lr?.sameSoPlant && a.last.full > a.last.cut);
+    if (full) a.sel[a.last!.pallet] = { qty: String(a.last!.full) };
+    setSel({ ...a.sel, ...keepManual }); setLast(a.last); setLastMode(full ? 'full' : 'cut'); setOverOk(false); setCloseShort(false);
   }, []);
   useEffect(() => {
     api<Candidates>(`/api/pick/candidates?week=${encodeURIComponent(week)}&key=${encodeURIComponent(line.key)}&date=${encodeURIComponent(line.date ?? '')}`)
@@ -416,6 +420,10 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
               )}
             </div>
 
+            {lastOn && last && (() => { const sp = c.rolls.find((r) => r.pallet === last.pallet)?.sameSoPlant; return sp ? (
+              <div className="notice ok so-plant">
+                <b>SO Plant same ({sp.plant})</b> — {sp.lines.length ? <>the rest of this roll is for {sp.lines.join(', ')}, with the same SO Plant</> : <>the rest of this roll stays on this SO line</>}: no need to cut it.{kind === 'normal' ? ' The full roll is proposed.' : ' (Offsite pick: exact QTY only.)'}
+              </div>) : null; })()}
             {lastOn && last && (kind === 'offsite' ? (
               <div className="pk-last">
                 <div>
@@ -435,7 +443,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
                     <b>Cut the roll</b><span>Pick {fmtQty(last.cut)} · exact plan QTY</span>
                   </button>
                   {rules.allowNormalFull && <button type="button" role="radio" aria-checked={lastMode === 'full'} className={lastMode === 'full' ? 'on' : ''} onClick={() => setLastTo('full')}>
-                    <b>Send full roll{lastSmall ? ' (recommended)' : ''}</b><span>Pick {fmtQty(last.full)} · +{fmt(last.full - last.cut, 2)} over plan — I confirm</span>
+                    <b>Send full roll{lastSmall || c.rolls.find((r) => r.pallet === last.pallet)?.sameSoPlant ? ' (recommended)' : ''}</b><span>Pick {fmtQty(last.full)} · +{fmt(last.full - last.cut, 2)} over plan — I confirm</span>
                   </button>}
                   {rules.allowNormalShort && <button type="button" role="radio" aria-checked={lastMode === 'leave'} className={lastMode === 'leave' ? 'on' : ''} onClick={() => setLastTo('leave')}>
                     <b>Leave this roll</b><span>Send {fmt(last.cut, 2)} less · line closed short — I confirm</span>
@@ -456,7 +464,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
                     const takenElsewhere = (p: string) => !!sel[p] && sel[p].nb !== m;
                     return (
                       <tr key={i} className={chosen ? 'picked' : ''}>
-                        <td>{m.noShade ? <span className="pill warn" title={`Inspection lot ${m.lot} has no Shade Report rolls in ZCOMENT VIEW. Rolls with Lot Number = ${m.vendor_batch ?? '–'} and Actual Qty = the lot QTY come first.`}>no Shade Report · lot {m.lot}</span> : <b>{m.roll_no || '–'}</b>}</td><td>{m.vendor_batch || '–'}</td><td className="mono">{m.batch}</td><td><b>{m.shade}</b></td><td className="n">{fmtQty(m.roll_qty)}</td>
+                        <td>{m.zcBarcode ? <><b>{m.roll_no || '–'}</b> <span className="pill warn" title={`ZCOMENT Barcode Number ${m.zcBarcode} is not a Korber pallet — rolls with the same Supplier Hu = Vendor Roll No and Lot are listed`}>barcode {m.zcBarcode} not in Korber</span></> : m.noShade ? <span className="pill warn" title={`Inspection lot ${m.lot} has no Shade Report rolls in ZCOMENT VIEW. Rolls with Lot Number = ${m.vendor_batch ?? '–'} and Actual Qty = the lot QTY come first.`}>no Shade Report · lot {m.lot}</span> : <b>{m.roll_no || '–'}</b>}</td><td>{m.vendor_batch || '–'}</td><td className="mono">{m.batch}</td><td><b>{m.shade}</b></td><td className="n">{fmtQty(m.roll_qty)}</td>
                         <td>{m.done ? <span className="pill mute">picked · {m.options[0]?.pallet}</span> : <>
                           <select className="as-search nb-select" value={chosen?.[0] ?? ''} onChange={(e) => chooseNb(m, e.target.value)} aria-label={`Korber roll for ${m.roll_no || 'roll'}`}>
                             <option value="">— choose a Korber roll ({m.options.length} match{m.options.length === 1 ? '' : 'es'}) —</option>
@@ -604,7 +612,10 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
   const [oneSheet, setOneSheet] = useState(() => { try { return localStorage.getItem('pl_one_sheet') !== '0'; } catch { return true; } });
   const setOne = (v: boolean) => { setOneSheet(v); try { localStorage.setItem('pl_one_sheet', v ? '1' : '0'); } catch { /* */ } };
   const tag = marked.length ? `_${marked.length}picks` : '';
-  const downloadPL = () => saveWorkbook(packingListWorkbook(h!, { ids: sel, combined: oneSheet }), `Packing_List_${day}${tag}.xlsx`);
+  // PFC storage locations (Settings) — those rolls go on the PFC sheet, the rest on KFC
+  const [pfcSlocs, setPfcSlocs] = useState<string[]>(['41', 'COMF']);
+  useEffect(() => { api<{ settings: { pfcSlocs?: string[] } }>('/api/settings').then((r) => { if (r.settings.pfcSlocs?.length) setPfcSlocs(r.settings.pfcSlocs); }).catch(() => {}); }, []);
+  const downloadPL = () => saveWorkbook(packingListWorkbook(h!, { ids: sel, combined: oneSheet, pfcSlocs }), `Packing_List_${day}${tag}.xlsx`);
   const downloadKorber = () => saveWorkbook(korberWorkbook(h!, sel), `Korber_Picked_${day}${tag}.xlsx`);
   const markedQty = marked.reduce((t, r) => t + r.qty, 0);
   const cancel = async (path: string, what: string) => {
