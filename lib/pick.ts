@@ -23,6 +23,8 @@ export interface Candidate {
   korberQty?: boolean;
   /** matched straight from ZINR to Korber (Item + Lot + Invoice + Po) */
   direct?: boolean;
+  /** ZCOMENT barcode not a Korber pallet: found by Supplier Hu = Vendor Roll No */
+  byHu?: boolean;
   /** that PO / invoice / lot is shared by this many SO lines: the user ticks the rolls */
   pool?: number;
   /** how much of the roll is in each batch of this line */

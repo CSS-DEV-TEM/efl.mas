@@ -380,7 +380,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
             <div className="pk-sec">
               <div className="pk-sec-head">
                 <h3>Matched rolls <span className="pill ok">{open.length}</span>{gone.length > 0 && <span className="muted small"> · {gone.length} already picked</span>}</h3>
-                <span className="muted small">Barcode = Pallet with Lot, Supplier Hu, Invoice and Po (ZCOMENT), or straight from ZINR: Item, Lot Number, Invoice and Po. QTY = Korber Actual Qty. The system selects them for the plan QTY — rolls of a PO shared by several SO lines you tick yourself.</span>
+                <span className="muted small">Barcode = Pallet (or Supplier Hu = Vendor Roll No) with Lot, Invoice and Po (ZCOMENT), or straight from ZINR: Item, Lot Number, Invoice and Po — a Supplier Hu that is this lot's Vendor Roll No makes it this line's roll. QTY = Korber Actual Qty. The system selects them for the plan QTY — rolls of a PO shared by several SO lines you tick yourself.</span>
                 <span style={{ flex: 1 }} />
                 {open.length > 0 && <button type="button" className="btn sm" onClick={() => applyAuto(c, Object.fromEntries([...manualSel, ...nbSel]))}>Auto select</button>}
                 {open.some((r) => r.pool) && <button type="button" className="btn sm" title="Rolls of a PO shared by several SO lines: select them for this line's plan QTY (you decide)" onClick={() => applyAuto(c, Object.fromEntries([...manualSel, ...nbSel]), true)}>Select shared-PO rolls too</button>}
@@ -396,7 +396,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
                         <tr key={r.pallet} className={`${s ? 'picked' : ''} ${isGone ? 'gone' : ''}`} onClick={(e) => { if (!isGone && (e.target as HTMLElement).tagName !== 'INPUT') toggle(r); }}>
                           <td><input type="checkbox" disabled={isGone} checked={!!s} onChange={() => toggle(r)} aria-label={`Pick ${r.pallet}`} /></td>
                           <td><b>{r.supplier_hu}</b></td>
-                          <td className="mono">{r.pallet}{r.via && <span className="pill accent" style={{ marginLeft: 4 }} title={`ZCOMENT Barcode Number ${r.barcode} — the same roll number in Korber under pallet ${r.via}`}>barcode {r.barcode}</span>}</td><td>{r.location}</td><td><b>{r.shade}</b></td>
+                          <td className="mono">{r.pallet}{r.via && <span className="pill accent" style={{ marginLeft: 4 }} title={r.byHu ? `ZCOMENT Barcode Number ${r.barcode} is not a Korber pallet — found by Supplier Hu ${r.supplier_hu} = Vendor Roll No, with the same Lot, Invoice and Po` : `ZCOMENT Barcode Number ${r.barcode} — the same roll number in Korber under pallet ${r.via}`}>{r.byHu ? `roll no ${r.supplier_hu} · barcode ${r.barcode}` : `barcode ${r.barcode}`}</span>}</td><td>{r.location}</td><td><b>{r.shade}</b></td>
                           <td className="n">{isGone ? <span className="pill mute" title={r.picks.map((p) => `${p.day} ${p.by_user}: ${p.qty}`).join('\n')}>picked</span>
                             : <>{fmtQty(r.available)}{r.picked_before > 0 && <span className="pill accent" style={{ marginLeft: 4 }} title={`Picked before: ${r.picks.map((p) => `${p.day} ${p.by_user} ${p.qty}`).join(', ')}`}>balance</span>}</>}</td>
                           <td className="n">{s ? <span className="pk-qty">
@@ -406,7 +406,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
                           </span> : ''}</td>
                           <td>{r.needsConfirm ? <span className="pill warn" title={`${r.warnings.join('\n')}\n\n${checkText(r.checks)}`}>Check: {r.warnings[0]}</span>
                             : r.pool ? <span className="pill info" title={r.qtyNote || ''}>ZINR → Korber · PO shared by {r.pool} SO lines — tick</span>
-                            : r.direct ? <span className="pill ok" title={r.qtyNote || ''}>ZINR → Korber ✓ (Item, Lot, Invoice, Po)</span>
+                            : r.direct ? <span className="pill ok" title={r.qtyNote || ''}>ZINR → Korber ✓ (Item, Lot, Invoice, Po{r.checks.hu ? ', Roll no' : ''})</span>
                             : <span className="pill ok" title={`${checkText(r.checks)}${r.qtyNote ? `\n\n${r.qtyNote}` : ''}`}>All match ✓{r.korberQty ? ' · Korber qty' : r.qtyNote ? ' · split roll' : ''}</span>}</td>
                         </tr>
                       );

@@ -287,7 +287,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 30; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 31; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1310,13 +1310,26 @@ function palletCore(v: unknown): string | null {
  * When several pallets carry that number, the one agreeing on Lot, Supplier Hu, Invoice and Po (and still available) wins;
  * a tie between different pallets is not guessed.
  */
-async function korberForBarcode(env: Env, sh: Row, lot: Row): Promise<{ k: Row | null; via: string | null; ambiguous: string[] }> {
+async function korberForBarcode(env: Env, sh: Row, lot: Row): Promise<{ k: Row | null; via: string | null; ambiguous: string[]; byHu?: boolean }> {
   const bc = up(sh.barcode);
   const exact = await env.DB.prepare('SELECT * FROM korber WHERE pallet = ?').bind(bc).first<Row>();
   const core = palletCore(bc);
   const same = core ? (await env.DB.prepare('SELECT * FROM korber WHERE pcore = ? LIMIT 12').bind(core).all<Row>()).results : [];
   const list = [...(exact ? [exact] : []), ...same.filter((x) => !exact || x.pallet !== exact.pallet)];
-  if (!list.length) return { k: null, via: null, ambiguous: [] };
+  // not under the barcode (another label, e.g. C000004250668 → HP000001361442): the one Korber roll of the item with
+  // Supplier Hu = Vendor Roll No and Lot Number = Vendor Batch (Invoice / Po not different)
+  const byHu = async () => {
+    if (!sh.roll_no || !sh.vendor_batch) return null;
+    const hs = (await env.DB.prepare('SELECT * FROM korber WHERE item = ? AND supplier_hu = ? AND upper(lot) = ? LIMIT 5').bind(normId(sh.material), up(sh.roll_no), up(sh.vendor_batch)).all<Row>()).results;
+    const ok: Row[] = [];
+    for (const h of hs) {
+      if (lot.invoice && h.invoice && up(h.invoice) !== up(lot.invoice)) continue;
+      if (lot.po) { const kp = await korberPo(env, h); if (kp && !poMatch(kp, lot)) continue; }
+      ok.push(h);
+    }
+    return ok.length === 1 ? ok[0] : null;
+  };
+  if (!list.length) { const h = await byHu(); return h ? { k: h, via: String(h.pallet), ambiguous: [], byHu: true } : { k: null, via: null, ambiguous: [] }; }
   const scored: { k: Row; score: number }[] = [];
   for (const k of list) {
     if (normId(k.item) !== normId(sh.material) && k !== exact) continue; // another item with the same number: not this roll
@@ -1334,7 +1347,11 @@ async function korberForBarcode(env: Env, sh: Row, lot: Row): Promise<{ k: Row |
   }
   if (!scored.length) return { k: exact, via: null, ambiguous: [] };
   scored.sort((a, b) => b.score - a.score);
-  if (scored.length > 1 && scored[0].score === scored[1].score && scored[0].k !== exact) return { k: null, via: null, ambiguous: scored.filter((x) => x.score === scored[0].score).map((x) => String(x.k.pallet)) };
+  if (scored.length > 1 && scored[0].score === scored[1].score && scored[0].k !== exact) {
+    const h = await byHu();
+    if (h) return { k: h, via: String(h.pallet), ambiguous: [], byHu: true };
+    return { k: null, via: null, ambiguous: scored.filter((x) => x.score === scored[0].score).map((x) => String(x.k.pallet)) };
+  }
   const k = scored[0].k;
   return { k, via: up(k.pallet) === bc ? null : String(k.pallet), ambiguous: [] };
 }
@@ -1358,11 +1375,21 @@ async function korberPo(env: Env, k: Row): Promise<string | null> {
   try { const v = (JSON.parse(String(k.raw)) as unknown[])[poIx]; return v === null || v === undefined || v === '' ? null : up(v); } catch { return null; }
 }
 /** ZINR Purchasing Document (E452921028) = Korber Po Number, which carries the client code in front (MASKRE-E452921028). */
+/**
+ * One PO in one form: without the client code (MASKRE-), without a split suffix (-A / -B), and SAP's 450xxxxxxx written as
+ * E45xxxxxxx (ZINR E452870424 = Korber MASKRE-4502870424).
+ */
+function poCanon(v: unknown): string {
+  let t = up(v).replace(/^[A-Z]{2,10}-(?=[A-Z0-9])/, '').replace(/-[A-Z]$/, '');
+  const m = t.match(/^450(\d{7})$/);
+  if (m) t = 'E45' + m[1];
+  return normId(t);
+}
 function poMatch(kpo: string | null, lot: Row): boolean {
   const z = up(lot.po);
   if (!z || !kpo) return false;
   const k = up(kpo);
-  return k === z || k.endsWith('-' + z) || normId(k) === normId(z);
+  return k === z || k.endsWith('-' + z) || normId(k) === normId(z) || poCanon(k) === poCanon(z);
 }
 /** For a roll that is not matched: Korber rolls of the same item with the same Lot Number, Supplier Hu, Invoice and Po (any pallet). */
 async function suggestKorber(env: Env, sh: Row, lot: Row) {
@@ -1413,7 +1440,7 @@ async function noBarcodeOptions(env: Env, sh: Row, lot: Row, skip: Set<string>) 
     // a lot with no Purchasing Document (a transfer lot): a roll whose Po Number is another SO line's PO in ZINR is that line's roll
     if (!lot.po && kpo) {
       const zpo = up(kpo).replace(/^[A-Z]{2,10}-(?=[A-Z0-9])/, '');
-      if (await env.DB.prepare('SELECT 1 FROM zinr WHERE upper(po) = ?1 AND NOT (so = ?2 AND li = ?3) LIMIT 1').bind(zpo, lot.so, lot.li).first()) continue;
+      if (await env.DB.prepare('SELECT 1 FROM zinr WHERE upper(po) IN (?1, ?4) AND NOT (so = ?2 AND li = ?3) LIMIT 1').bind(zpo, lot.so, lot.li, poCanon(zpo)).first()) continue;
     }
     // another shade-report roll has this pallet as its barcode: not this roll
     const core = palletCore(k.pallet);
@@ -1472,6 +1499,8 @@ interface Candidate {
   picks: { day: string; by_user: string; qty: number }[];
   /** matched straight from ZINR to Korber: Item + Lot Number = Vendor Batch + Invoice + Po (no ZCOMENT barcode) */
   direct?: boolean;
+  /** the ZCOMENT barcode is not a Korber pallet: found by Supplier Hu = Vendor Roll No (+ Lot, Invoice, Po) */
+  byHu?: boolean;
   /** that PO / invoice / lot is shared by several SO lines: the user ticks the rolls (the system does not) */
   pool?: number;
   /** the barcode was found under another pallet label (e.g. COMPCP… for CP…) */
@@ -1558,7 +1587,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
         // a ZINR lot without Vendor Invoice No / Purchasing Document: that check is not possible (shown as –), it does not block the match
         invoice: lot.invoice ? up(k.invoice) === up(lot.invoice) : null,
         po: lot.po ? poMatch(await korberPo(env, k), lot) : null,
-        barcode: true,
+        barcode: found.byHu ? null : true,
       } : {};
       const misses: string[] = [];
       if (k) {
@@ -1573,6 +1602,14 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
         if (!noBc.some((m) => m.lot.lot === lot.lot && m.sh.roll_no === sh.roll_no && m.sh.vendor_batch === sh.vendor_batch)) noBc.push({ sh, lot });
         continue;
       }
+      // a roll returned from a plant: Korber carries the return's Po (… RTN / RETURN) and DN invoice — the roll itself agrees
+      // (pallet, Lot, Supplier Hu), so it is offered with "I checked" instead of being picked by hand
+      let returned: string | null = null;
+      if (k && misses.length && checks.item && checks.lot && checks.hu && checks.invoice !== true) {
+        const kp = up(await korberPo(env, k));
+        if (/\bRET|\bRTN\b/.test(kp) && misses.every((m) => /^(Invoice|Po Number)/.test(m))) returned = `Returned roll — Korber Po ${kp || '–'}, Invoice ${k.invoice ?? '–'} (ZINR ${lot.po ?? '–'} / ${lot.invoice ?? '–'})`;
+      }
+      if (returned) misses.length = 0;
       if (!k || misses.length) {
         if (!manual.some((m) => m.lot === lot.lot && m.roll_no === sh.roll_no && m.barcode === sh.barcode)) {
           manual.push({ lot: lot.lot, batch: lot.batch, material: sh.material, vendor_batch: sh.vendor_batch, roll_no: sh.roll_no, barcode: sh.barcode, roll_qty: sh.roll_qty,
@@ -1604,11 +1641,12 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
       // the roll's QTY is Korber's Actual Qty (what is on the shelf now); a different ZCOMENT Roll qty is shown, not a stop
       const korberQty = !checks.qty;
       if (korberQty) qtyNote = `ZCOMENT Roll qty ${sh.roll_qty} · Korber Actual Qty ${k.qty} is used`;
+      if (returned) warnings.push(returned);
       rolls.set(pallet, {
         pallet, item: String(k.item), lot: k.lot as string | null, supplier_hu: k.supplier_hu as string | null, location: k.location as string | null, uom: k.uom as string | null,
         invoice: k.invoice as string | null, actual_qty: Number(k.qty), base_qty: Number(k.qty), picked_before: 0, available: Number(k.qty), roll_qty: Number(sh.roll_qty),
         shade: sh.shade as string | null, insp_lots: [String(lot.lot)], batches: [String(lot.batch)], checks, warnings, needsConfirm: warnings.length > 0, raw: k.raw as string | null, picks: [],
-        via: found.via, barcode: sh.barcode as string | null, qtyNote, korberQty,
+        via: found.via, barcode: sh.barcode as string | null, qtyNote, korberQty, ...(found.byHu ? { byHu: true } : {}),
         parts: [{ batch: String(lot.batch), lot: String(lot.lot), qty: korberQty ? Number(k.qty) : Number(sh.roll_qty) || 0 }],
       });
     }
@@ -1635,14 +1673,26 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
       const owner = await env.DB.prepare(`SELECT c.lot FROM zcoment c WHERE (c.barcode = ?1 OR (?2 IS NOT NULL AND c.barcode LIKE '%' || ?2 || '%'))
         AND c.lot NOT IN (SELECT value FROM json_each(?3)) LIMIT 1`).bind(up(pallet), palletCore(pallet), JSON.stringify(lots.map((l) => String(l.lot)))).first();
       if (owner) continue;
+      // Supplier Hu = a Vendor Roll No of the Shade Report (same item and Lot): the roll belongs to that lot —
+      // this line's lot → selected by the system with its shade; another line's lot → not this line's roll
+      let shadeRow: Row | null = null;
+      if (k.supplier_hu) {
+        const zr = (await env.DB.prepare('SELECT lot, shade FROM zcoment WHERE material = ?1 AND upper(vendor_batch) = ?2 AND upper(roll_no) = ?3')
+          .bind(lot.material, up(k.lot), up(k.supplier_hu)).all<Row>()).results;
+        if (zr.length) {
+          const mine = zr.find((x) => lots.some((l) => String(l.lot) === String(x.lot)));
+          if (!mine) continue;
+          shadeRow = mine;
+        }
+      }
       directLots.add(String(lot.lot));
       rolls.set(pallet, {
         pallet, item: String(k.item), lot: k.lot as string | null, supplier_hu: k.supplier_hu as string | null, location: k.location as string | null, uom: k.uom as string | null,
         invoice: k.invoice as string | null, actual_qty: Number(k.qty), base_qty: Number(k.qty), picked_before: 0, available: Number(k.qty), roll_qty: Number(k.qty),
-        shade: null, insp_lots: [String(lot.lot)], batches: [String(lot.batch)],
-        checks: { item: true, lot: true, invoice: true, po: true, hu: null, qty: null, barcode: null },
-        warnings: [], needsConfirm: false, raw: k.raw as string | null, picks: [], direct: true, ...(lines > 1 ? { pool: lines } : {}),
-        qtyNote: `Matched from ZINR: Item, Lot Number ${k.lot}, Invoice ${k.invoice}, Po ${lot.po}${lines > 1 ? ` — this PO / invoice / lot is shared by ${lines} SO lines: tick the rolls of this line` : ''}`,
+        shade: (shadeRow?.shade as string | null) ?? null, insp_lots: [String(lot.lot)], batches: [String(lot.batch)],
+        checks: { item: true, lot: true, invoice: true, po: true, hu: shadeRow ? true : null, qty: null, barcode: null },
+        warnings: [], needsConfirm: false, raw: k.raw as string | null, picks: [], direct: true, ...(lines > 1 && !shadeRow ? { pool: lines } : {}),
+        qtyNote: `Matched from ZINR: Item, Lot Number ${k.lot}, Invoice ${k.invoice}, Po ${lot.po}${shadeRow ? `, Supplier Hu ${k.supplier_hu} = Vendor Roll No of lot ${shadeRow.lot}` : ''}${lines > 1 && !shadeRow ? ` — this PO / invoice / lot is shared by ${lines} SO lines: tick the rolls of this line` : ''}`,
         parts: [{ batch: String(lot.batch), lot: String(lot.lot), qty: Number(k.qty) }],
       });
     }
