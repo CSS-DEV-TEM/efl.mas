@@ -254,7 +254,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
     api<Candidates>(`/api/pick/candidates?week=${encodeURIComponent(week)}&key=${encodeURIComponent(line.key)}&date=${encodeURIComponent(line.date ?? '')}`)
       .then((x) => { setC(x); applyAuto(x); }).catch((e) => setErr(e instanceof Error ? e.message : 'Could not load rolls.'));
   }, [week, line, applyAuto]);
-  useEffect(() => { const k = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); }; window.addEventListener('keydown', k); return () => window.removeEventListener('keydown', k); }, [onClose]);
+  useEffect(() => { const k = (e: KeyboardEvent) => { if (e.key === 'Escape' && !(e.target instanceof HTMLElement && e.target.closest('input, select, textarea'))) onClose(); }; window.addEventListener('keydown', k); return () => window.removeEventListener('keydown', k); }, [onClose]);
 
   const remaining = c ? Math.max(0, r3(c.need - c.picked)) : 0;
   const total = r3(Object.values(sel).reduce((t, x) => t + (Number(x.qty) || 0), 0));
@@ -338,7 +338,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
   const open = c ? c.rolls.filter((r) => r.available > 1e-9) : [];
   const gone = c ? c.rolls.filter((r) => r.available <= 1e-9) : [];
   return (
-    <div className="modal-back" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+    <div className="modal-back">{/* the pick window closes only with ✕ / Cancel — a click outside it does not lose the selection */}
       <div className="modal xwide pkm" role="dialog" aria-modal="true" aria-labelledby="pk-title">
         <div className="modal-head">
           <div>

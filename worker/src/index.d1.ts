@@ -287,7 +287,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 35; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 36; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1342,7 +1342,10 @@ async function korberForBarcode(env: Env, sh: Row, lot: Row): Promise<{ k: Row |
     const ok: Row[] = [];
     for (const h of hs) {
       if (lot.invoice && h.invoice && up(h.invoice) !== up(lot.invoice)) continue;
-      if (lot.po) { const kp = await korberPo(env, h); if (kp && !poMatch(kp, lot)) continue; }
+      // Item + Lot + Supplier Hu + the same Invoice is the roll even when Korber's Po differs (a pallet labelled with another PO of the invoice)
+      if (lot.po) { const kp = await korberPo(env, h); if (kp && !poMatch(kp, lot) && !(lot.invoice && h.invoice && up(h.invoice) === up(lot.invoice))) continue; }
+      // a pallet that is the barcode of another shade-report roll belongs to that roll
+      if (await env.DB.prepare("SELECT 1 FROM zcoment WHERE barcode = ?1 AND upper(COALESCE(roll_no, '')) <> ?2 LIMIT 1").bind(up(h.pallet), up(sh.roll_no)).first()) continue;
       ok.push(h);
     }
     return ok.length === 1 ? ok[0] : null;
@@ -1470,7 +1473,9 @@ async function noBarcodeOptions(env: Env, sh: Row, lot: Row, skip: Set<string>) 
     };
     // the roll number decides; without one, the Lot must agree. Invoice / Po never contradict.
     if (hu ? !checks.hu : !checks.lot) continue;
-    if (checks.invoice === false || checks.po === false) continue;
+    if (checks.invoice === false) continue;
+    // a different Po is allowed only when the roll number, Lot and Invoice all agree (pallet labelled with another PO of the invoice)
+    if (checks.po === false && !(checks.hu && checks.lot !== false && checks.invoice === true)) continue;
     // a lot with no Purchasing Document (a transfer lot): a roll whose Po Number is another SO line's PO in ZINR is that line's roll
     if (!lot.po && kpo && !checks.hu) {
       const zpo = up(kpo).replace(/^[A-Z]{2,10}-(?=[A-Z0-9])/, '');
@@ -1658,6 +1663,12 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
         if (/\bRET|\bRTN\b/.test(kp) && misses.every((m) => /^(Invoice|Po Number)/.test(m))) returned = `Returned roll — Korber Po ${kp || '–'}, Invoice ${k.invoice ?? '–'} (ZINR ${lot.po ?? '–'} / ${lot.invoice ?? '–'})`;
       }
       if (returned) misses.length = 0;
+      // Item, Lot, Supplier Hu (= Vendor Roll No) and Invoice agree: a different Korber Po Number does not stop the roll — noted
+      let poNote: string | null = null;
+      if (k && !returned && misses.length && checks.item && checks.lot && checks.hu && checks.invoice === true && misses.every((m) => /^Po Number/.test(m))) {
+        poNote = `Korber Po ${(await korberPo(env, k)) ?? '–'} ≠ ZINR ${lot.po} — matched on Item, Lot, Supplier Hu ${k.supplier_hu} and Invoice`;
+        misses.length = 0;
+      }
       // the barcode is not a Korber pallet (nor under another label): the same logic as a roll with no barcode
       if (!k && sh.barcode && !found.ambiguous.length) {
         if (!noBc.some((m) => m.lot.lot === lot.lot && m.sh.roll_no === sh.roll_no && m.sh.vendor_batch === sh.vendor_batch)) noBc.push({ sh: { ...sh, barcode_missing: sh.barcode }, lot });
@@ -1695,6 +1706,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
       const korberQty = checks.qty === false;
       if (korberQty) qtyNote = `ZCOMENT Roll qty ${sh.roll_qty} · Korber Actual Qty ${k.qty} is used`;
       if (borrowed) qtyNote = [qtyNote, `No Barcode Number under lot ${lot.lot} — the same roll ${sh.roll_no} (Vendor Batch ${sh.vendor_batch}) has barcode ${borrowed} in ZCOMENT`].filter(Boolean).join(' · ');
+      if (poNote) qtyNote = [qtyNote, poNote].filter(Boolean).join(' · ');
       if (returned) warnings.push(returned);
       rolls.set(pallet, {
         pallet, item: String(k.item), lot: k.lot as string | null, supplier_hu: k.supplier_hu as string | null, location: k.location as string | null, uom: k.uom as string | null,
