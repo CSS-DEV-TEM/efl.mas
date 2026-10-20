@@ -118,6 +118,8 @@ const ST = {
   dark: { fill: { patternType: 'solid', fgColor: { rgb: '595959' } } },
   head: { font: { bold: true }, fill: { patternType: 'solid', fgColor: { rgb: 'D9D9D9' } }, border: BOX },
   cell: { border: BOX },
+  cut: { font: { bold: true, color: { rgb: '9C0006' } }, fill: { patternType: 'solid', fgColor: { rgb: 'FFC7CE' } }, border: BOX },
+  cutHead: { font: { bold: true, color: { rgb: 'FFFFFF' } }, fill: { patternType: 'solid', fgColor: { rgb: 'C00000' } }, border: BOX },
   key: { font: { bold: true, color: { rgb: 'FFFFFF' } }, fill: { patternType: 'solid', fgColor: { rgb: '808000' } }, border: BOX },
   match: { fill: { patternType: 'solid', fgColor: { rgb: 'C9C900' } }, border: { top: { style: 'thin', color: { rgb: 'FFFF00' } }, bottom: { style: 'thin', color: { rgb: 'FFFF00' } }, left: { style: 'thin', color: { rgb: 'FFFF00' } }, right: { style: 'thin', color: { rgb: 'FFFF00' } } } },
 };
@@ -178,7 +180,7 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
   const reqName = (r: PickReq) => `${multiDay ? r.day.slice(8, 10) + '-' + r.day.slice(5, 7) + ' ' : ''}${multi ? `${r.by_user} ` : ''}${ordinal(r.seq)}`;
   const pickNoOf = (r: PickReq) => (r.pick_no && /^\d+$/.test(r.pick_no) ? Number(r.pick_no) : (r.pick_no ?? ''));
   const rollsOf = (r: PickReq) => h.picks.filter((p) => p.req_id === r.id && !p.cancelled_at);
-  const korberRows: unknown[][] = [];
+  const korberPicks: PickRoll[] = [];
 
   interface Entry { r: PickReq; p: PickRoll; raw: unknown[]; kind: 'KFC' | 'PFC'; group: string; row: (string | number | null)[]; batches: { batch: string; qty: number }[] }
   const entries: Entry[] = [];
@@ -187,7 +189,7 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
     const slocOf = new Map((m.zinr || []).map((z) => [String(z.lot ?? '').replace(/^0+/, ''), canonSloc(z.sloc)]));
     for (const p of rollsOf(r)) {
       const raw = (p.korber ? JSON.parse(p.korber) : []) as unknown[];
-      korberRows.push(pickedRow(raw, header, p.qty));
+      korberPicks.push(p);
       const lots = String(p.insp_lot ?? '').split(',').map((x) => x.trim().replace(/^0+/, '')).filter(Boolean);
       const sloc = lots.map((l) => slocOf.get(l)).find(Boolean) ?? canonSloc((m.zmmbe || [])[0]?.sloc);
       const kind: 'KFC' | 'PFC' = pfc.has(sloc ?? '') ? 'PFC' : 'KFC';
@@ -207,7 +209,7 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
       [null, null],
       [],
     ];
-    const qtyRanges: string[] = []; const headRows: number[] = []; const rollRows: number[] = []; const sapRows: number[] = [];
+    const qtyRanges: string[] = []; const headRows: number[] = []; const rollRows: number[] = []; const sapRows: number[] = []; const cutRows: number[] = [];
     const groups = new Map<string, Entry[]>();
     for (const e of list) { const g = groups.get(e.group); if (g) g.push(e); else groups.set(e.group, [e]); }
     for (const g of groups.values()) {
@@ -217,6 +219,7 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
       for (const e of g) {
         const row = [...e.row];
         if (!seen.has(e.r.id)) { row[PICKNO_COL] = pickNoOf(e.r); seen.add(e.r.id); } // the Pick No on each pick's first roll of the table
+        if (e.p.partial) cutRows.push(aoa.length);
         rollRows.push(aoa.length); aoa.push(row);
       }
       qtyRanges.push(`${U.encode_col(QTY_COL)}${first + 1}:${U.encode_col(QTY_COL)}${aoa.length}`);
@@ -250,6 +253,8 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
     style('A4', ST.top); style('B4', ST.top);
     for (const r0 of headRows) PL_HEAD2.forEach((_, i) => style(U.encode_col(i) + (r0 + 1), i === 4 || i === 8 || i === 9 ? ST.key : ST.head));
     for (const r0 of rollRows) PL_HEAD2.forEach((_, i) => style(U.encode_col(i) + (r0 + 1), ST.cell));
+    // a cut roll: its Pallet and Actual Qty (the cut QTY) in red, so it is seen on the floor
+    for (const r0 of cutRows) for (const i of [0, QTY_COL]) style(U.encode_col(i) + (r0 + 1), ST.cut);
     for (const r0 of sapRows) for (let i = 0; i < 5; i++) style(U.encode_col(i) + (r0 + 1), ST.match);
     ws['!cols'] = [17.5, 14, 19, 26, 12, 9, 12, 12, 24, 22, 22, 11, 10, 7, 12].map((w) => ({ wch: w }));
     return ws;
@@ -285,8 +290,7 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
   sws['!cols'] = [{ wch: multi ? 16 : 8 }, { wch: 11 }, { wch: 10 }, { wch: 10 }, { wch: 11 }, { wch: 14 }, { wch: 9 }, { wch: 52 }];
   U.book_append_sheet(wb, sws, 'Summary');
   if (opts.korberSheet !== false && h.korberHeader) {
-    const kws = U.aoa_to_sheet([h.korberHeader as (string | number)[], ...(korberRows as (string | number)[][])]);
-    U.book_append_sheet(wb, kws, 'Korber Inventory');
+    U.book_append_sheet(wb, korberSheet(h.korberHeader, korberPicks), 'Korber Inventory');
   }
   return wb;
 }
@@ -307,13 +311,39 @@ function pickedRow(raw: unknown[], header: string[], qty: number): unknown[] {
   return row;
 }
 
-/** The picked rolls only (the marked picks, or all), in the Korber Inventory format (same columns as the uploaded file). */
+/**
+ * The picked rolls in the Korber Inventory format (the uploaded file's columns, Actual Qty = the picked QTY), and after them
+ * Cut Roll | Korber Qty | Balance Qty. A cut roll's row is red: "CUT", the roll's Korber QTY and what stays on the shelf.
+ */
+function korberSheet(korberHeader: unknown[], picks: PickRoll[]) {
+  const U = XLSXS.utils;
+  const header = korberHeader.map(hn);
+  const qi = header.indexOf('actual qty');
+  const n = korberHeader.length;
+  const aoa: (string | number | null)[][] = [[...(korberHeader as (string | number)[]), 'Cut Roll', 'Korber Qty', 'Balance Qty']];
+  const cut: number[] = [];
+  for (const p of picks) {
+    const raw = (p.korber ? JSON.parse(p.korber) : []) as unknown[];
+    const row = pickedRow(raw, header, p.qty) as (string | number | null)[];
+    while (row.length < n) row.push(null);
+    const full = Number(p.roll_qty) || Number(qi >= 0 ? raw[qi] : 0) || 0;
+    if (p.partial) { cut.push(aoa.length); row.push('CUT', Math.round(full * 1000) / 1000, Math.round(Math.max(0, full - p.qty) * 1000) / 1000); }
+    else row.push(null, Math.round(full * 1000) / 1000, null);
+    aoa.push(row);
+  }
+  const ws = U.aoa_to_sheet(aoa);
+  const st = (r: number, c: number, s: unknown) => { const ref = U.encode_cell({ r, c }); ws[ref] = ws[ref] || { t: 's', v: '' }; (ws[ref] as { s?: unknown }).s = s; };
+  for (let c = n; c < n + 3; c++) st(0, c, ST.cutHead);
+  for (const r of cut) for (let c = 0; c < n + 3; c++) st(r, c, ST.cut);
+  ws['!cols'] = [...Array.from({ length: n }, () => ({ wch: 14 })), { wch: 9 }, { wch: 11 }, { wch: 12 }];
+  return ws;
+}
+
+/** The picked rolls only (the marked picks, or all), in the Korber Inventory format; cut rolls marked (see korberSheet). */
 export function korberWorkbook(h: PickHistory, ids?: Set<number> | number[]) {
   const only = ids ? new Set(ids) : null;
-  const header = (h.korberHeader || []).map(hn);
-  const rows = h.picks.filter((p) => !p.cancelled_at && (!only || !only.size || only.has(p.req_id)) && h.requests.some((r) => r.id === p.req_id && !r.cancelled_at)).map((p) => pickedRow((p.korber ? JSON.parse(p.korber) : []) as unknown[], header, p.qty) as (string | number)[]);
-  const ws = XLSX.utils.aoa_to_sheet([(h.korberHeader || []) as (string | number)[], ...rows]);
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+  const picks = h.picks.filter((p) => !p.cancelled_at && (!only || !only.size || only.has(p.req_id)) && h.requests.some((r) => r.id === p.req_id && !r.cancelled_at));
+  const wb = XLSXS.utils.book_new();
+  XLSXS.utils.book_append_sheet(wb, korberSheet(h.korberHeader || [], picks), 'Sheet1');
   return wb;
 }
