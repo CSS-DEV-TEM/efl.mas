@@ -43,3 +43,15 @@ export function exportPullPlan(rows: Line[], name = 'MAS_Weekly_Plan') {
   const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
   XLSX.writeFile(wb, `${name}_${stamp}.xlsx`);
 }
+
+
+/** The dashboard's plan table (Plan details) of a Pick as rows: header, one row per plan line, a total row — for the Packing List. */
+export function planTableAoa(rows: Line[]): (string | number | null)[][] {
+  const pickOf = (w: string) => { const m = /~([^~]*)~(\d+)$/.exec(w || ''); return m ? `${m[1] === '-' ? '' : m[1]} Pick ${m[2]}`.trim() : w; };
+  const n = (v: number | null | undefined) => (v == null ? null : Math.round(v * 1000) / 1000);
+  const head = ['Pick', 'SO', 'LI', 'Item Code', 'Date', 'Plant', 'QTY', 'Picked', 'Balance', 'UR', 'UR left', 'Korber qty', 'Korber rolls', 'QI', 'Block', 'Next action', 'Status', 'On hold', 'Comment', 'Remarks'];
+  const body = rows.map((l) => [pickOf(l.week), Number(l.so) || l.so, Number(l.li) || l.li, Number(l.item) || l.item, l.date, l.plant, n(l.qty), n(l.picked ?? 0), n(need(l)), n(l.ur), n(avail(l)),
+    n(l.korber_avail), l.korber_rolls ?? null, n(l.qi), n(l.block), action(l), l.status, l.hold ?? null, l.comment, l.remarks]);
+  const total = ['', '', '', '', '', 'Total', n(rows.reduce((t, l) => t + l.qty, 0)), n(rows.reduce((t, l) => t + (l.picked ?? 0), 0)), n(rows.reduce((t, l) => t + need(l), 0))];
+  return [head, ...body, total] as (string | number | null)[][];
+}

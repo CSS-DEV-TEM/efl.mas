@@ -25,7 +25,7 @@ function pendingWhy(l: LineP): string {
 
 /** Pick tab of the Dispatch page: the three pick reports, Ready-to-pull lines with Pick, and the pick history / Packing List. */
 export default function PickWorkspace({ week, rows, canEdit, toast, reload, label }: { week: string; rows: LineP[]; canEdit: boolean; toast: (m: string) => void; reload: () => void; /** what is on screen, e.g. "20 Oct · ASIALINE Pick 2" */ label?: string }) {
-  const [status, setStatus] = useState<{ counts: { src: string; n: number }[]; uploads: { src: string; file_name: string | null; row_count: number; uploaded_by: string; uploaded_at: string }[] } | null>(null);
+  const [status, setStatus] = useState<{ counts: { src: string; n: number }[]; uploads: { src: string; file_name: string | null; row_count: number; uploaded_by: string; uploaded_at: string }[]; reports?: { src: string; uses: 'own' | 'shared' | 'none' }[] } | null>(null);
   const [busy, setBusy] = useState<PickSrc | null>(null);
   const [scope, setScope] = useState<'pending' | 'ready' | 'open' | 'picked' | 'done' | 'hold'>('pending');
   const [why, setWhy] = useState('');
@@ -34,13 +34,15 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
   const [histKey, setHistKey] = useState(0);
   const inputs = useRef<Record<string, HTMLInputElement | null>>({});
 
-  const loadStatus = useCallback(() => { api<NonNullable<typeof status>>('/api/pick/status').then(setStatus).catch(() => {}); }, []);
+  // the reports of the Pick on screen (a day plan round); the whole day / a week: the shared reports
+  const rid = /^\d{4}-\d{2}-\d{2}~[^~]*~\d+$/.test(week) ? week : '';
+  const loadStatus = useCallback(() => { api<NonNullable<typeof status>>('/api/pick/status' + (rid ? '?rid=' + encodeURIComponent(rid) : '')).then(setStatus).catch(() => {}); }, [rid]);
   useEffect(() => { loadStatus(); }, [loadStatus]);
 
   const upload = async (src: PickSrc, f: File) => {
     setBusy(src);
     try {
-      const r = await uploadPickFile(src, f);
+      const r = await uploadPickFile(src, f, rid || null);
       toast(`${PICK_SRCS.find((x) => x.src === src)!.title}: ${fmt(r.rows)} rows saved${r.total > r.rows ? ` (of ${fmt(r.total)} in the file${src === 'korber' ? ' — only plan items kept' : src === 'zcoment' ? ' — Shade Report only' : ''})` : ''}`);
       loadStatus();
     } catch (e) { toast(e instanceof Error ? e.message : 'Upload failed.'); }
@@ -83,17 +85,19 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
   return (
     <>
       <section className="card" aria-labelledby="pd-title">
-        <h2 id="pd-title">Pick data</h2>
-        <p className="sub">Upload in any order; each upload replaces the previous one. Matching: ZMMBE → ZINR (SO, LI, Material, Batch, UR = Insp. Lot Qty) → ZCOMENT VIEW Shade Report (Inspection lot) → Korber — a roll is matched only when all agree: Barcode Number = Pallet, Vendor Batch = Lot Number, Vendor Roll No = Supplier Hu (ZCOMENT), Vendor Invoice No = Invoice Number and Purchasing Document = Po Number (ZINR). Qty differences need “Confirmed”.</p>
+        <h2 id="pd-title">Pick data {rid ? <span className="pill accent" style={{ marginLeft: 6 }}>{label || rid}</span> : null}</h2>
+        {!rid && <div className="notice warn" style={{ margin: '6px 0' }}>Choose a Pick at the top: every Pick has its own ZINSR, ZCOMENT VIEW and Korber Inventory. (All picks of the day: the reports shown are the shared ones.)</div>}
+        <p className="sub">Upload in any order; each upload replaces that Pick&apos;s previous one. Matching: ZMMBE → ZINR (SO, LI, Material, Batch, UR = Insp. Lot Qty) → ZCOMENT VIEW Shade Report (Inspection lot) → Korber — a roll is matched only when all agree: Barcode Number = Pallet, Vendor Batch = Lot Number, Vendor Roll No = Supplier Hu (ZCOMENT), Vendor Invoice No = Invoice Number and Purchasing Document = Po Number (ZINR). Qty differences need “Confirmed”.</p>
         <div className="pick-ups">
           {PICK_SRCS.map((p) => {
             const u = status?.uploads.find((x) => x.src === p.src);
             return (
               <div key={p.src} className="pick-up">
-                <div><b>{p.title}</b> <span className="pill mute">{fmt(cnt(p.src))} rows</span></div>
+                <div><b>{p.title}</b> <span className="pill mute">{fmt(cnt(p.src))} rows</span>{' '}
+                  {(() => { const u0 = status?.reports?.find((x) => x.src === p.src)?.uses; return rid && u0 ? <span className={`pill ${u0 === 'own' ? 'ok' : u0 === 'shared' ? 'warn' : 'bad'}`}>{u0 === 'own' ? 'this Pick' : u0 === 'shared' ? 'shared' : 'missing'}</span> : null; })()}</div>
                 <span className="muted small">{u ? `${u.file_name || ''} · ${u.uploaded_by} · ${ago(u.uploaded_at)}` : p.hint}</span>
                 {canEdit && <>
-                  <button className="btn sm primary" aria-busy={busy === p.src || undefined} disabled={!!busy} onClick={() => inputs.current[p.src]?.click()}>{busy === p.src ? 'Uploading…' : `Upload ${p.title}`}</button>
+                  <button className="btn sm primary" aria-busy={busy === p.src || undefined} disabled={!!busy || !rid} title={rid ? `Upload to ${label || rid}` : 'Choose a Pick first'} onClick={() => inputs.current[p.src]?.click()}>{busy === p.src ? 'Uploading…' : `Upload ${p.title}`}</button>
                   <input ref={(el) => { inputs.current[p.src] = el; }} type="file" hidden accept=".xlsx,.xls,.xlsm,.csv" onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(p.src, f); e.target.value = ''; }} />
                 </>}
               </div>
@@ -567,7 +571,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
             {(c.manual?.length ?? 0) > 0 && shortfall <= 1e-9 && (
               <p className="muted small" style={{ margin: 0 }}>{c.manual!.length} shade-report roll{c.manual!.length === 1 ? ' does' : 's do'} not match a Korber roll, but the matched rolls cover the line — nothing to pick by hand.</p>
             )}
-            {choosing && <KorberChooser item={line.item} roll={choosing} taken={Object.keys(sel).filter((p) => sel[p].manual !== choosing)} mine={chosenFor(choosing).map(([p]) => p)}
+            {choosing && <KorberChooser item={line.item} rid={week} roll={choosing} taken={Object.keys(sel).filter((p) => sel[p].manual !== choosing)} mine={chosenFor(choosing).map(([p]) => p)}
               chosenQty={chosenFor(choosing).reduce((t, [, x]) => t + (Number(x.qty) || 0), 0)} open={manualLeft} rollOpen={rollLeft(choosing)} onUse={(k) => useKorber(choosing, k)} onClose={() => setChoosing(null)} />}
 
             {offsiteOver && <div className="notice bad">Offsite pick: the selected QTY is {fmt(diff, 2)} over the plan balance. Cut the last roll to the exact QTY or untick a roll.</div>}
@@ -614,16 +618,16 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
  * Korber rolls for a shade-report roll that was not matched. Several can be used (one roll / lot QTY made up of
  * several pallets): Use adds one and the list stays open; a used one shows Remove.
  */
-function KorberChooser({ item, roll, taken, mine = [], chosenQty = 0, open = Infinity, rollOpen = Infinity, onUse, onClose }: { item: string; roll: ManualRoll; taken: string[]; mine?: string[]; chosenQty?: number; open?: number; rollOpen?: number; onUse: (k: KorberRow) => void; onClose: () => void }) {
+function KorberChooser({ item, rid, roll, taken, mine = [], chosenQty = 0, open = Infinity, rollOpen = Infinity, onUse, onClose }: { item: string; rid?: string; roll: ManualRoll; taken: string[]; mine?: string[]; chosenQty?: number; open?: number; rollOpen?: number; onUse: (k: KorberRow) => void; onClose: () => void }) {
   const full = open <= 1e-9 || rollOpen <= 1e-9;
   const [q, setQ] = useState(roll.vendor_batch || '');
   const [rows, setRows] = useState<KorberRow[] | null>(null);
   useEffect(() => {
     const t = setTimeout(() => {
-      api<{ rows: KorberRow[] }>(`/api/pick/korber?item=${encodeURIComponent(item)}&q=${encodeURIComponent(q.trim())}`).then((r) => setRows(r.rows)).catch(() => setRows([]));
+      api<{ rows: KorberRow[] }>(`/api/pick/korber?item=${encodeURIComponent(item)}&q=${encodeURIComponent(q.trim())}${rid ? '&rid=' + encodeURIComponent(rid) : ''}`).then((r) => setRows(r.rows)).catch(() => setRows([]));
     }, 250);
     return () => clearTimeout(t);
-  }, [item, q]);
+  }, [item, q, rid]);
   return (
     <div className="kchooser">
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -665,10 +669,19 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
   const [mine, setMine] = useState(false);
   const load = useCallback(() => { api<PickHistory>('/api/pick/history?day=' + day + (mine && me ? '&user=' + encodeURIComponent(me) : '')).then(setH).catch(() => {}); }, [day, mine, me]);
   useEffect(() => { load(); }, [load]);
-  const live = (h?.requests || []).filter((r) => !r.cancelled_at);
+  // the Picks of the day (day plan rounds): the history and the Packing List of one Pick
+  const [pickId, setPickId] = useState('');
+  useEffect(() => { setPickId(''); }, [day]);
+  const pickIds = Array.from(new Set((h?.requests || []).map((r) => r.week).filter((w) => /~\d+$/.test(w || ''))));
+  // plant names (Settings → Plants) for the Pick No list
+  const [plantNames, setPlantNames] = useState<Record<string, string>>({});
+  useEffect(() => { api<{ plants: { code: string; name: string | null }[] }>('/api/plants').then((r) => setPlantNames(Object.fromEntries(r.plants.map((x) => [x.code.toUpperCase(), x.name || x.code])))).catch(() => {}); }, []);
+  const pickName = (w: string) => { const m = /^\d{4}-\d{2}-\d{2}~([^~]*)~(\d+)$/.exec(w); return m ? `${w.slice(8, 10)}-${w.slice(5, 7)} · ${m[1] === '-' ? 'No plant' : plantNames[m[1]] || m[1]} · Pick ${m[2]}` : w; };
+  const shownReqs = (h?.requests || []).filter((r) => !pickId || r.week === pickId);
+  const live = shownReqs.filter((r) => !r.cancelled_at);
   // the picks marked for the download (none marked = all of the day)
   const [sel, setSel] = useState<Set<number>>(new Set());
-  useEffect(() => { setSel(new Set()); }, [day, mine]);
+  useEffect(() => { setSel(new Set()); }, [day, mine, pickId]);
   const marked = live.filter((r) => sel.has(r.id));
   const allOn = live.length > 0 && marked.length === live.length;
   const flip = (id: number) => setSel((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
@@ -678,8 +691,23 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
   // PFC storage locations (Settings) — those rolls go on the PFC sheet, the rest on KFC
   const [pfcSlocs, setPfcSlocs] = useState<string[]>(['41', 'COMF']);
   useEffect(() => { api<{ settings: { pfcSlocs?: string[] } }>('/api/settings').then((r) => { if (r.settings.pfcSlocs?.length) setPfcSlocs(r.settings.pfcSlocs); }).catch(() => {}); }, []);
-  const downloadPL = () => saveWorkbook(packingListWorkbook(h!, { ids: sel, combined: oneSheet, pfcSlocs }), `Packing_List_${day}${tag}.xlsx`);
-  const downloadKorber = () => saveWorkbook(korberWorkbook(h!, sel), `Korber_Picked_${day}${tag}.xlsx`);
+  // none marked = every pick shown (the chosen Pick, or the whole day)
+  const target = marked.length ? marked : live;
+  const ptag = pickId ? '_' + pickName(pickId).replace(/[^\w]+/g, '_') : '';
+  const [plBusy, setPlBusy] = useState(false);
+  const downloadPL = async () => {
+    setPlBusy(true);
+    try {
+      // the plan (dashboard table) of the Picks in the download
+      const weeks = Array.from(new Set(target.map((r) => r.week).filter(Boolean)));
+      const days = Array.from(new Set(weeks.map((w) => /^(\d{4}-\d{2}-\d{2})~/.exec(w)?.[1]).filter(Boolean))) as string[];
+      let plan: LineP[] = [];
+      for (const d of days) { try { plan.push(...(await api<{ rows: LineP[] }>(`/api/pullplan?type=day&day=${d}`)).rows); } catch { /* plan not available */ } }
+      plan = plan.filter((l) => weeks.includes(l.week));
+      saveWorkbook(packingListWorkbook(h!, { ids: new Set(target.map((r) => r.id)), combined: oneSheet, pfcSlocs, plan, planTitle: `Plan · ${weeks.map(pickName).join(', ')}` }), `Packing_List_${day}${ptag}${tag}.xlsx`);
+    } finally { setPlBusy(false); }
+  };
+  const downloadKorber = () => saveWorkbook(korberWorkbook(h!, new Set(target.map((r) => r.id))), `Korber_Picked_${day}${ptag}${tag}.xlsx`);
   const markedQty = marked.reduce((t, r) => t + r.qty, 0);
   const cancel = async (path: string, what: string) => {
     if (!confirm(`Cancel ${what}? It is deleted from the pick history and the roll${path.includes('/req/') ? 's become' : ' becomes'} pickable again.`)) return;
@@ -717,18 +745,22 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
           <select className="as-search" value={day} onChange={(e) => setDay(e.target.value)} aria-label="Day">
             {days.map((d) => { const x = h?.days.find((y) => y.day === d); return <option key={d} value={d}>{fmtDate(d)}{d === today() ? ' (today)' : ''}{x ? ` · ${x.open} pick${x.open === 1 ? '' : 's'}` : ''}</option>; })}
           </select>
+          <select className="as-search" value={pickId} onChange={(e) => setPickId(e.target.value)} aria-label="Pick No">
+            <option value="">All Picks{pickIds.length ? ` (${pickIds.length})` : ''}</option>
+            {pickIds.map((w) => <option key={w} value={w}>{pickName(w)} · {(h?.requests || []).filter((r) => r.week === w && !r.cancelled_at).length} picks</option>)}
+          </select>
         </div>
       </div>
       {h && live.length > 0 && (
         <div className="pl-bar" role="group" aria-label="Packing List download">
           <span className="pl-what">{marked.length
             ? <><b>{marked.length}</b> of {live.length} picks marked · {fmtQty(markedQty)} QTY · {marked.reduce((t, r) => t + r.rolls, 0)} rolls</>
-            : <>No picks marked — the download has <b>all {live.length}</b> picks of the day. Tick picks below to choose.</>}</span>
+            : <>No picks marked — the download has <b>all {live.length}</b> picks {pickId ? `of ${pickName(pickId)}` : 'of the day'}, with the Pick&apos;s plan. Tick picks below to choose.</>}</span>
           <div className="seg" role="group" aria-label="Packing List format" title="How the picks go into the Packing List">
             <button className={oneSheet ? 'on' : ''} onClick={() => setOne(true)}>One sheet</button>
             <button className={!oneSheet ? 'on' : ''} onClick={() => setOne(false)}>Sheet per pick</button>
           </div>
-          <button className="btn primary" onClick={downloadPL}>Download Packing List{marked.length ? ` (${marked.length})` : ''}</button>
+          <button className="btn primary" disabled={plBusy} aria-busy={plBusy || undefined} onClick={downloadPL}>{plBusy ? 'Preparing…' : `Download Packing List${marked.length ? ` (${marked.length})` : ''}`}</button>
           <button className="btn" disabled={!h.korberHeader} onClick={downloadKorber} title="The picked rolls in the Korber Inventory format (cut rolls with the cut QTY)">Korber Inventory{marked.length ? ` (${marked.length})` : ''}</button>
           {canEdit && marked.length > 0 && <button className="btn danger" disabled={!cancelable.length || !!bulkBusy} aria-busy={!!bulkBusy || undefined} onClick={cancelMarked}
             title={cancelable.length ? 'Cancel the marked picks: deleted from the history, their rolls become pickable again' : 'You can cancel only your own picks'}>{bulkBusy || `Cancel marked (${cancelable.length})`}</button>}
@@ -739,7 +771,7 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
         <div className="table-wrap" style={{ maxHeight: 'none' }}>
           <table className="mini">
             <thead><tr><th className="ck"><input type="checkbox" checked={allOn} ref={(el) => { if (el) el.indeterminate = marked.length > 0 && !allOn; }} onChange={() => setSel(allOn ? new Set() : new Set(live.map((r) => r.id)))} aria-label="Mark all picks" /></th><th>Req</th><th>Type</th><th>SO / LI / Item</th><th>Plant</th><th className="n">Plan QTY</th><th className="n">Picked</th><th className="n">Rolls</th><th>HJ Pick No</th><th>By</th><th /></tr></thead>
-            <tbody>{h.requests.map((r) => {
+            <tbody>{shownReqs.map((r) => {
               const rolls = h.picks.filter((p) => p.req_id === r.id);
               return [
                 <tr key={r.id} className={`${r.cancelled_at ? 'gone' : ''} ${sel.has(r.id) ? 'marked' : ''}`} onClick={() => setOpen(open === r.id ? null : r.id)} style={{ cursor: 'pointer' }}>

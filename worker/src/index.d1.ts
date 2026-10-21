@@ -147,7 +147,7 @@ const thisWeek = () => weekId(new Date(Date.now() + 5.5 * 3600 * 1000).toISOStri
  * adds plan.week, fills it from the dates, and moves dashboard edits to week-scoped keys ("2026-W42#SO|LI|Item").
  */
 let schemaReady = false;
-const SCHEMA_V = '21';
+const SCHEMA_V = '22';
 async function ensureSchema(env: Env) {
   if (schemaReady || !env.DB) return;
   try {
@@ -250,11 +250,71 @@ async function ensureSchema(env: Env) {
   ]);
   // v21: Pick Hold — a line on hold is not picked until the hold is released (reason, who, when)
   for (const c of ['hold TEXT', 'hold_by TEXT', 'hold_at TEXT']) { try { await env.DB.prepare(`ALTER TABLE line_status ADD COLUMN ${c}`).run(); } catch { /* already there */ } }
+  // v22: a day is created, then its Picks; every Pick has its own reports (ZMMBE, ZINR, ZCOMENT VIEW, Korber) — rid = the Pick.
+  // Rows uploaded before (rid '') are the shared reports, used by a Pick that has none of its own. The pick history stays one master.
+  for (const t of ['stock', 'zinr', 'zcoment', 'korber', 'uploads']) { try { await env.DB.prepare(`ALTER TABLE ${t} ADD COLUMN rid TEXT NOT NULL DEFAULT ''`).run(); } catch { /* already there */ } }
+  await env.DB.batch([
+    env.DB.prepare('CREATE TABLE IF NOT EXISTS plan_day (day TEXT PRIMARY KEY, created_by TEXT, created_at TEXT)'),
+    env.DB.prepare('CREATE TABLE IF NOT EXISTS pick_round (rid TEXT PRIMARY KEY, day TEXT NOT NULL, plant TEXT, round INTEGER NOT NULL, created_by TEXT, created_at TEXT, note TEXT)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS pick_round_day ON pick_round(day, plant, round)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS stock_rid ON stock(rid, src, key)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS zinr_rid ON zinr(rid, so, li, material)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS zinr_rid_lot ON zinr(rid, lot)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS zcoment_rid ON zcoment(rid, lot)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS zcoment_rid_bc ON zcoment(rid, barcode)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS korber_rid ON korber(rid, pallet)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS korber_rid_item ON korber(rid, item, lot)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS korber_rid_core ON korber(rid, pcore)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS uploads_rid ON uploads(rid, src)'),
+    // the days and Picks that already have a plan
+    env.DB.prepare(`INSERT OR IGNORE INTO pick_round (rid, day, plant, round, created_by, created_at)
+      SELECT week, MIN(date), NULLIF(substr(week, 12, instr(substr(week, 12), '~') - 1), '-'), CAST(substr(week, 12 + instr(substr(week, 12), '~')) AS INTEGER), MIN(src_user), MIN(src_at)
+      FROM plan WHERE plan_type = 'day' AND instr(week, '~') > 0 GROUP BY week`),
+    env.DB.prepare("INSERT OR IGNORE INTO plan_day (day, created_by, created_at) SELECT DISTINCT day, created_by, created_at FROM pick_round"),
+  ]);
   await env.DB.prepare("INSERT INTO config (k, v) VALUES ('schema_v', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(SCHEMA_V).run();
   schemaReady = true;
 }
 
 /** A day plan round (Pick 1, 2 … of a plant on a day) is kept as the plan's period: "<day>~<plant>~<n>". */
+/**
+ * Which upload of each report a Pick reads: its own (rid = the Pick) when it has one, else the shared one (rid '', the
+ * reports uploaded before Picks had their own, or for a Pick still without that report). Week plans read the shared ones.
+ */
+type ReportTable = 'stock' | 'zinr' | 'zcoment' | 'korber';
+type Scope = Record<ReportTable, string>;
+const SHARED: Scope = { stock: '', zinr: '', zcoment: '', korber: '' };
+async function scopeOf(env: Env, rid: unknown): Promise<Scope> {
+  if (!parseRound(rid)) return SHARED;
+  const own = new Set((await env.DB.prepare('SELECT DISTINCT src FROM uploads WHERE rid = ?').bind(String(rid)).all<{ src: string }>()).results.map((x) => x.src));
+  const r = String(rid);
+  return { stock: own.has('zmmbe') ? r : '', zinr: own.has('zinr') ? r : '', zcoment: own.has('zcoment') ? r : '', korber: own.has('korber') ? r : '' };
+}
+const SQL_WORDS = new Set(['WHERE', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'OUTER', 'CROSS', 'NATURAL', 'ON', 'USING', 'ORDER', 'GROUP', 'LIMIT', 'UNION', 'HAVING', 'WINDOW', 'EXCEPT', 'INTERSECT', 'AS', 'SET', 'VALUES']);
+/** A read of korber / zinr / zcoment / stock → only the rows of the scope's upload (writes are not touched). */
+function scopeSql(sql: string, sc: Scope) {
+  if (!/^\s*(SELECT|WITH)\b/i.test(sql)) return sql;
+  return sql.replace(/\b(FROM|JOIN)\s+(korber|zinr|zcoment|stock)\b(\s+(?:AS\s+)?([A-Za-z_]\w*))?/gi, (_m, kw: string, t: string, aliasPart?: string, alias?: string) => {
+    const tb = t.toLowerCase() as ReportTable;
+    // +rid: a filter only — the joins keep using the selective indexes (item / lot / SO / pallet). An index lookup on rid
+    // (nearly every row has the same rid) makes SQLite cross whole tables: 100 s instead of 1 ms.
+    const sub = `(SELECT * FROM ${tb} WHERE +rid = '${sc[tb].replace(/'/g, "''")}')`;
+    if (alias && !SQL_WORDS.has(alias.toUpperCase())) return `${kw} ${sub} ${alias}`;
+    return `${kw} ${sub} AS ${tb}${aliasPart ?? ''}`;
+  });
+}
+/** The same Env, its reads of the four report tables limited to a Pick's reports. */
+function scopedEnv(env: Env, sc: Scope): Env {
+  const db = env.DB;
+  const DB = new Proxy(db, { get(target, prop) {
+    if (prop === 'prepare') return (sql: string) => target.prepare(scopeSql(sql, sc));
+    const v = Reflect.get(target, prop);
+    return typeof v === 'function' ? v.bind(target) : v;
+  } });
+  return { ...env, DB } as Env;
+}
+async function envFor(env: Env, rid: unknown) { return scopedEnv(env, await scopeOf(env, rid)); }
+
 /** "W47" for a week, "2026-10-20 C064 Pick 2" for a day plan round */
 const periodLabel = (w: unknown) => { const r = parseRound(w); return r ? `${r.day} ${r.plant ?? ''} Pick ${r.round}`.replace(/\s+/g, ' ') : /W\d{2}$/.test(String(w)) ? 'W' + String(w).slice(-2) : String(w ?? ''); };
 const roundId = (day: string, plant: string | null | undefined, n: number) => `${day}~${(plant || '').trim().toUpperCase() || '-'}~${n}`;
@@ -312,7 +372,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 40; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 41; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -406,7 +466,15 @@ async function handleUpload(env: Env, req: Request) {
   const s = await requireUser(env, req, 'editor');
   const body = (await req.json()) as { src: Src; fileName?: string; sheetName?: string; rows: Row[]; week?: string; forceWeek?: boolean; mode?: PlanMode | 'add'; plant?: string; dryRun?: boolean; planType?: string; owner?: string;
     /** a day plan round: the day, and Pick 1, 2 … of the plant (`plant`) on that day */
-    day?: string; round?: number };
+    day?: string; round?: number;
+    /** the Pick (round id "<day>~<plant>~<n>") the report belongs to; none = the shared reports */
+    rid?: string };
+  // a Pick's upload: the plan and every report go to that Pick
+  const pickRid = parseRound(body.rid) ? String(body.rid) : null;
+  if (pickRid) {
+    const pr = parseRound(pickRid)!;
+    if (body.src === 'plan') { body.planType = 'day'; body.day = pr.day; body.plant = pr.plant ?? '-'; body.round = pr.round; }
+  }
   let stockDups = 0;
   let plantOut = 0;
   let stockDiff: { added: number; removed: number; unchanged: number } | null = null;
@@ -446,6 +514,9 @@ async function handleUpload(env: Env, req: Request) {
       if (!pl) throw new HttpError(400, 'Choose the plant of this plan.');
       rid = roundId(rDay, pl, n);
       for (const r of mapped) { r.date = rDay; r.week = rid; r.plant = pl; }
+      // the day and the Pick exist from now on (also when created by this upload)
+      stmts.push(env.DB.prepare('INSERT OR IGNORE INTO plan_day (day, created_by, created_at) VALUES (?,?,?)').bind(rDay, s.u, now()),
+        env.DB.prepare('INSERT OR IGNORE INTO pick_round (rid, day, plant, round, created_by, created_at) VALUES (?,?,?,?,?,?)').bind(rid, rDay, pl, n, s.u, now()));
     }
     const mode: PlanMode = rid ? (body.mode === 'merge' ? 'merge' : 'replace-round')
       : body.mode === 'replace-week' || body.mode === 'replace-plant' || body.mode === 'replace-day' ? body.mode : 'merge';
@@ -508,14 +579,16 @@ async function handleUpload(env: Env, req: Request) {
   } else {
     mapped = mapStock(body.src, body.rows);
     stockDups = body.rows.filter((r) => normId(r.so) && normId(r.li) && normId(r.material)).length - mapped.length;
-    const cols = ['src', 'key', 'plant', 'sloc', 'so_plant', 'so', 'li', 'material', 'batch', 'style', 'ur', 'qi', 'block', 'assigned', 'total'];
+    const cols = ['rid', 'src', 'key', 'plant', 'sloc', 'so_plant', 'so', 'li', 'material', 'batch', 'style', 'ur', 'qi', 'block', 'assigned', 'total'];
+    const srid = pickRid ?? '';
     // "add": another part of the same report replaces only the rows this file has, the rest stay; otherwise the whole report is replaced.
     // Either way only changed rows are written.
     const write = async (src: string, rows: Row[]) => {
-      const rowsIn = rows.map((r) => ({ ...r, src }));
+      // a Pick's report replaces only that Pick's rows (the shared report and other Picks stay)
+      const rowsIn = rows.map((r) => ({ ...r, src, rid: srid }));
       return body.mode === 'add'
-        ? diffReplace(env, 'stock', cols, rowsIn, `src = ? AND COALESCE(plant,'') || '|' || COALESCE(sloc,'') || '|' || so || '|' || li || '|' || material || '|' || COALESCE(batch,'') IN (SELECT value FROM json_each(?))`, [src, JSON.stringify(rows.map(stockId))])
-        : diffReplace(env, 'stock', cols, rowsIn, 'src = ?', [src]);
+        ? diffReplace(env, 'stock', cols, rowsIn, `src = ? AND rid = ? AND COALESCE(plant,'') || '|' || COALESCE(sloc,'') || '|' || so || '|' || li || '|' || material || '|' || COALESCE(batch,'') IN (SELECT value FROM json_each(?))`, [src, srid, JSON.stringify(rows.map(stockId))])
+        : diffReplace(env, 'stock', cols, rowsIn, 'src = ? AND rid = ?', [src, srid]);
     };
     const rules = await getSettings(env);
     if (body.src === 'zmmbe' && rules.deriveFromZmmbe) {
@@ -540,8 +613,8 @@ async function handleUpload(env: Env, req: Request) {
       plantOut = plantRows.length;
       const from = `${body.fileName || 'ZMMBE'} (from ZMMBE)`;
       for (const [src, n] of [['kfc', kfcRows.length], ['pfc', pfcRows.length], ...(dpl ? [['plant', plantRows.length]] : [])] as [string, number][]) {
-        stmts.push(env.DB.prepare('INSERT INTO uploads (src, file_name, sheet_name, row_count, uploaded_by, uploaded_at, mode) VALUES (?,?,?,?,?,?,?)')
-          .bind(src, from, body.sheetName || null, n, s.u, now(), body.mode === 'add' ? 'add' : null));
+        stmts.push(env.DB.prepare('INSERT INTO uploads (src, file_name, sheet_name, row_count, uploaded_by, uploaded_at, mode, rid) VALUES (?,?,?,?,?,?,?,?)')
+          .bind(src, from, body.sheetName || null, n, s.u, now(), body.mode === 'add' ? 'add' : null, srid));
       }
       mapped = zRows.length ? zRows : mapped;
     } else {
@@ -552,8 +625,10 @@ async function handleUpload(env: Env, req: Request) {
   }
   if (mapped.length === 0) throw new HttpError(400, `No usable rows found for ${SRC_LABEL[body.src]}. Check the column mapping (SO, LI and Item/Material are required).`);
 
-  stmts.push(env.DB.prepare('INSERT INTO uploads (src, file_name, sheet_name, row_count, uploaded_by, uploaded_at, mode) VALUES (?,?,?,?,?,?,?)')
-    .bind(body.src, body.fileName || null, body.sheetName || null, mapped.length, s.u, now(), body.src !== 'plan' && body.mode === 'add' ? 'add' : null));
+  // the upload belongs to its Pick (plan and ZMMBE of a Pick; the shared reports have rid '')
+  const upRid = body.src === 'plan' ? (weeks.find((w) => parseRound(w)) ?? '') : body.src === 'trr' ? '' : (pickRid ?? '');
+  stmts.push(env.DB.prepare('INSERT INTO uploads (src, file_name, sheet_name, row_count, uploaded_by, uploaded_at, mode, rid) VALUES (?,?,?,?,?,?,?,?)')
+    .bind(body.src, body.fileName || null, body.sheetName || null, mapped.length, s.u, now(), body.src !== 'plan' && body.mode === 'add' ? 'add' : null, upRid));
   stmts.push(env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)')
     .bind(now(), s.u, 'upload', `${SRC_LABEL[body.src]}${body.mode === 'add' && body.src !== 'plan' ? ' (added to current)' : ''}${weeks.length ? ' ' + weeks.map((w) => periodLabel(w)).join(', ') : ''}${planSummary?.plant && !weeks.some((w) => parseRound(w)) ? ' · ' + planSummary.plant : ''}: ${planSummary ? `${planSummary.added} new, ${planSummary.updated} updated${planSummary.removed ? `, ${planSummary.removed} removed` : ''}` : mapped.length + ' rows'}${body.fileName ? ' from ' + body.fileName : ''}`));
   await env.DB.batch(stmts); // all or nothing
@@ -752,20 +827,104 @@ async function handleBackup(env: Env, req: Request, p: string) {
   throw new HttpError(404, 'Not found.');
 }
 
+/** Every report of a Pick: its own upload, or the shared one it reads instead; rows = the rows it reads. */
+async function reportStatus(env: Env, rid: string) {
+  const sc = await scopeOf(env, rid);
+  const last = async (src: string, r: string) => (await env.DB.prepare('SELECT src, file_name, row_count, uploaded_by, uploaded_at, rid FROM uploads WHERE src = ? AND rid = ? ORDER BY id DESC LIMIT 1').bind(src, r).first<Row>()) ?? null;
+  const out: { src: string; own: Row | null; shared: Row | null; rows: number; uses: 'own' | 'shared' | 'none'; missing?: string[] }[] = [];
+  for (const src of ['plan', 'zmmbe', 'zinr', 'zcoment', 'korber']) {
+    const own = rid ? await last(src, rid) : null;
+    const shared = src === 'plan' ? null : await last(src, '');
+    const table = src === 'zmmbe' ? 'stock' : src;
+    const scope = src === 'plan' ? rid : src === 'zmmbe' ? sc.stock : sc[src as ReportTable];
+    const rows = src === 'plan'
+      ? Number((await env.DB.prepare('SELECT COUNT(*) n FROM plan WHERE week = ?').bind(rid).first<{ n: number }>())?.n ?? 0)
+      : Number((await env.DB.prepare(`SELECT COUNT(*) n FROM ${table} WHERE rid = ?${src === 'zmmbe' ? " AND src = 'zmmbe'" : ''}`).bind(scope).first<{ n: number }>())?.n ?? 0);
+    // a Pick's own Korber keeps only its plan's items: items added to the plan after it was uploaded have no rolls in it
+    let missing: string[] | undefined;
+    if (src === 'korber' && own && rid) {
+      missing = (await env.DB.prepare(`SELECT DISTINCT p.item FROM plan p WHERE p.week = ?1 AND NOT EXISTS (SELECT 1 FROM korber k WHERE k.rid = ?1 AND k.item = p.item) LIMIT 20`).bind(rid).all<{ item: string }>()).results.map((x) => String(x.item));
+    }
+    out.push({ src, own, shared, rows, uses: own ? 'own' : shared && rows ? 'shared' : 'none', ...(missing?.length ? { missing } : {}) });
+  }
+  return out;
+}
+
 /** GET /api/rounds?day=yyyy-mm-dd[&plant=] — the day plan rounds (Pick 1, 2 …) already uploaded for that day, per plant. */
 async function handleRounds(env: Env, req: Request) {
-  const { owner } = await viewScope(env, req);
   const sp = new URL(req.url).searchParams;
+  // POST {day, plant}: a new Pick of that plant on that day (the next Pick No)
+  if (req.method === 'POST') {
+    const s = await requireUser(env, req, 'editor');
+    const b = (await req.json()) as { day?: string; plant?: string };
+    const day = normDate(b.day);
+    if (!day) throw new HttpError(400, 'Choose the day.');
+    const plant = cleanPlant(b.plant);
+    if (!plant) throw new HttpError(400, 'Choose the plant of the Pick.');
+    const max = Number((await env.DB.prepare(`SELECT MAX(n) m FROM (SELECT round n FROM pick_round WHERE day = ?1 AND upper(COALESCE(plant, '')) = ?2
+      UNION ALL SELECT CAST(substr(week, 12 + instr(substr(week, 12), '~')) AS INTEGER) FROM plan WHERE plan_type = 'day' AND date = ?1 AND upper(COALESCE(plant, '')) = ?2 AND instr(week, '~') > 0)`).bind(day, plant).first<{ m: number | null }>())?.m ?? 0);
+    const n = max + 1, rid = roundId(day, plant, n);
+    await env.DB.batch([
+      env.DB.prepare('INSERT OR IGNORE INTO plan_day (day, created_by, created_at) VALUES (?,?,?)').bind(day, s.u, now()),
+      env.DB.prepare('INSERT OR IGNORE INTO pick_round (rid, day, plant, round, created_by, created_at) VALUES (?,?,?,?,?,?)').bind(rid, day, plant, n, s.u, now()),
+      env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'pick-round', `Created ${periodLabel(rid)}`),
+    ]);
+    await broadcast(env, { type: 'data', src: 'plan', by: s.u, rows: 0 });
+    return json({ ok: true, rid, day, plant, round: n });
+  }
+  // DELETE ?rid= (Admin / Head): a Pick with its plan and its own reports; not when picks were saved for it
+  if (req.method === 'DELETE') {
+    const s = await requireUser(env, req, 'editor');
+    if (!isBoss(s)) throw new HttpError(403, 'Only Admin or Head can delete a Pick.');
+    const rid = String(sp.get('rid') || '');
+    if (!parseRound(rid)) throw new HttpError(400, 'Unknown Pick.');
+    const n = Number((await env.DB.prepare('SELECT COUNT(*) n FROM pick_req WHERE week = ? AND cancelled_at IS NULL').bind(rid).first<{ n: number }>())?.n ?? 0);
+    if (n) throw new HttpError(409, `${periodLabel(rid)} has ${n} saved pick${n === 1 ? '' : 's'} — cancel them in the pick history first.`);
+    await env.DB.batch([
+      ...['stock', 'zinr', 'zcoment', 'korber', 'uploads'].map((t) => env.DB.prepare(`DELETE FROM ${t} WHERE rid = ?`).bind(rid)),
+      env.DB.prepare("DELETE FROM line_status WHERE key LIKE ? || '#%'").bind(rid),
+      env.DB.prepare('DELETE FROM plan WHERE week = ?').bind(rid),
+      env.DB.prepare('DELETE FROM pick_round WHERE rid = ?').bind(rid),
+      env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'pick-round', `Deleted ${periodLabel(rid)} with its plan and reports`),
+      env.DB.prepare("DELETE FROM config WHERE k IN ('c_counts', 'c_pick_counts', 'c_weeks') OR k LIKE 'c_weeks:%'"),
+    ]);
+    await broadcast(env, { type: 'data', src: 'plan', by: s.u, rows: 0 });
+    return json({ ok: true });
+  }
+  // GET ?day=yyyy-mm-dd[&plant=]: the Picks of the day — created ones (no plan yet too) and the ones with a plan; which reports each has
+  const { owner } = await viewScope(env, req);
   const day = normDate(sp.get('day'));
   if (!day) throw new HttpError(400, 'Choose a day.');
   const plant = cleanPlant(sp.get('plant'));
-  const rows = (await env.DB.prepare(`SELECT week AS id, MAX(plant) AS plant, COUNT(*) AS lines, ROUND(SUM(qty), 3) AS qty, MAX(src_at) AS src_at, MAX(src_user) AS src_user
-    FROM plan WHERE plan_type = 'day' AND date = ?1 AND (?2 IS NULL OR owner = ?2) AND instr(week, '~') > 0 GROUP BY week`).bind(day, owner).all<Row>()).results
-    .map((r) => ({ ...r, round: parseRound(r.id)?.round ?? 1 }) as Row & { round: number })
+  const made = (await env.DB.prepare('SELECT rid AS id, plant, round, created_by, created_at FROM pick_round WHERE day = ?').bind(day).all<Row>()).results;
+  const withPlan = (await env.DB.prepare(`SELECT week AS id, MAX(plant) AS plant, COUNT(*) AS lines, ROUND(SUM(qty), 3) AS qty, MAX(src_at) AS src_at, MAX(src_user) AS src_user
+    FROM plan WHERE plan_type = 'day' AND date = ?1 AND (?2 IS NULL OR owner = ?2) AND instr(week, '~') > 0 GROUP BY week`).bind(day, owner).all<Row>()).results;
+  const own = (await env.DB.prepare("SELECT rid, group_concat(DISTINCT src) srcs FROM uploads WHERE rid LIKE ? || '~%' GROUP BY rid").bind(day).all<{ rid: string; srcs: string }>()).results;
+  const ownOf = new Map(own.map((o) => [o.rid, String(o.srcs || '').split(',').filter(Boolean)]));
+  const byId = new Map<string, Row>();
+  for (const r of made) byId.set(String(r.id), { ...r, lines: 0, qty: 0 });
+  for (const r of withPlan) byId.set(String(r.id), { ...(byId.get(String(r.id)) || {}), ...r });
+  const rows = Array.from(byId.values()).map((r) => ({ ...r, round: parseRound(r.id)?.round ?? 1, plant: r.plant ?? parseRound(r.id)?.plant ?? null, reports: ownOf.get(String(r.id)) ?? [] }) as Row & { round: number })
     .filter((r) => !plant || String(r.plant ?? '').toUpperCase() === plant)
     .sort((a, b) => String(a.plant ?? '').localeCompare(String(b.plant ?? '')) || a.round - b.round);
   const next = plant ? Math.max(0, ...rows.map((r) => r.round)) + 1 : 1;
   return json({ day, plant, rounds: rows, next });
+}
+
+/** GET /api/days — the days (created, or with a plan), newest first; POST {day} creates one. */
+async function handleDays(env: Env, req: Request) {
+  if (req.method === 'POST') {
+    const s = await requireUser(env, req, 'editor');
+    const b = (await req.json()) as { day?: string };
+    const day = normDate(b.day);
+    if (!day) throw new HttpError(400, 'Choose the day (yyyy-mm-dd).');
+    await env.DB.prepare('INSERT OR IGNORE INTO plan_day (day, created_by, created_at) VALUES (?,?,?)').bind(day, s.u, now()).run();
+    await broadcast(env, { type: 'data', src: 'plan', by: s.u, rows: 0 });
+    return json({ ok: true, day });
+  }
+  const days = (await env.DB.prepare(`SELECT d.day, (SELECT COUNT(*) FROM pick_round r WHERE r.day = d.day) AS picks, (SELECT COUNT(*) FROM plan p WHERE p.plan_type = 'day' AND p.date = d.day) AS lines
+    FROM (SELECT day FROM plan_day UNION SELECT DISTINCT date FROM plan WHERE plan_type = 'day' AND date IS NOT NULL) d ORDER BY d.day DESC LIMIT 120`).all<Row>()).results;
+  return json({ days });
 }
 
 async function handlePullPlan(env: Env, req: Request) {
@@ -797,42 +956,55 @@ async function handlePullPlan(env: Env, req: Request) {
     week = asked && weeks.some((w) => w.week === asked) ? asked : weeks[0]?.week ?? null; // default: most recent week
     prevWeek = weeks[weeks.findIndex((w) => w.week === week) + 1]?.week ?? null; // the week before it (weeks are newest first)
   }
-  const [rows, uploads] = await env.DB.batch([
-    // a day plan with no day yet: nothing (week = null would mean every round)
-    env.DB.prepare(PULL_PLAN_SQL).bind(week, prevWeek, owner, ptype, ptype === 'day' ? day ?? '~none~' : day),
-    env.DB.prepare(`SELECT u.src, u.file_name, u.sheet_name, u.row_count, u.uploaded_by, u.uploaded_at FROM uploads u
-                    JOIN (SELECT src, MAX(id) id FROM uploads GROUP BY src) m ON m.id = u.id`),
-  ]);
-  const counts = { results: await cached(env, 'c_counts', async () => (await env.DB.prepare(`SELECT 'plan' src, COUNT(*) n FROM plan UNION ALL SELECT src, COUNT(*) FROM stock GROUP BY src UNION ALL SELECT 'trr', COUNT(*) FROM trr`).all()).results) };
-  const plan = rows.results as Row[];
-  // Korber: what is on the shelf for each line — rolls of its ZINR lots (Item + Lot Number = Vendor Batch, same invoice) or
-  // its Shade Report barcodes, less what was picked from them. "Ready to pull" needs this too (null = no Korber uploaded).
-  try {
-    const keys = Array.from(new Set(plan.map((r) => String(r.key))));
-    if (keys.length && (await env.DB.prepare('SELECT 1 FROM korber LIMIT 1').first())) {
-      const kr = (await env.DB.prepare(`WITH lk AS (SELECT DISTINCT value AS key, substr(value, 1, instr(value, '|') - 1) AS so,
-          substr(substr(value, instr(value, '|') + 1), 1, instr(substr(value, instr(value, '|') + 1), '|') - 1) AS li,
-          substr(substr(value, instr(value, '|') + 1), instr(substr(value, instr(value, '|') + 1), '|') + 1) AS item FROM json_each(?1)),
-        zl AS (SELECT lk.key, lk.item, z.lot, upper(z.vendor_batch) vb, upper(z.invoice) inv FROM lk JOIN zinr z ON z.so = lk.so AND z.li = lk.li AND z.material = lk.item),
-        kp AS (SELECT zl.key, k.pallet, k.qty FROM zl JOIN korber k ON k.item = zl.item AND upper(k.lot) = zl.vb AND (zl.inv IS NULL OR k.invoice IS NULL OR upper(k.invoice) = zl.inv)
-          UNION SELECT zl.key, k.pallet, k.qty FROM zl JOIN zcoment c ON c.lot = zl.lot JOIN korber k ON k.pallet = c.barcode),
-        pk AS (SELECT pallet, SUM(qty) q, MAX(roll_qty) base FROM picks WHERE cancelled_at IS NULL AND pallet IN (SELECT pallet FROM kp) GROUP BY pallet)
-        SELECT kp.key, ROUND(SUM(MAX(0, COALESCE(pk.base, kp.qty) - COALESCE(pk.q, 0))), 3) AS avail,
-          SUM(CASE WHEN COALESCE(pk.base, kp.qty) - COALESCE(pk.q, 0) > 0.0005 THEN 1 ELSE 0 END) AS rolls
-        FROM kp LEFT JOIN pk ON pk.pallet = kp.pallet GROUP BY kp.key`).bind(JSON.stringify(keys)).all<{ key: string; avail: number; rolls: number }>()).results;
-      const by = new Map(kr.map((x) => [x.key, x]));
-      for (const r of plan) { const x = by.get(String(r.key)); r.korber_avail = x ? Number(x.avail) : 0; r.korber_rolls = x ? Number(x.rolls) : 0; }
-    }
-  } catch { /* pick tables not there yet */ }
-  // QI / Block released to UR by hand: counts until a newer ZMMBE upload (which then shows the stock as UR itself)
-  // stock "as of": the latest FULL ZMMBE upload (a part file added to it does not refresh the other rows)
-  const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND COALESCE(mode, '') <> 'add'").first<{ at: string | null }>())?.at ?? undefined;
-  // the periods on screen: the week, the round, or every round of the day
+  // a day plan: every Pick reads its own reports (ZMMBE, ZINR, ZCOMENT VIEW, Korber; else the shared ones), so the lines are
+  // worked out Pick by Pick; a week plan reads the shared reports
   const periods = ptype === 'day' ? (week ? [week] : rounds.map((r) => String(r.id))) : week ? [week] : [];
+  const groups: { period: string | null; sc: Scope; env: Env; zAt?: string }[] = [];
+  for (const per of ptype === 'day' ? periods : [week]) {
+    const sc = ptype === 'day' ? await scopeOf(env, per) : SHARED;
+    // stock "as of": the latest FULL ZMMBE upload of that scope (a part file added to it does not refresh the other rows)
+    const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid = ? AND COALESCE(mode, '') <> 'add'").bind(sc.stock).first<{ at: string | null }>())?.at ?? undefined;
+    groups.push({ period: per, sc, env: scopedEnv(env, sc), zAt });
+  }
+  // the latest upload of each report this view reads: a Pick's own (else the shared one); the whole day / a week: the shared ones
+  const vsc = ptype === 'day' && week ? groups[0]?.sc ?? SHARED : SHARED;
+  const uploads = await env.DB.prepare(`SELECT u.src, u.file_name, u.sheet_name, u.row_count, u.uploaded_by, u.uploaded_at, u.rid FROM uploads u
+                    JOIN (SELECT src, MAX(id) id FROM uploads WHERE (src IN ('zmmbe', 'kfc', 'pfc', 'plant') AND rid = ?1) OR (src = 'zinr' AND rid = ?2) OR (src = 'zcoment' AND rid = ?3)
+                      OR (src = 'korber' AND rid = ?4) OR (src = 'plan' AND rid IN (?5, '')) OR (src NOT IN ('zmmbe', 'kfc', 'pfc', 'plant', 'zinr', 'zcoment', 'korber', 'plan') AND rid = '') GROUP BY src) m ON m.id = u.id`)
+    .bind(vsc.stock, vsc.zinr, vsc.zcoment, vsc.korber, ptype === 'day' && week ? week : '').all();
+  const counts = { results: await cached(env, 'c_counts', async () => (await env.DB.prepare(`SELECT 'plan' src, COUNT(*) n FROM plan UNION ALL SELECT src, COUNT(*) FROM stock GROUP BY src UNION ALL SELECT 'trr', COUNT(*) FROM trr`).all()).results) };
+  const plan: Row[] = [];
+  for (const g of groups) {
+    const rs = (await g.env.DB.prepare(PULL_PLAN_SQL).bind(g.period, prevWeek, owner, ptype, ptype === 'day' ? day ?? '~none~' : day).all<Row>()).results;
+    for (const r of rs) r._zat = g.zAt ?? null;
+    // Korber: what is on the shelf for each line — rolls of its ZINR lots (Item + Lot Number = Vendor Batch, same invoice) or
+    // its Shade Report barcodes, less what was picked from them (all Picks). "Ready to pull" needs this too (null = no Korber).
+    try {
+      const keys = Array.from(new Set(rs.map((r) => String(r.key))));
+      if (keys.length && (await g.env.DB.prepare('SELECT 1 FROM korber LIMIT 1').first())) {
+        const kr = (await g.env.DB.prepare(`WITH lk AS (SELECT DISTINCT value AS key, substr(value, 1, instr(value, '|') - 1) AS so,
+            substr(substr(value, instr(value, '|') + 1), 1, instr(substr(value, instr(value, '|') + 1), '|') - 1) AS li,
+            substr(substr(value, instr(value, '|') + 1), instr(substr(value, instr(value, '|') + 1), '|') + 1) AS item FROM json_each(?1)),
+          zl AS (SELECT lk.key, lk.item, z.lot, upper(z.vendor_batch) vb, upper(z.invoice) inv FROM lk JOIN zinr z ON z.so = lk.so AND z.li = lk.li AND z.material = lk.item),
+          kp AS (SELECT zl.key, k.pallet, k.qty FROM zl JOIN korber k ON k.item = zl.item AND upper(k.lot) = zl.vb AND (zl.inv IS NULL OR k.invoice IS NULL OR upper(k.invoice) = zl.inv)
+            UNION SELECT zl.key, k.pallet, k.qty FROM zl JOIN zcoment c ON c.lot = zl.lot JOIN korber k ON k.pallet = c.barcode),
+          pk AS (SELECT pallet, SUM(qty) q, MAX(roll_qty) base FROM picks WHERE cancelled_at IS NULL AND pallet IN (SELECT pallet FROM kp) GROUP BY pallet)
+          SELECT kp.key, ROUND(SUM(MAX(0, COALESCE(pk.base, kp.qty) - COALESCE(pk.q, 0))), 3) AS avail,
+            SUM(CASE WHEN COALESCE(pk.base, kp.qty) - COALESCE(pk.q, 0) > 0.0005 THEN 1 ELSE 0 END) AS rolls
+          FROM kp LEFT JOIN pk ON pk.pallet = kp.pallet GROUP BY kp.key`).bind(JSON.stringify(keys)).all<{ key: string; avail: number; rolls: number }>()).results;
+        const by = new Map(kr.map((x) => [x.key, x]));
+        for (const r of rs) { const x = by.get(String(r.key)); r.korber_avail = x ? Number(x.avail) : 0; r.korber_rolls = x ? Number(x.rolls) : 0; }
+      }
+    } catch { /* pick tables not there yet */ }
+    plan.push(...rs);
+  }
+  const zAt = groups.length === 1 ? groups[0].zAt : undefined;
+  // QI / Block released to UR by hand: counts until a newer ZMMBE upload of the line's Pick (which then shows the stock as UR itself)
   const rels = periods.length ? (await env.DB.prepare('SELECT key, qi, block, by_user, at FROM stock_release WHERE week IN (SELECT value FROM json_each(?1))').bind(JSON.stringify(periods)).all<Row>()).results : [];
   const releases: Row[] = [];
   for (const rl of rels) {
-    const active = !zAt || String(rl.at) > zAt;
+    const zr = (plan.find((r) => r.key === rl.key)?._zat as string | null | undefined) ?? zAt;
+    const active = !zr || String(rl.at) > zr;
     releases.push({ ...rl, active });
     if (!active) continue;
     for (const r of plan) if (r.key === rl.key) {
@@ -866,25 +1038,42 @@ async function handlePullPlan(env: Env, req: Request) {
   }
   // picked QTY per plan line, all weeks (cancelled picks do not count). picked_after = picked after the latest full ZMMBE,
   // still inside ZMMBE's UR, so it comes off UR here; earlier picks are already out of that ZMMBE.
-  let pickAll: { week: string; line: string; qty: number; qty_after: number; rolls: number; closed: number; last_at: string | null; reqs: number }[] = [];
-  try {
-    pickAll = (await env.DB.prepare(`SELECT p.week, p.line, SUM(p.qty) qty, SUM(CASE WHEN ?1 IS NULL OR p.at > ?1 THEN p.qty ELSE 0 END) qty_after, COUNT(*) rolls,
-      MAX(COALESCE(r.closed, 0)) closed, MAX(p.at) last_at, COUNT(DISTINCT p.req_id) reqs FROM picks p LEFT JOIN pick_req r ON r.id = p.req_id WHERE p.cancelled_at IS NULL GROUP BY p.week, p.line`).bind(zAt ?? null).all<{ week: string; line: string; qty: number; qty_after: number; rolls: number; closed: number; last_at: string | null; reqs: number }>()).results;
-  } catch { /* pick tables not created yet */ }
+  // qty_after: picked after the ZMMBE the line reads (each Pick has its own) — still inside that ZMMBE's UR, so it comes off UR
+  type PickAgg = { week: string; line: string; qty: number; qty_after: number; rolls: number; closed: number; last_at: string | null; reqs: number };
+  const pickBy = new Map<string, PickAgg[]>();
+  const picksAt = async (z: string | null | undefined) => {
+    const k = z ?? '';
+    if (!pickBy.has(k)) {
+      let rs: PickAgg[] = [];
+      try {
+        rs = (await env.DB.prepare(`SELECT p.week, p.line, SUM(p.qty) qty, SUM(CASE WHEN ?1 IS NULL OR p.at > ?1 THEN p.qty ELSE 0 END) qty_after, COUNT(*) rolls,
+          MAX(COALESCE(r.closed, 0)) closed, MAX(p.at) last_at, COUNT(DISTINCT p.req_id) reqs FROM picks p LEFT JOIN pick_req r ON r.id = p.req_id WHERE p.cancelled_at IS NULL GROUP BY p.week, p.line`).bind(z ?? null).all<PickAgg>()).results;
+      } catch { /* pick tables not created yet */ }
+      pickBy.set(k, rs);
+    }
+    return pickBy.get(k)!;
+  };
+  const pickAll = await picksAt(zAt);
   const picksOf = (w: string | null) => pickAll.filter((x) => x.week === w);
-  applyPicks(plan, ptype === 'day' ? pickAll.filter((x) => periods.includes(x.week)) : picksOf(week));
-  // UR is stock of the SO / LI / Item, not of one plan line: every pick after the latest ZMMBE takes from it —
-  // also picks of its other lines (another date, another week). The full picked QTY counts (a full roll over the plan is gone too).
-  const takenAfter = new Map<string, number>();
-  for (const x of pickAll) { const k = String(x.line).slice(0, String(x.line).lastIndexOf('|')); takenAfter.set(k, r3((takenAfter.get(k) ?? 0) + Number(x.qty_after))); }
-  for (const r of plan) {
-    const t = takenAfter.get(String(r.key)) ?? 0;
-    r.ur_take_key = t;
-    r.ur_left = Math.max(0, r3(Number(r.ur ?? 0) - t));
+  // UR is stock of the SO / LI / Item, not of one plan line: every pick after the ZMMBE takes from it —
+  // also picks of its other lines (another Pick, another day). The full picked QTY counts (a full roll over the plan is gone too).
+  for (const g of ptype === 'day' ? groups : [{ period: week, zAt } as { period: string | null; zAt?: string }]) {
+    const pa = await picksAt(g.zAt);
+    const rs = ptype === 'day' ? plan.filter((r) => r.week === g.period) : plan;
+    applyPicks(rs, pa.filter((x) => x.week === g.period));
+    const takenAfter = new Map<string, number>();
+    for (const x of pa) { const k = String(x.line).slice(0, String(x.line).lastIndexOf('|')); takenAfter.set(k, r3((takenAfter.get(k) ?? 0) + Number(x.qty_after))); }
+    for (const r of rs) {
+      const t = takenAfter.get(String(r.key)) ?? 0;
+      r.ur_take_key = t;
+      r.ur_left = Math.max(0, r3(Number(r.ur ?? 0) - t));
+    }
   }
+  for (const r of plan) delete r._zat;
   dispatch.total = r3(plan.reduce((t, x) => t + Number(x.dispatched || 0), 0));
   // other weeks with picks: work out which of their lines are complete, so the week list and "carried over" agree with the dashboard
-  const otherWeeks = Array.from(new Set(pickAll.map((d) => d.week))).filter((w) => w !== week && weeks.some((x) => x.week === w));
+  // (a week plan only: a day plan's Picks are listed with their own counts, and every Pick ever would make this grow each day)
+  const otherWeeks = ptype === 'day' ? [] : Array.from(new Set(pickAll.map((d) => d.week))).filter((w) => w !== week && weeks.some((x) => x.week === w));
   const complete = new Map<string, Row[]>(); // week → plan rows after allocation
   complete.set(String(week), plan);
   if (otherWeeks.length) {
@@ -1106,7 +1295,7 @@ async function handleAssign(env: Env, req: Request, id: string) {
 
 /** What "Clear database" can empty. Users and sign-in keys are never touched. */
 const CLEAR_GROUPS: Record<string, { label: string; tables: string[] }> = {
-  plan: { label: 'Weekly plans + dashboard edits', tables: ['plan', 'line_status', 'plant_received', 'stock_release', 'dispatch_assign'] },
+  plan: { label: 'Day plans (days, Picks, plan lines) + dashboard edits', tables: ['plan', 'line_status', 'plant_received', 'stock_release', 'dispatch_assign', 'pick_round', 'plan_day'] },
   stock: { label: 'Stock reports (ZMMBE, KFC, PFC, PLANT, TRR)', tables: ['stock', 'trr'] },
   pickdata: { label: 'Pick data (ZINR, ZCOMENT VIEW, Korber)', tables: ['zinr', 'zcoment', 'korber'] },
   picks: { label: 'Pick history + packing lists', tables: ['picks', 'pick_req'] },
@@ -1203,26 +1392,36 @@ async function handlePick(env: Env, req: Request, p: string) {
   // items worth keeping from a Korber file: everything in the plan (all weeks) and in the shade reports
   if (part === 'keys' && req.method === 'GET') {
     await requireUser(env, req, 'editor');
+    // a Pick's Korber: only the items of that Pick's plan (a Korber file per Pick stays small); no plan yet / shared: every plan item
+    const krid = url.searchParams.get('rid');
+    if (krid && parseRound(krid)) {
+      const own = (await env.DB.prepare('SELECT DISTINCT item FROM plan WHERE week = ?').bind(krid).all<Row>()).results;
+      if (own.length) return json({ items: Array.from(new Set(own.map((r) => normId(r.item)))).filter(Boolean), rid: krid });
+    }
     const [a, b] = await env.DB.batch([env.DB.prepare('SELECT DISTINCT item FROM plan'), env.DB.prepare('SELECT DISTINCT material item FROM zcoment')]);
     return json({ items: Array.from(new Set([...a.results, ...b.results].map((r) => normId((r as Row).item)))).filter(Boolean) });
   }
 
   // what is loaded
+  // GET /api/pick/status?rid= — each report of a Pick: its own upload (rows, file, who, when) or the shared one it falls back to
   if (part === 'status' && req.method === 'GET') {
-    const [c, u] = await env.DB.batch([
-      env.DB.prepare("SELECT 'x' src, 0 n"),
-      env.DB.prepare(`SELECT u.src, u.file_name, u.row_count, u.uploaded_by, u.uploaded_at FROM uploads u JOIN (SELECT src, MAX(id) id FROM uploads WHERE src IN ('zinr','zcoment','korber') GROUP BY src) m ON m.id = u.id`),
-    ]);
-    void c;
-    const counts = await cached(env, 'c_pick_counts', async () => (await env.DB.prepare("SELECT 'zinr' src, COUNT(*) n FROM zinr UNION ALL SELECT 'zcoment', COUNT(*) FROM zcoment UNION ALL SELECT 'korber', COUNT(*) FROM korber").all()).results);
-    return json({ counts, uploads: u.results });
+    const rid = parseRound(url.searchParams.get('rid')) ? String(url.searchParams.get('rid')) : '';
+    const reports = await reportStatus(env, rid);
+    // the older shape (counts / uploads of the reports this Pick reads) for the Pick data card
+    const counts = reports.filter((r) => r.src !== 'plan').map((r) => ({ src: r.src, n: r.rows }));
+    const uploads = reports.map((r) => r.own ?? r.shared).filter(Boolean);
+    return json({ rid, reports, counts, uploads });
   }
 
   // POST {src, header, rows: arrays, fileName, total}: replaces that report
   if (part === 'upload' && req.method === 'POST') {
     const s = await requireUser(env, req, 'editor');
-    const b = (await req.json()) as { src: 'zinr' | 'zcoment' | 'korber'; header: unknown[]; rows: unknown[][]; fileName?: string; total?: number };
+    const b = (await req.json()) as { src: 'zinr' | 'zcoment' | 'korber'; header: unknown[]; rows: unknown[][]; fileName?: string; total?: number; rid?: string };
     if (!PICK_COLS[b.src]) throw new HttpError(400, 'Unknown report.');
+    // the Pick this report belongs to ('' = the shared report)
+    const rid = parseRound(b.rid) ? String(b.rid) : '';
+    if (rid) { const pr = parseRound(rid)!; await env.DB.batch([env.DB.prepare('INSERT OR IGNORE INTO plan_day (day, created_by, created_at) VALUES (?,?,?)').bind(pr.day, s.u, now()),
+      env.DB.prepare('INSERT OR IGNORE INTO pick_round (rid, day, plant, round, created_by, created_at) VALUES (?,?,?,?,?,?)').bind(rid, pr.day, pr.plant, pr.round, s.u, now())]); }
     if (!Array.isArray(b.header) || !Array.isArray(b.rows)) throw new HttpError(400, 'No rows in the upload.');
     const ix = headerIndex(b.header, PICK_COLS[b.src]);
     const missing = REQUIRED[b.src].filter((f) => ix[f] < 0);
@@ -1259,22 +1458,25 @@ async function handlePick(env: Env, req: Request, p: string) {
     if (!rows.length) throw new HttpError(400, `${PICK_LABEL[b.src]}: no usable rows${b.src === 'zcoment' ? ' (only "Shade Report" rows are kept)' : ''}.`);
     // the roll view has no Material: take the inspection lot's from ZINR now (unchanged rows stay unchanged on the next upload)
     if (b.src === 'zcoment' && rows.some((r) => !r.material)) {
-      const mat = new Map((await env.DB.prepare('SELECT lot, material FROM zinr').all<{ lot: string; material: string }>()).results.map((z) => [String(z.lot), z.material]));
+      // the Pick's own ZINR first, then the shared one
+      const mat = new Map((await env.DB.prepare("SELECT lot, material FROM zinr WHERE rid IN (?1, '') ORDER BY (rid = ?1)").bind(rid).all<{ lot: string; material: string }>()).results.map((z) => [String(z.lot), z.material]));
       for (const r of rows) if (!r.material) r.material = mat.get(String(r.lot)) ?? '';
     }
+    for (const r of rows) r.rid = rid;
     const cols = Object.keys(rows[0]);
-    const d = await diffReplace(env, b.src, cols, rows, '1 = 1', [], b.src === 'korber' ? 150 : 400);
+    // a Pick's report replaces only that Pick's rows; the shared report and the other Picks stay
+    const d = await diffReplace(env, b.src, cols, rows, 'rid = ?', [rid], b.src === 'korber' ? 150 : 400);
     const stmts: D1PreparedStatement[] = [...d.stmts];
     if (b.src === 'korber') poIx = null;
     // ZCOMENT rows without Material (the roll view): the inspection lot's material from ZINR — after a ZINR upload too
-    if (b.src === 'zcoment' || b.src === 'zinr') stmts.push(env.DB.prepare("UPDATE zcoment SET material = (SELECT z.material FROM zinr z WHERE z.lot = zcoment.lot LIMIT 1) WHERE COALESCE(material, '') = '' AND EXISTS (SELECT 1 FROM zinr z WHERE z.lot = zcoment.lot)"));
+    if (b.src === 'zcoment' || b.src === 'zinr') stmts.push(env.DB.prepare("UPDATE zcoment SET material = COALESCE((SELECT z.material FROM zinr z WHERE z.lot = zcoment.lot AND z.rid = zcoment.rid LIMIT 1), (SELECT z.material FROM zinr z WHERE z.lot = zcoment.lot AND z.rid = '' LIMIT 1)) WHERE COALESCE(material, '') = '' AND EXISTS (SELECT 1 FROM zinr z WHERE z.lot = zcoment.lot AND z.rid IN (zcoment.rid, ''))"));
     if (b.src === 'korber') stmts.push(env.DB.prepare("INSERT INTO config (k, v) VALUES ('korber_header', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(JSON.stringify(b.header)));
-    stmts.push(env.DB.prepare('INSERT INTO uploads (src, file_name, sheet_name, row_count, uploaded_by, uploaded_at) VALUES (?,?,?,?,?,?)').bind(b.src, b.fileName || null, null, rows.length, s.u, now()));
+    stmts.push(env.DB.prepare('INSERT INTO uploads (src, file_name, sheet_name, row_count, uploaded_by, uploaded_at, rid) VALUES (?,?,?,?,?,?,?)').bind(b.src, b.fileName || null, null, rows.length, s.u, now(), rid));
     stmts.push(env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'upload',
-      `${PICK_LABEL[b.src]}: ${rows.length} rows${b.total && b.total > rows.length ? ` (of ${b.total} in the file)` : ''}${b.fileName ? ' from ' + b.fileName : ''}`));
+      `${PICK_LABEL[b.src]}${rid ? ' · ' + periodLabel(rid) : ''}: ${rows.length} rows${b.total && b.total > rows.length ? ` (of ${b.total} in the file)` : ''}${b.fileName ? ' from ' + b.fileName : ''}`));
     await env.DB.batch(stmts);
     await broadcast(env, { type: 'data', src: b.src, by: s.u, rows: rows.length });
-    return json({ ok: true, rows: rows.length, skipped });
+    return json({ ok: true, rows: rows.length, skipped, rid });
   }
 
   // the rolls that can be picked for one plan line, with every check of the chain
@@ -1283,17 +1485,19 @@ async function handlePick(env: Env, req: Request, p: string) {
     const week = url.searchParams.get('week') || '', key = url.searchParams.get('key') || '', date = url.searchParams.get('date') || '';
     const line = await env.DB.prepare('SELECT so, li, item, qty, plant, date FROM plan WHERE week = ? AND key = ? AND COALESCE(date, \'\') = ?').bind(week, key, date).first<Row>();
     if (!line) throw new HttpError(404, 'That plan line is not in this week.');
-    return json(await pickCandidates(env, week, key, date, line));
+    // the Pick's own ZMMBE / ZINR / ZCOMENT VIEW / Korber (else the shared ones); the pick history is shared by all
+    return json(await pickCandidates(await envFor(env, week), week, key, date, line));
   }
 
   // Korber rolls to choose by hand: same item first; search by pallet, lot or supplier HU; with what is left of each
   if (part === 'korber' && req.method === 'GET') {
     await requireUser(env, req, 'editor');
     const item = normId(url.searchParams.get('item')), qs = up(url.searchParams.get('q'));
+    const kenv = await envFor(env, url.searchParams.get('rid'));
     const rows = qs
-      ? (await env.DB.prepare('SELECT pallet, item, lot, qty, uom, invoice, location, supplier_hu, status FROM korber WHERE pallet = ? OR (item = ? AND (upper(lot) LIKE ? OR supplier_hu LIKE ? OR pallet LIKE ?)) LIMIT 60')
+      ? (await kenv.DB.prepare('SELECT pallet, item, lot, qty, uom, invoice, location, supplier_hu, status FROM korber WHERE pallet = ? OR (item = ? AND (upper(lot) LIKE ? OR supplier_hu LIKE ? OR pallet LIKE ?)) LIMIT 60')
         .bind(qs, item, `%${qs}%`, `%${qs}%`, `%${qs}%`).all<Row>()).results
-      : (await env.DB.prepare('SELECT pallet, item, lot, qty, uom, invoice, location, supplier_hu, status FROM korber WHERE item = ? ORDER BY lot, supplier_hu LIMIT 200').bind(item).all<Row>()).results;
+      : (await kenv.DB.prepare('SELECT pallet, item, lot, qty, uom, invoice, location, supplier_hu, status FROM korber WHERE item = ? ORDER BY lot, supplier_hu LIMIT 200').bind(item).all<Row>()).results;
     for (const r of rows) {
       const pp = await palletPicks(env, r.pallet);
       const base = pp.base ?? Number(r.qty);
@@ -1321,7 +1525,8 @@ async function handlePick(env: Env, req: Request, p: string) {
       const h = await env.DB.prepare('SELECT hold, hold_by, hold_at FROM line_status WHERE key = ? AND hold IS NOT NULL').bind(sk).first<Row>();
       if (h) throw new HttpError(409, `This line is on hold (${h.hold}${h.hold_by ? ` — ${h.hold_by}` : ''}). Release the hold first.`);
     }
-    const cand = await pickCandidates(env, b.week, b.key, b.date ?? '', line);
+    const senv = await envFor(env, b.week); // this Pick's reports
+    const cand = await pickCandidates(senv, b.week, b.key, b.date ?? '', line);
     const byPallet = new Map(cand.rolls.map((r) => [r.pallet, r]));
     const lineId = `${b.key}|${b.date ?? ''}`;
     const day = colomboDay(), at = now();
@@ -1341,7 +1546,7 @@ async function handlePick(env: Env, req: Request, p: string) {
       let r = byPallet.get(up(x.pallet));
       const nb = !r && x.nobarcode ? nbOption(x.pallet, x.manual) : null;
       if (!r && x.nobarcode && !nb) throw new HttpError(400, `Roll ${x.pallet} is not one of the Korber rolls offered for a roll with no barcode (refresh and try again).`);
-      if (!r && (x.manual || nb)) r = await manualCandidate(env, x.pallet, nb ? { ...nb.m, ...(x.manual || {}), barcode: null } as ManualFor : x.manual!, String(line.item));
+      if (!r && (x.manual || nb)) r = await manualCandidate(senv, x.pallet, nb ? { ...nb.m, ...(x.manual || {}), barcode: null } as ManualFor : x.manual!, String(line.item));
       if (r && nb) {
         // chosen by the user from the matching rolls: confirmation is needed only when a field did not match
         const ck = nb.o.checks as Record<string, boolean | null>;
@@ -1359,7 +1564,7 @@ async function handlePick(env: Env, req: Request, p: string) {
       if (q > left + 1e-6) throw new HttpError(409, `Pallet ${x.pallet}: only ${left} left to pick (cut roll balance${r.picks.length ? ` after ${r.picks.map(pickText).join('; ')}` : ''}).`);
       if (r.needsConfirm && !x.confirmed) throw new HttpError(400, `Roll ${x.pallet}: ${r.warnings.join('; ')} — tick "Confirmed" for it.`);
       picks.push({ day, week: b.week, line: lineId, so: line.so, li: line.li, item: line.item, pallet: r.pallet, qty: q, roll_qty: r.base_qty,
-        partial: q < left - 1e-6 || r.picked_before > 0 || inThis > 0 ? 1 : 0, shade: r.shade || (await zcomentShade(env, { pallet: r.pallet, item: r.item, lot: r.lot, supplier_hu: r.supplier_hu }, r.insp_lots)), lot: r.lot, insp_lot: r.insp_lots.join(','), batch: r.batches.join(','),
+        partial: q < left - 1e-6 || r.picked_before > 0 || inThis > 0 ? 1 : 0, shade: r.shade || (await zcomentShade(senv, { pallet: r.pallet, item: r.item, lot: r.lot, supplier_hu: r.supplier_hu }, r.insp_lots)), lot: r.lot, insp_lot: r.insp_lots.join(','), batch: r.batches.join(','),
         note: [nb ? '' : x.manual ? `Manual pick for roll ${x.manual.roll_no || '?'}${x.manual.barcode ? ' (barcode ' + x.manual.barcode + ')' : ''}` : '', r.warnings.length ? `${nb && !r.needsConfirm ? '' : 'Confirmed: '}${r.warnings.join('; ')}` : ''].filter(Boolean).join(' · ') || null,
         by_user: s.u, at, korber: r.raw });
     }
@@ -1457,12 +1662,16 @@ async function handlePick(env: Env, req: Request, p: string) {
     ]);
     const header = (hdr.results[0] as Row | undefined)?.v;
     // a pick saved without a shade (a roll matched straight from ZINR to Korber): the ZCOMENT Shade, for the Packing List
+    const envs = new Map<string, Env>();
     for (const x of rolls.results as Row[]) {
       if (x.shade) continue;
+      const wk = String(x.week ?? '');
+      if (!envs.has(wk)) envs.set(wk, await envFor(env, wk));
+      const env2 = envs.get(wk)!;
       let kk: { pallet: unknown; item: unknown; lot: unknown; supplier_hu: unknown } = { pallet: x.pallet, item: x.item, lot: x.lot, supplier_hu: null };
-      const kr = await env.DB.prepare('SELECT item, lot, supplier_hu FROM korber WHERE pallet = ?').bind(x.pallet).first<Row>();
+      const kr = await env2.DB.prepare('SELECT item, lot, supplier_hu FROM korber WHERE pallet = ?').bind(x.pallet).first<Row>();
       if (kr) kk = { pallet: x.pallet, item: kr.item, lot: kr.lot, supplier_hu: kr.supplier_hu };
-      x.shade = await zcomentShade(env, kk, String(x.insp_lot ?? '').split(','));
+      x.shade = await zcomentShade(env2, kk, String(x.insp_lot ?? '').split(','));
     }
     return json({ day, week, owner, requests: reqs.results, picks: rolls.results, days: days.results, korberHeader: header ? JSON.parse(String(header)) : null });
   }
@@ -2313,6 +2522,19 @@ async function handleUsers(env: Env, req: Request, path: string) {
 
 async function handleClear(env: Env, req: Request, src: string) {
   const s = await requireUser(env, req, 'admin');
+  // ?rid=<Pick>: only that Pick's own upload of the report is removed (the Pick then reads the shared report again)
+  const crid = new URL(req.url).searchParams.get('rid');
+  if (crid && parseRound(crid) && ['zmmbe', 'zinr', 'zcoment', 'korber'].includes(src)) {
+    const t = src === 'zmmbe' ? 'stock' : src;
+    await env.DB.batch([
+      env.DB.prepare(`DELETE FROM ${t} WHERE rid = ?`).bind(crid),
+      env.DB.prepare(`DELETE FROM uploads WHERE rid = ? AND src IN (${src === 'zmmbe' ? "'zmmbe', 'kfc', 'pfc', 'plant'" : `'${src}'`})`).bind(crid),
+      env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'clear', `Cleared ${src.toUpperCase()} of ${periodLabel(crid)}`),
+      env.DB.prepare("DELETE FROM config WHERE k IN ('c_counts', 'c_pick_counts')"),
+    ]);
+    await broadcast(env, { type: 'data', src, by: s.u, rows: 0 });
+    return json({ ok: true });
+  }
   if (!ALL_SRCS.includes(src as Src)) throw new HttpError(400, 'Unknown report type.');
   const wk = new URL(req.url).searchParams.get('week');
   if (src === 'plan' && wk) {
@@ -2325,13 +2547,13 @@ async function handleClear(env: Env, req: Request, src: string) {
     await broadcast(env, { type: 'data', src, by: s.u, rows: 0, weeks: [wk] });
     return json({ ok: true });
   }
-  const stmt = src === 'plan' ? 'DELETE FROM plan' : src === 'trr' ? 'DELETE FROM trr' : 'DELETE FROM stock WHERE src = ?';
+  const stmt = src === 'plan' ? 'DELETE FROM plan' : src === 'trr' ? 'DELETE FROM trr' : "DELETE FROM stock WHERE src = ? AND rid = ''";
   // ZMMBE KFC / PFC (and PLANT, when it came from ZMMBE) are built from ZMMBE: they go with it
   const alsoClear: D1PreparedStatement[] = [];
   if (src === 'zmmbe' && (await getSettings(env)).deriveFromZmmbe) {
-    alsoClear.push(env.DB.prepare("DELETE FROM stock WHERE src IN ('kfc', 'pfc')"));
+    alsoClear.push(env.DB.prepare("DELETE FROM stock WHERE src IN ('kfc', 'pfc') AND rid = ''"));
     const lastPlant = await env.DB.prepare("SELECT file_name FROM uploads WHERE src = 'plant' ORDER BY id DESC LIMIT 1").first<{ file_name: string | null }>();
-    if (lastPlant && /\(from ZMMBE\)$/.test(String(lastPlant.file_name ?? ''))) alsoClear.push(env.DB.prepare("DELETE FROM stock WHERE src = 'plant'"));
+    if (lastPlant && /\(from ZMMBE\)$/.test(String(lastPlant.file_name ?? ''))) alsoClear.push(env.DB.prepare("DELETE FROM stock WHERE src = 'plant' AND rid = ''"));
   }
   await env.DB.batch([
     ...alsoClear,
@@ -2496,7 +2718,8 @@ export default {
       }
       else if (p === '/api/plants/received') res = await handleReceived(env, req);
       else if (p === '/api/pullplan' && req.method === 'GET') res = await handlePullPlan(env, req);
-      else if (p === '/api/rounds' && req.method === 'GET') res = await handleRounds(env, req);
+      else if (p === '/api/rounds') res = await handleRounds(env, req);
+      else if (p === '/api/days') res = await handleDays(env, req);
       else if (p === '/api/backup' || p.startsWith('/api/backup/') || p.startsWith('/api/restore/')) res = await handleBackup(env, req, p);
       else if (p === '/api/upload' && req.method === 'POST') res = await handleUpload(env, req);
       else if (p === '/api/status' && req.method === 'PATCH') res = await handleStatus(env, req);

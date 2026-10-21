@@ -22,9 +22,13 @@ interface PullPlan { type?: 'week' | 'day'; day?: string | null; days?: { day: s
 function Dispatch() {
   const { user, subscribe, toast } = useShell();
   const canEdit = user.role !== 'viewer';
-  const [day, setDay] = useState<string | null>(null);
-  const [round, setRoundS] = useState<string | null>(() => { try { return localStorage.getItem('mas-pick-round'); } catch { return null; } });
-  const setRound = (r: string | null) => { setRoundS(r); try { if (r) localStorage.setItem('mas-pick-round', r); else localStorage.removeItem('mas-pick-round'); } catch { /* private mode */ } };
+  // the day and the Pick are shared with the Upload page (chosen once, the same on both pages)
+  const ls = (k: string) => { try { return localStorage.getItem(k); } catch { return null; } };
+  const [day, setDayS] = useState<string | null>(() => ls('mas-day'));
+  const [round, setRoundS] = useState<string | null>(() => { const r = ls('mas-rid') || ls('mas-pick-round'); const d = ls('mas-day'); return r && (!d || r.startsWith(d + '~')) ? r : null; });
+  const setDay = (d: string | null) => { setDayS(d); try { if (d) localStorage.setItem('mas-day', d); } catch { /* private mode */ } };
+  const setRound = (r: string | null) => { setRoundS(r); try { if (r) { localStorage.setItem('mas-rid', r); localStorage.setItem('mas-pick-round', r); } else { localStorage.removeItem('mas-rid'); localStorage.removeItem('mas-pick-round'); } } catch { /* private mode */ } };
+  const seq = useRef(0);
   const [plan, setPlan] = useState<PullPlan | null>(null);
   const [err, setErr] = useState('');
   const dayRef = useRef(day); dayRef.current = day;
@@ -32,12 +36,13 @@ function Dispatch() {
 
   const load = useCallback(async () => {
     try {
-      const d = dayRef.current, rd = roundRef.current;
+      const d = dayRef.current, rd = roundRef.current, my = ++seq.current;
       const p = await api<PullPlan>(`/api/pullplan?type=day${d ? '&day=' + encodeURIComponent(d) : ''}${rd ? '&round=' + encodeURIComponent(rd) : ''}` + userParam());
-      // a slower answer for a day / pick no longer chosen must not overwrite the current one
-      if ((dayRef.current && p.day !== dayRef.current) || (roundRef.current || null) !== (rd || null)) return;
+      // a slower answer to an older request must not overwrite the current one
+      if (my !== seq.current) return;
       setPlan(p);
-      if (!d && p.day) setDay((x) => x ?? p.day ?? null);
+      // no day chosen yet, or the chosen day has no plan yet (a day created without lines): the day the answer is for
+      if (p.day && p.day !== d) setDay(p.day);
       // a remembered Pick of another day: back to the whole day
       if (rd && !(p.rounds || []).some((r) => r.id === rd)) setRound(null);
       setErr('');

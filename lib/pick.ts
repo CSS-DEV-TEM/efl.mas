@@ -1,6 +1,8 @@
 /** Picking: types, file reading for the three pick reports, and the Packing List workbook. */
 import * as XLSX from 'xlsx';
 import * as XLSXS from 'xlsx-js-style';
+import { planTableAoa } from './export';
+import type { Line } from './calc';
 import { api } from './api';
 import { readWorkbook, type Grid } from './mapping';
 
@@ -86,7 +88,8 @@ export function findTable(sheets: { name: string; grid: Grid }[], src: PickSrc) 
 }
 
 /** Reads a pick report file and uploads it (Korber: only the rolls of items in the plan / shade reports). */
-export async function uploadPickFile(src: PickSrc, file: File) {
+/** Uploads a ZINR / ZCOMENT VIEW / Korber file — to a Pick (`rid`), or as the shared report (no rid). */
+export async function uploadPickFile(src: PickSrc, file: File, rid?: string | null) {
   const sheets = readWorkbook(await file.arrayBuffer());
   const t = findTable(sheets, src);
   const title = PICK_SRCS.find((x) => x.src === src)!.title;
@@ -94,16 +97,17 @@ export async function uploadPickFile(src: PickSrc, file: File) {
   let rows = t.rows;
   const total = rows.length;
   if (src === 'korber') {
-    const keys = new Set((await api<{ items: string[] }>('/api/pick/keys')).items.map(itemKey));
+    // a Pick's Korber keeps only the items of that Pick's plan
+    const keys = new Set((await api<{ items: string[] }>('/api/pick/keys' + (rid ? '?rid=' + encodeURIComponent(rid) : ''))).items.map(itemKey));
     const hh = t.header.map(hn), ii = hh.indexOf('item number'), di = hh.indexOf('display item number');
     rows = rows.filter((r) => keys.has(korberItemKey(di >= 0 ? r[di] : null, r[ii])));
-    if (!rows.length) throw new Error('None of the Korber rolls are for items in the plan. Upload the weekly plan first.');
+    if (!rows.length) throw new Error(rid ? 'None of the Korber rolls are for items in this Pick\'s plan. Upload the Pick\'s plan first.' : 'None of the Korber rolls are for items in the plan. Upload the plan first.');
   }
   if (src === 'zcoment') {
     const ri = t.header.map(hn).indexOf('report name');
     if (ri >= 0) rows = rows.filter((r) => hn(r[ri]) === 'shade report');
   }
-  const r = await api<{ rows: number; skipped: number }>('/api/pick/upload', { method: 'POST', body: { src, header: t.header, rows, fileName: file.name, total } });
+  const r = await api<{ rows: number; skipped: number }>('/api/pick/upload', { method: 'POST', body: { src, header: t.header, rows, fileName: file.name, total, ...(rid ? { rid } : {}) } });
   return { ...r, total, sheet: t.sheet };
 }
 
@@ -170,7 +174,7 @@ function rollBatches(r: PickReq, m: Match, p: PickRoll): { batch: string; qty: n
  * On a sheet the rolls are in one table per Asn Number + Po Number + Lot Number; under each table its SAP lines
  * (SO | LI | Qty | Material | Batch), the Qty adding up to the table's Actual Qty. Plus a Summary and the Korber Inventory rows.
  */
-export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolean; ids?: Set<number> | number[]; combined?: boolean; pfcSlocs?: string[] } = {}) {
+export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolean; ids?: Set<number> | number[]; combined?: boolean; pfcSlocs?: string[]; /** the Pick's plan lines (dashboard table) → a "Plan" sheet */ plan?: Line[]; planTitle?: string } = {}) {
   const only = opts.ids ? new Set(opts.ids) : null;
   const reqs = h.requests.filter((r) => !r.cancelled_at && (!only || !only.size || only.has(r.id)));
   const header = (h.korberHeader || []).map(hn);
@@ -317,6 +321,18 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
   sws[`E${n + 1}`] = { t: 'n', v: new Set(entries.map((e) => e.p.pallet)).size };
   sws['!cols'] = [{ wch: multi ? 16 : 8 }, { wch: 11 }, { wch: 10 }, { wch: 10 }, { wch: 11 }, { wch: 14 }, { wch: 9 }, { wch: 52 }];
   U.book_append_sheet(wb, sws, 'Summary');
+  // the dashboard's plan table of the Pick(s): what was planned, picked, still open, UR / Korber on the shelf
+  if (opts.plan?.length) {
+    const aoa = planTableAoa(opts.plan);
+    const pws = U.aoa_to_sheet([[opts.planTitle || 'Plan'], [], ...aoa]);
+    const hr = 2, last = hr + aoa.length - 1;
+    aoa[0].forEach((_, i) => { const ref = U.encode_cell({ r: hr, c: i }); (pws[ref] as { s?: unknown }).s = ST.head; });
+    for (let r = hr + 1; r <= last; r++) aoa[0].forEach((_, i) => { const ref = U.encode_cell({ r, c: i }); pws[ref] = pws[ref] || { t: 's', v: '' }; (pws[ref] as { s?: unknown }).s = r === last ? ST.top : ST.cell; });
+    (pws.A1 as { s?: unknown }).s = { font: { bold: true, sz: 13 } };
+    pws['!cols'] = [12, 12, 5, 12, 11, 12, 10, 10, 10, 10, 10, 11, 8, 8, 8, 16, 12, 16, 24, 20].map((w) => ({ wch: w }));
+    pws['!autofilter'] = { ref: `A${hr + 1}:${U.encode_col(aoa[0].length - 1)}${last}` };
+    U.book_append_sheet(wb, pws, 'Plan');
+  }
   if (opts.korberSheet !== false && h.korberHeader) {
     U.book_append_sheet(wb, korberSheet(h.korberHeader, korberPicks), 'Korber Inventory');
   }

@@ -58,7 +58,12 @@ export default function PlanPicks({ rows, label, reloadKey, plantName }: { rows:
   const setOne = (v: boolean) => { setOneSheet(v); try { localStorage.setItem('pl_one_sheet', v ? '1' : '0'); } catch { /* private mode */ } };
   const tag = `${label.replace(/[^\w-]+/g, '_')}${marked.length ? `_${marked.length}picks` : ''}`;
   const ids = new Set(target.map((r) => r.id));
-  const downloadPL = () => h && saveWorkbook(packingListWorkbook(h, { ids, combined: oneSheet, pfcSlocs }), `Packing_List_${tag}.xlsx`);
+  // the Packing List also gets the plan (dashboard table) of the Picks in it
+  const downloadPL = () => {
+    if (!h) return;
+    const weeks = new Set(target.map((r) => r.week));
+    saveWorkbook(packingListWorkbook(h, { ids, combined: oneSheet, pfcSlocs, plan: rows.filter((l) => weeks.has(l.week)), planTitle: `Plan · ${label}` }), `Packing_List_${tag}.xlsx`);
+  };
   const downloadKorber = () => h && saveWorkbook(korberWorkbook(h, ids), `Korber_Picked_${tag}.xlsx`);
   // cancel the marked picks together (own picks; Admin / Head: anyone's) — they leave the history, their rolls are free again
   const me = getSession()?.user.username || '';

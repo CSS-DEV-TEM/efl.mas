@@ -11,6 +11,7 @@ import { api, isBossRole, userParam } from '@/lib/api';
 import { useRefreshOnActivity } from '@/lib/freshness';
 import { ago, fmt, fmtDate, type Upload, type WeekInfo } from '@/lib/calc';
 import { TEMPLATES, downloadTemplate } from '@/lib/templates';
+import DayPickBar, { useDayPick } from '@/components/DayPickBar';
 import { todayLocal, weekDays, weekIdOf, weekOptions } from '@/lib/smart';
 import {
   FIELDS, SRC_INFO, SRC_ORDER, applyMapping, colLetter, detectMapping, guessSrc, guessSrcFromGrid, isHelpSheet, readWorkbook, usableCount,
@@ -45,6 +46,9 @@ interface SheetJob {
 
 function Uploads() {
   const { user, subscribe, toast } = useShell();
+  // 1 day → 2 Pick → 3 reports: everything uploaded here goes to the chosen Pick
+  const { day, setDay, rid, setRid } = useDayPick();
+  const [barKey, setBarKey] = useState(0);
   const [jobs, setJobs] = useState<SheetJob[]>([]);
   const [over, setOver] = useState(false);
   const [reading, setReading] = useState(false);
@@ -124,9 +128,9 @@ function Uploads() {
     setJob(j.id, { state: 'sending', msg: undefined });
     try {
       const rows = applyMapping(j.src, j.grid, j.map);
-      const r = await api<PlanPreview & { accepted: number; skipped: number; weeks?: string[]; stockDups?: number; changes?: { added: number; removed: number; unchanged: number }; derived?: { kfc: number; pfc: number; plant: number | null; plantKept?: number } }>('/api/upload', { method: 'POST', body: { src: j.src, fileName: j.file, sheetName: j.sheet, rows, ...planOpts(j, myPlant) } });
+      const r = await api<PlanPreview & { accepted: number; skipped: number; weeks?: string[]; stockDups?: number; changes?: { added: number; removed: number; unchanged: number }; derived?: { kfc: number; pfc: number; plant: number | null; plantKept?: number } }>('/api/upload', { method: 'POST', body: { src: j.src, fileName: j.file, sheetName: j.sheet, rows, ...planOpts(j, rid) } });
       const wk = r.weeks?.length ? ` to ${r.weeks.map((w) => roundName(w, plantNames)).join(', ')}` : '';
-      await loadStatus();
+      await loadStatus(); setBarKey((k) => k + 1);
       if (j.src === 'zmmbe' || j.src === 'plan') setShowReady(true);
       const plan = j.src === 'plan' && r.added !== undefined ? `${fmt(r.added)} new, ${fmt(r.updated)} updated${r.removed ? `, ${fmt(r.removed)} removed` : ''}${r.inFileDups ? `, ${fmt(r.inFileDups)} repeated rows (last row kept${r.dupQtyCount ? `; ${fmt(r.dupQtyCount)} had a different QTY` : ''})` : ''}` : `${fmt(r.accepted)} rows saved — ${j.stockMode === 'add' ? 'added to the current report' : 'whole report replaced, no duplicates'}${r.stockDups ? ` · ${fmt(r.stockDups)} repeated rows counted once` : ''}${r.changes ? ` · ${fmt(r.changes.unchanged)} unchanged, ${fmt(r.changes.added)} new or changed, ${fmt(r.changes.removed)} removed` : ''}${r.derived ? ` · also built ZMMBE KFC (${fmt(r.derived.kfc)}) and PFC (${fmt(r.derived.pfc)})${r.derived.plant ? ` · ${fmt(r.derived.plant)} plant-location row${r.derived.plant === 1 ? '' : 's'} left out` : ''}` : ''}`;
       setJob(j.id, { state: 'done', msg: `${plan}${wk}${r.skipped > 0 ? ` · ${fmt(r.skipped)} rows without SO/LI/Material skipped` : ''}. Every open dashboard has updated.` });
@@ -172,23 +176,11 @@ function Uploads() {
       <div className="page-head">
         <div>
           <h1>Upload reports</h1>
-          <p>Dispatch / pick files (JAN0190…) go on the <Link href="/dispatch/">Dispatch page</Link>. Drop the day plan (choose its day, plant and Pick No) and the ZMMBE report here. Each upload replaces that report's previous data, the calculation runs again and every open dashboard updates live.</p>
+          <p>Dispatch / pick files (JAN0190…) go on the <Link href="/dispatch/">Dispatch page</Link>. First create the day and the Pick, then upload the Pick's Plan and ZMMBE (drop them below) and its ZINSR, ZCOMENT VIEW and Korber Inventory (in the Pick card). Each upload replaces that report's previous data, the calculation runs again and every open dashboard updates live.</p>
         </div>
       </div>
 
-      <section className="kpis" aria-label="Current data">
-        {SRC_ORDER.map((s) => {
-          const u = up.get(s);
-          return (
-            <div className="kpi" key={s}>
-              <span className="k">{SRC_INFO[s].title}</span>
-              <span className="v">{fmt(counts[s] || 0)}</span>
-              <span className="s">{u ? `${u.uploaded_by} · ${ago(u.uploaded_at)}` : SRC_INFO[s].hint}</span>
-              {user.role === 'admin' && (counts[s] || 0) > 0 && <button className="btn sm danger" style={{ justifySelf: 'start', marginTop: 6 }} onClick={() => clear(s)}>Clear</button>}
-            </div>
-          );
-        })}
-      </section>
+      <DayPickBar day={day} setDay={setDay} rid={rid} setRid={setRid} toast={toast} refreshKey={barKey} onUploaded={() => { void loadStatus(); }} />
 
       <section className="card" aria-labelledby="tpl-title">
         <h2 id="tpl-title">Sample formats</h2>
@@ -263,7 +255,7 @@ function Uploads() {
             </div>
           )}
 
-          {jobs.map((j) => <SheetCard key={j.id} job={j} myPlant={myPlant} plants={plants} plantNames={plantNames} owners={owners} me={user.username} onChange={(p) => setJob(j.id, p)} onSend={() => send(j)} onRemove={() => setJobs((js) => js.filter((x) => x.id !== j.id))} />)}
+          {jobs.map((j) => <SheetCard key={j.id} job={j} rid={rid} ridLabel={rid ? roundName(rid, plantNames) : ''} owners={owners} me={user.username} onChange={(p) => setJob(j.id, p)} onSend={() => send(j)} onRemove={() => setJobs((js) => js.filter((x) => x.id !== j.id))} />)}
         </>
       )}
     </main>
@@ -325,15 +317,14 @@ function show(v: unknown, id: string) {
 }
 
 interface PlanPreview { owner?: string; planType?: string; days?: string[]; round?: number; added: number; updated: number; removed: number; kept: number; inFileDups: number; dupQty?: { so: string; li: string; item: string; date: string | null; was: number; now: number }[]; dupQtyCount?: number; lines: number; plant: string | null; mode: string }
-function planOpts(j: SheetJob, myPlant: string) {
-  if (j.src !== 'plan') return j.stockMode === 'add' ? { mode: 'add' } : {};
-  const plant = (j.plant ?? myPlant).trim();
-  // a day plan round: the day, the plant and its Pick No; uploading the same round again replaces it (or merges into it)
-  return { planType: 'day', day: j.day || todayLocal(), round: j.round || 1, mode: j.mode === 'merge' ? 'merge' : 'replace-round', ...(j.owner ? { owner: j.owner } : {}), ...(plant ? { plant } : {}) };
+/** A Pick's upload: the plan and ZMMBE go to the chosen Pick (rid). */
+function planOpts(j: SheetJob, rid: string) {
+  if (j.src !== 'plan') return { ...(j.stockMode === 'add' ? { mode: 'add' } : {}), ...(rid ? { rid } : {}) };
+  return { rid, mode: j.mode === 'merge' ? 'merge' : 'replace-round', ...(j.owner ? { owner: j.owner } : {}) };
 }
 interface RoundInfo { id: string; plant: string | null; round: number; lines: number; qty: number; src_at: string | null; src_user: string | null }
 
-function SheetCard({ job, myPlant, plants, plantNames, owners, me, onChange, onSend, onRemove }: { job: SheetJob; myPlant: string; plants: string[]; plantNames: Record<string, string>; owners: string[] | null; me: string; onChange: (p: Partial<SheetJob>) => void; onSend: () => void; onRemove: () => void }) {
+function SheetCard({ job, rid, ridLabel, owners, me, onChange, onSend, onRemove }: { job: SheetJob; rid: string; ridLabel: string; owners: string[] | null; me: string; onChange: (p: Partial<SheetJob>) => void; onSend: () => void; onRemove: () => void }) {
   const fields = job.src ? FIELDS[job.src] : [];
   const width = Math.max(0, ...job.grid.slice(0, 50).map((r) => r?.length || 0));
   const header = job.map?.how === 'header' && job.map.headerRow !== undefined ? job.grid[job.map.headerRow] : null;
@@ -341,41 +332,20 @@ function SheetCard({ job, myPlant, plants, plantNames, owners, me, onChange, onS
   const rows = useMemo(() => (job.src && job.map ? applyMapping(job.src, job.grid, job.map) : []), [job.src, job.map, job.grid]);
   const usable = job.src ? usableCount(job.src, rows) : 0;
   const checks = useMemo(() => (job.src === 'plan' ? planChecks(rows, '', true) : []), [job.src, rows]);
-  // the day: the one date of the file's lines, else today
-  const fileDays = useMemo(() => (job.src === 'plan' ? Array.from(new Set(rows.map((r) => toIsoDate(r.date)).filter(Boolean) as string[])).sort() : []), [job.src, rows]);
-  const dayVal = job.day || (fileDays.length === 1 ? fileDays[0] : todayLocal());
-  useEffect(() => { if (job.src === 'plan' && !job.day) onChange({ day: dayVal }); }, [job.src, job.day, dayVal]); // eslint-disable-line react-hooks/exhaustive-deps
-  // the rounds already there for the day + plant: the next Pick No is suggested
-  const [rounds, setRounds] = useState<RoundInfo[]>([]);
-  const filePlants = useMemo(() => (job.src === 'plan' ? Array.from(new Set(rows.map((r) => String(r.plant ?? '').trim().toUpperCase()).filter((x) => x && !x.startsWith('#')))) : []), [job.src, rows]);
-  const plantSel = (job.plant ?? (filePlants.length === 1 ? filePlants[0] : myPlant)).trim().toUpperCase();
-  // the file's one plant (or the user's plant) becomes the plan's plant, so the preview and the upload use it
-  useEffect(() => { if (job.src === 'plan' && job.plant === undefined && plantSel) onChange({ plant: plantSel }); }, [job.src, job.plant, plantSel]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    if (job.src !== 'plan' || !dayVal || !plantSel) { setRounds([]); return; }
-    let stop = false;
-    api<{ rounds: RoundInfo[]; next: number }>(`/api/rounds?day=${dayVal}&plant=${encodeURIComponent(plantSel)}${job.owner ? '&user=' + encodeURIComponent(job.owner) : ''}`).then((r) => {
-      if (stop) return;
-      setRounds(r.rounds);
-      if (!job.round || job.state === 'ready' && !job.roundTouched) onChange({ round: r.next });
-    }).catch(() => {});
-    return () => { stop = true; };
-  }, [job.src, dayVal, plantSel, job.owner, job.state === 'done']); // eslint-disable-line react-hooks/exhaustive-deps
   // ask the server what this upload would do (new / updated / removed) before it is sent
   const [preview, setPreview] = useState<PlanPreview | null>(null);
   const [previewErr, setPreviewErr] = useState('');
-  const plantVal = job.plant ?? (filePlants.length === 1 ? filePlants[0] : myPlant);
   useEffect(() => {
-    if (job.src !== 'plan' || job.state === 'done' || !usable) { setPreview(null); return; }
+    if (job.src !== 'plan' || job.state === 'done' || !usable || !rid) { setPreview(null); return; }
     let stop = false;
     const t = setTimeout(async () => {
       try {
-        const r = await api<PlanPreview>('/api/upload', { method: 'POST', body: { src: 'plan', rows, dryRun: true, ...planOpts(job, myPlant) } });
+        const r = await api<PlanPreview>('/api/upload', { method: 'POST', body: { src: 'plan', rows, dryRun: true, ...planOpts(job, rid) } });
         if (!stop) { setPreview(r); setPreviewErr(''); }
       } catch (e) { if (!stop) { setPreview(null); setPreviewErr(e instanceof Error ? e.message : ''); } }
     }, 350);
     return () => { stop = true; clearTimeout(t); };
-  }, [job.src, job.state, job.day, job.round, job.mode, job.owner, plantVal, rows, usable, myPlant]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [job.src, job.state, job.mode, job.owner, rows, usable, rid]); // eslint-disable-line react-hooks/exhaustive-deps
   const missing = fields.filter((f) => f.required && (job.map?.cols[f.id] ?? -1) < 0);
   const how = job.map?.how === 'header' ? `header row ${(job.map.headerRow ?? 0) + 1}` : job.map?.how === 'keyed' ? 'your workbook layout (key in column A)' : 'SAP layout without key column';
 
@@ -392,7 +362,7 @@ function SheetCard({ job, myPlant, plants, plantNames, owners, me, onChange, onS
             <option value="">Skip this sheet</option>
             {SRC_ORDER.map((s) => <option key={s} value={s}>{SRC_INFO[s].title}</option>)}
           </select>
-          <button className="btn primary" aria-busy={job.state === 'sending' || undefined} disabled={!job.src || !usable || missing.length > 0 || job.state === 'sending' || (job.src === 'plan' && !plantSel)} onClick={onSend}>
+          <button className="btn primary" aria-busy={job.state === 'sending' || undefined} disabled={!job.src || !usable || missing.length > 0 || job.state === 'sending' || !rid} title={rid ? `Upload to ${ridLabel}` : 'Choose or create a Pick first'} onClick={onSend}>
             {job.state === 'sending' ? 'Uploading…' : job.state === 'done' ? 'Upload again' : 'Upload'}
           </button>
           <button className="btn sm" onClick={onRemove} aria-label="Remove">✕</button>
@@ -409,27 +379,7 @@ function SheetCard({ job, myPlant, plants, plantNames, owners, me, onChange, onS
       {job.src === 'plan' && job.state !== 'done' && (
         <div className="plan-opts">
           <div className="round-pick">
-            <label>Day
-              <input type="date" value={dayVal} onChange={(e) => onChange({ day: e.target.value, roundTouched: false, state: 'ready', msg: undefined })} />
-            </label>
-            <label>Plant
-              <select value={plantSel} onChange={(e) => onChange({ plant: e.target.value, roundTouched: false, state: 'ready', msg: undefined })}>
-                <option value="">Choose the plant…</option>
-                {Array.from(new Set([...plants, ...(plantSel ? [plantSel] : [])])).map((p) => <option key={p} value={p}>{plantNames[p] ? `${plantNames[p]} (${p})` : p}</option>)}
-              </select>
-            </label>
-            <label>Pick No
-              <select value={job.round || 1} onChange={(e) => onChange({ round: Number(e.target.value), roundTouched: true, state: 'ready', msg: undefined })}>
-                {Array.from({ length: Math.max(6, (rounds.at(-1)?.round || 0) + 2) }, (_, i) => i + 1).map((n) => {
-                  const had = rounds.find((r) => r.round === n);
-                  return <option key={n} value={n}>Pick {n}{had ? ` — uploaded ${fmt(had.lines)} lines (replace)` : n === (rounds.at(-1)?.round || 0) + 1 ? ' — next' : ''}</option>;
-                })}
-              </select>
-            </label>
-            <span className="muted">
-              {plantSel ? <>All {fmt(usable)} lines go to <b>{fmtDate(dayVal)} · {plantNames[plantSel] || plantSel} · Pick {job.round || 1}</b>.{fileDays.length > 1 ? ` The file has ${fileDays.length} dates — every line is saved to this day.` : ''}
-                {rounds.length ? ` Already uploaded today: ${rounds.map((r) => `Pick ${r.round} (${r.lines})`).join(', ')}.` : ''}</> : 'Choose the plant of this plan.'}
-            </span>
+            <span>{rid ? <>All {fmt(usable)} lines go to <b>{ridLabel}</b>. The day, the plant and the Pick No come from the Pick chosen above.</> : <b>Choose or create a Pick above — the plan goes to that Pick.</b>}</span>
           </div>
           {owners && (
             <label className="plant-pick">Plan of
@@ -440,10 +390,10 @@ function SheetCard({ job, myPlant, plants, plantNames, owners, me, onChange, onS
               <span className="muted">Admin / Head: upload this plan for a user. It becomes that user&apos;s plan.</span>
             </label>
           )}
-          {rounds.some((r) => r.round === (job.round || 1)) && (
+          {rid && (
             <div className="mode-pick" role="radiogroup" aria-label="How to add this file">
-              {([['replace-round', `Replace Pick ${job.round || 1}`, 'The lines of this Pick are removed, then the file is added. Other Picks stay.'],
-                ['merge', `Add to Pick ${job.round || 1}`, 'Add new lines and update matching ones in this Pick. Nothing else is touched.']] as const).map(([v, label, help]) => {
+              {([['replace-round', 'Replace the Pick\'s plan', 'The lines of this Pick are removed, then the file is added. Other Picks stay.'],
+                ['merge', 'Add to the Pick\'s plan', 'Add new lines and update matching ones in this Pick. Nothing else is touched.']] as const).map(([v, label, help]) => {
                 const cur = job.mode === 'merge' ? 'merge' : 'replace-round';
                 return (
                   <label key={v} className={`mode ${cur === v ? 'on' : ''}`}>
