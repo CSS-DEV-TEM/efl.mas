@@ -794,3 +794,12 @@ tr.on-hold td { background: color-mix(in srgb, #ef4444 9%, transparent); }
 .dpb-h { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
 .dpb-n { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .dpb-act { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+/* Pick by SO */
+.so-list { display: grid; gap: 6px; }
+.so-card { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.so-card.on { border-color: var(--accent); }
+.so-head { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; width: 100%; padding: 9px 12px; background: var(--panel); color: var(--ink); border: 0; cursor: pointer; text-align: left; font: inherit; font-size: 13.5px; }
+.so-head:hover { background: var(--accent-soft); }
+.so-head b { font-variant-numeric: tabular-nums; }
+.so-head .so-arrow { margin-left: auto; color: var(--ink-3); }
+.so-card .table-wrap { border-top: 1px solid var(--line); }

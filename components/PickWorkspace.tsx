@@ -28,6 +28,10 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
   const [status, setStatus] = useState<{ counts: { src: string; n: number }[]; uploads: { src: string; file_name: string | null; row_count: number; uploaded_by: string; uploaded_at: string }[]; reports?: { src: string; uses: 'own' | 'shared' | 'none' }[] } | null>(null);
   const [busy, setBusy] = useState<PickSrc | null>(null);
   const [scope, setScope] = useState<'pending' | 'ready' | 'open' | 'picked' | 'done' | 'hold'>('pending');
+  // the plan by SO (open an SO to see its items) or as one list of lines
+  const [byView, setByViewS] = useState<'so' | 'lines'>(() => { try { return localStorage.getItem('mas-pick-view') === 'lines' ? 'lines' : 'so'; } catch { return 'so'; } });
+  const setByView = (v: 'so' | 'lines') => { setByViewS(v); try { localStorage.setItem('mas-pick-view', v); } catch { /* private mode */ } };
+  const [openSo, setOpenSo] = useState<string | null>(null);
   const [why, setWhy] = useState('');
   const [q, setQ] = useState('');
   const [picking, setPicking] = useState<LineP | null>(null);
@@ -137,7 +141,59 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
             ))}
           </div>
         )}
-        {!list.length ? <p className="muted">No lines {scope === 'ready' ? 'are ready to pull' : scope === 'picked' ? 'picked yet' : scope === 'hold' ? 'on hold' : scope === 'pending' ? 'pending' : 'with UR stock'} in {label || week}.</p> : (
+        <div className="seg" role="group" aria-label="View" style={{ margin: '4px 0 8px' }}>
+          <button className={byView === 'so' ? 'on' : ''} onClick={() => setByView('so')}>By SO</button>
+          <button className={byView === 'lines' ? 'on' : ''} onClick={() => setByView('lines')}>All lines</button>
+        </div>
+        {byView === 'so' && list.length > 0 && (() => {
+          // what to pick = the plan QTY, at most the UR (Total − SO Blocked − Assigned)
+          const pickQty = (l: LineP) => Math.max(0, Math.min(Number(l.qty), Number(l.ur) || 0));
+          const sos = Array.from(new Set(list.map((l) => l.so)));
+          return (
+            <div className="so-list">
+              {sos.map((so) => {
+                const ls = list.filter((l) => l.so === so);
+                const plan = ls.reduce((t, l) => t + Number(l.qty), 0), pq = ls.reduce((t, l) => t + pickQty(l), 0), picked = ls.reduce((t, l) => t + (l.picked ?? 0), 0);
+                const doneN = ls.filter((l) => isDone(l)).length, holdN0 = ls.filter((l) => l.hold && !isDone(l)).length;
+                const on = openSo === so;
+                return (
+                  <div key={so} className={`so-card ${on ? 'on' : ''}`}>
+                    <button type="button" className="so-head" onClick={() => setOpenSo(on ? null : so)} aria-expanded={on}>
+                      <b className="mono">{so}</b>
+                      <span>{ls.length} item{ls.length === 1 ? '' : 's'}</span>
+                      <span>Plan <b>{fmtQty(plan)}</b></span>
+                      <span title="The plan QTY, at most the UR">Pick <b>{fmtQty(pq)}</b></span>
+                      <span>Picked <b>{fmtQty(picked)}</b></span>
+                      {doneN > 0 && <span className="pill ok">{doneN} done</span>}{holdN0 > 0 && <span className="pill bad">{holdN0} on hold</span>}
+                      <span className="so-arrow">{on ? '▾' : '▸'}</span>
+                    </button>
+                    {on && (
+                      <div className="table-wrap" style={{ maxHeight: 'none' }}>
+                        <table className="mini">
+                          <thead><tr><th>LI</th><th>Item Code</th><th>Plant</th><th className="n">QTY</th><th className="n" title="Total stock − SO Blocked stock − Assigned Qty (ZMMBE)">UR</th><th className="n" title="QTY, at most the UR">Pick QTY</th><th className="n">Picked</th><th className="n">Balance</th><th className="n">Korber qty</th><th>State</th><th /></tr></thead>
+                          <tbody>{ls.map((l) => {
+                            const pk = l.picked ?? 0;
+                            return (
+                              <tr key={l.id} className={l.hold && !isDone(l) ? 'on-hold' : ''}>
+                                <td>{l.li}</td><td>{l.item}</td><td>{l.plant}</td><td className="n">{fmtQty(l.qty)}</td><td className="n">{fmtQty(Number(l.ur) || 0)}</td>
+                                <td className="n"><b>{fmtQty(pickQty(l))}</b>{Number(l.qty) > (Number(l.ur) || 0) + 1e-9 && <span className="muted small" title="QTY is more than the UR: the UR is picked"> (UR)</span>}</td>
+                                <td className="n">{pk ? fmtQty(pk) : '–'}</td><td className="n">{fmtQty(need(l))}</td>
+                                <td className="n">{l.korber_avail == null ? '–' : <span className={!isDone(l) && l.korber_avail < need(l) - 1e-6 ? 'kb-short' : ''}>{fmtQty(l.korber_avail)} <span className="muted">({l.korber_rolls ?? 0})</span></span>}</td>
+                                <td>{l.hold && !isDone(l) ? <span className="pill bad" title={l.hold}>On hold</span> : isDone(l) ? <span className="pill ok">Done</span> : <span className={`pill ${PENDING_TONE[pendingWhy(l)] || 'mute'}`}>{pendingWhy(l)}</span>}</td>
+                                <td style={{ whiteSpace: 'nowrap' }}>{canEdit && !isDone(l) && !l.hold && <button className="btn sm primary" onClick={() => setPicking(l)}>{pk ? 'Pick more' : 'Pick'}</button>}</td>
+                              </tr>
+                            );
+                          })}</tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })()}
+        {byView === 'lines' && (!list.length ? <p className="muted">No lines {scope === 'ready' ? 'are ready to pull' : scope === 'picked' ? 'picked yet' : scope === 'hold' ? 'on hold' : scope === 'pending' ? 'pending' : 'with UR stock'} in {label || week}.</p> : (
           <div className="table-wrap" style={{ maxHeight: 460 }}>
             <table className="mini">
               <thead><tr><th>SO</th><th>LI</th><th>Item</th><th>Date</th><th>Plant</th><th className="n">QTY</th><th className="n">Picked = Dispatched</th><th className="n">Balance</th><th className="n">UR left</th><th className="n" title="Korber Inventory: Actual Qty of this SO / LI / Item's rolls still on the shelf (its ZINR lots; picks taken off)">Korber qty</th><th>State</th><th /></tr></thead>
@@ -162,12 +218,17 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
               })}</tbody>
             </table>
           </div>
-        )}
+        ))}
+        {byView === 'so' && !list.length && <p className="muted">No lines in this view in {label || week}.</p>}
       </section>
 
       {holding && <HoldDialog line={holding} onClose={() => setHolding(null)} onSave={(r) => { const l = holding; setHolding(null); void setHold(l, r); }} />}
 
       <PickHistoryCard key={histKey} canEdit={canEdit} toast={toast} onChanged={() => { reload(); setHistKey((k) => k + 1); }} />
+
+      <RejectedRolls key={`rj${histKey}`} canEdit={canEdit} toast={toast} onChanged={() => { reload(); setHistKey((k) => k + 1); }} />
+
+      <HistorySearch />
 
       {picking && <PickModal week={picking.week || week} line={picking} onClose={() => setPicking(null)}
         onDone={(m) => { setPicking(null); toast(m); reload(); setHistKey((k) => k + 1); }} />}
@@ -201,8 +262,10 @@ function rollParts(r: Candidate): { batch: string; qty: number }[] {
 function autoPlan(c: Candidates, withPool = false): { sel: Sel; last: LastRoll | null } {
   let left = r3(c.need - c.picked);
   const sel: Sel = {};
-  // rolls of a PO shared by several SO lines are ticked by the user, never by the system
-  const avail = c.rolls.filter((r) => r.available > 1e-9 && (withPool || !r.pool));
+  // rolls of a lot shared by several SO lines are ticked by the user, never by the system; "select suggested" takes the
+  // suggested ones (the rolls whose Actual Qty adds up to this line's lot QTY), or all shared ones when none is suggested
+  const anySuggested = c.rolls.some((r) => r.suggested);
+  const avail = c.rolls.filter((r) => r.available > 1e-9 && (!r.pool || (withPool && (!anySuggested || r.suggested))));
   let last: LastRoll | null = null;
   const take = (r: Candidate, q: number, need: Map<string, number> | null) => {
     sel[r.pallet] = { qty: String(r3(q)) };
@@ -411,7 +474,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
         </div>
 
         <div className="pk-stats">
-          <div><span>Plan QTY</span><b>{fmtQty(line.qty)}</b></div>
+          <div><span>Plan QTY</span><b>{fmtQty(line.qty)}</b>{c?.ur !== undefined && <small title="UR = Total stock − SO Blocked stock − Assigned Qty (ZMMBE)">UR {fmtQty(c.ur)}{c.planQty !== undefined && c.planQty > c.ur + 1e-9 ? ' → UR is picked' : ''}</small>}</div>
           <div><span>Already picked</span><b>{c ? fmtQty(c.picked) : '…'}</b></div>
           <div className="em"><span>To pick</span><b>{c ? fmtQty(remaining) : '…'}</b></div>
           <div><span>Selected</span><b>{fmt(total, 2)}</b><small>{nSel} roll{nSel === 1 ? '' : 's'}</small></div>
@@ -441,7 +504,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
                 <span className="muted small">Barcode = Pallet (or Supplier Hu = Vendor Roll No) with Lot, Invoice and Po (ZCOMENT), or straight from ZINR: Item, Lot Number, Invoice and Po — a Supplier Hu that is this lot's Vendor Roll No makes it this line's roll. QTY = Korber Actual Qty. The system selects them for the plan QTY — rolls of a PO shared by several SO lines you tick yourself.</span>
                 <span style={{ flex: 1 }} />
                 {open.length > 0 && <button type="button" className="btn sm" onClick={() => applyAuto(c, Object.fromEntries([...manualSel, ...nbSel]))}>Auto select</button>}
-                {open.some((r) => r.pool) && <button type="button" className="btn sm" title="Rolls of a PO shared by several SO lines: select them for this line's plan QTY (you decide)" onClick={() => applyAuto(c, Object.fromEntries([...manualSel, ...nbSel]), true)}>Select shared-PO rolls too</button>}
+                {open.some((r) => r.pool) && <button type="button" className="btn sm primary" title="The Lot Number is shared by several SO lines: select the suggested rolls (their Actual Qty adds up to this line's lot QTY) — check them" onClick={() => applyAuto(c, Object.fromEntries([...manualSel, ...nbSel]), true)}>{open.some((r) => r.suggested) ? `Select suggested rolls (${open.filter((r) => r.suggested && r.available > 1e-9).length})` : 'Select shared-lot rolls too'}</button>}
                 {nSel > 0 && <button type="button" className="btn sm" onClick={() => { setSel({}); setLast(null); }}>Clear</button>}
               </div>
               {!c.rolls.length ? <p className="muted">No Korber roll matched on Barcode for this line.{c.nobarcode?.length ? ' Rolls without a barcode: choose them under “No Barcode” below.' : c.manual?.length ? ' See “Not matched” below.' : ' Check that ZINR, ZCOMENT VIEW and Korber are uploaded and current.'}</p> : (
@@ -464,7 +527,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
                               onChange={(e) => setSel((x) => ({ ...x, [r.pallet]: { ...x[r.pallet], qty: e.target.value } }))} aria-label="Pick qty" />
                           </span> : ''}</td>
                           <td>{r.needsConfirm ? <span className="pill warn" title={`${r.warnings.join('\n')}\n\n${checkText(r.checks)}`}>Check: {r.warnings[0]}</span>
-                            : r.pool ? <span className="pill info" title={r.qtyNote || ''}>ZINR → Korber · PO shared by {r.pool} SO lines — tick</span>
+                            : r.pool ? <span className={`pill ${r.suggested ? 'ok' : 'info'}`} title={r.qtyNote || ''}>{r.suggested ? 'Suggested · ' : ''}Lot shared by {r.pool} SO lines — tick</span>
                             : r.direct ? <span className="pill ok" title={r.qtyNote || ''}>ZINR → Korber ✓ (Item, Lot, Invoice, Po{r.checks.hu ? ', Roll no' : ''})</span>
                             : <span className="pill ok" title={`${checkText(r.checks)}${r.qtyNote ? `\n\n${r.qtyNote}` : ''}`}>All match ✓{r.korberQty ? ' · Korber qty' : r.qtyNote ? ' · split roll' : ''}</span>}</td>
                         </tr>
@@ -519,7 +582,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
                     const takenElsewhere = (p: string) => !!sel[p] && sel[p].nb !== m;
                     return (
                       <tr key={i} className={chosen ? 'picked' : ''}>
-                        <td>{m.zcBarcode ? <><b>{m.roll_no || '–'}</b> <span className="pill warn" title={`ZCOMENT Barcode Number ${m.zcBarcode} is not a Korber pallet — rolls with the same Supplier Hu = Vendor Roll No and Lot are listed`}>barcode {m.zcBarcode} not in Korber</span></> : m.noShade ? <span className="pill warn" title={`Inspection lot ${m.lot} has no Shade Report rolls in ZCOMENT VIEW. Rolls with Lot Number = ${m.vendor_batch ?? '–'} and Actual Qty = the lot QTY come first.`}>no Shade Report · lot {m.lot}</span> : <b>{m.roll_no || '–'}</b>}</td><td>{m.vendor_batch || '–'}</td><td className="mono">{m.batch}</td><td><b>{m.shade}</b></td><td className="n">{fmtQty(m.roll_qty)}</td>
+                        <td>{m.zcBarcode ? <><b>{m.roll_no || '–'}</b> <span className="pill warn" title={`ZCOMENT Barcode Number ${m.zcBarcode} is not a Korber pallet — rolls with the same Supplier Hu = Vendor Roll No and Lot are listed`}>barcode {m.zcBarcode} not in Korber</span></> : m.lotChoice ? <span className="pill warn" title={`No Korber roll has Lot Number ${m.vendor_batch ?? '–'} on this invoice: choose a roll of the invoice's other lots (Pick by Lot Number)`}>Pick by Lot Number · lot {m.lot}</span> : m.noShade ? <span className="pill warn" title={`Inspection lot ${m.lot} has no Shade Report rolls in ZCOMENT VIEW. Rolls with Lot Number = ${m.vendor_batch ?? '–'} and Actual Qty = the lot QTY come first.`}>no Shade Report · lot {m.lot}</span> : <b>{m.roll_no || '–'}</b>}</td><td>{m.vendor_batch || '–'}</td><td className="mono">{m.batch}</td><td><b>{m.shade}</b></td><td className="n">{fmtQty(m.roll_qty)}</td>
                         <td>{m.done ? <span className="pill mute">picked · {m.options[0]?.pallet}</span> : <>
                           <select className="as-search nb-select" value={chosen?.[0] ?? ''} onChange={(e) => chooseNb(m, e.target.value)} aria-label={`Korber roll for ${m.roll_no || 'roll'}`}>
                             <option value="">— choose a Korber roll ({m.options.length} match{m.options.length === 1 ? '' : 'es'}) —</option>
@@ -639,13 +702,13 @@ function KorberChooser({ item, rid, roll, taken, mine = [], chosenQty = 0, open 
       <div className="table-wrap" style={{ maxHeight: 300, marginTop: 6 }}>
         {rows === null ? <Loader label="Searching Korber…" /> : !rows.length ? <p className="muted">No Korber roll found{q ? ` for “${q}”` : ''}.</p> : (
           <table className="mini">
-            <thead><tr><th>Pallet</th><th>Item</th><th>Location</th><th>Lot</th><th>Supplier HU</th><th className="n">Actual qty</th><th className="n">Available</th><th /></tr></thead>
+            <thead><tr><th>Pallet</th><th>Item</th><th>Location</th><th>Lot</th><th>Supplier HU</th><th>Invoice</th><th>Pick Id</th><th className="n">Actual qty</th><th className="n">Available</th><th /></tr></thead>
             <tbody>{rows.map((k) => {
               const used = taken.includes(k.pallet), gone = k.available <= 1e-9, isMine = mine.includes(k.pallet);
               return (
                 <tr key={k.pallet} className={`${gone ? 'gone' : ''} ${isMine ? 'picked' : ''}`}>
-                  <td className="mono">{k.pallet}</td><td>{k.item}</td><td>{k.location}</td><td>{k.lot}</td><td>{k.supplier_hu}</td><td className="n">{fmtQty(k.qty)}</td>
-                  <td className="n">{gone ? <span className="pill mute">picked</span> : fmtQty(k.available)}
+                  <td className="mono">{k.pallet}</td><td>{k.item}</td><td>{k.location}</td><td>{k.lot}</td><td>{k.supplier_hu}</td><td className="mono small">{k.invoice}</td><td className={String(k.pick_id ?? '0') !== '0' ? 'kb-short' : 'muted'}>{k.pick_id ?? '0'}</td><td className="n">{fmtQty(k.qty)}</td>
+                  <td className="n">{k.blocked ? <span className="pill bad" title={k.blocked}>{k.blocked.startsWith('Rejected') ? 'rejected' : 'WMS pick'}</span> : gone ? <span className="pill mute">picked</span> : fmtQty(k.available)}
                     {(k.picks?.length ?? 0) > 0 && <div className="pk-prev">{gone ? 'Picked in full' : 'Cut roll — balance only'}: {k.picks!.map(pickNote).join(' | ')}</div>}</td>
                   <td>{isMine ? <button className="btn sm" onClick={() => onUse(k)}>Remove</button>
                     : <button className="btn sm primary" disabled={gone || used || full} title={used ? 'Already chosen for another roll' : full ? 'The QTY is covered — remove one to choose another' : ''} onClick={() => onUse(k)}>{used ? 'Selected' : 'Use'}</button>}</td>
@@ -729,6 +792,14 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
     toast(`${ok} pick${ok === 1 ? '' : 's'} cancelled${fail.length ? ` · ${fail.length} could not be cancelled — ${fail.slice(0, 2).join('; ')}` : ''}`);
     load(); onChanged();
   };
+  // Reject: a problem with a picked roll — it goes to the rejected rolls (not picked again) and a replacement is assigned there
+  const rejectRoll = async (id: number, pallet: string) => {
+    const reason = window.prompt(`Reject roll ${pallet}: what is the problem? (e.g. Damaged, Wrong shade, Short length, Wrong item)`, '');
+    if (reason === null) return;
+    if (!reason.trim()) { toast('Give the reason to reject the roll.'); return; }
+    try { await api('/api/pick/reject', { method: 'POST', body: { pickId: id, reason: reason.trim() } }); toast(`Roll ${pallet} rejected — assign a replacement under Rejected rolls`); load(); onChanged(); }
+    catch (e) { toast(e instanceof Error ? e.message : 'Could not reject.'); }
+  };
   const days = Array.from(new Set([today(), ...(h?.days || []).map((d) => d.day)])).sort().reverse();
   return (
     <section className="card" aria-labelledby="ph-title">
@@ -791,7 +862,9 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
                         <tr key={p.id} className={p.cancelled_at ? 'gone' : ''}>
                           <td className="mono">{p.pallet}</td><td>{p.lot}</td><td>{p.shade}</td><td className="n">{fmtQty(p.roll_qty)}</td>
                           <td className="n">{fmtQty(p.qty)}{p.partial ? <span className="pill accent" style={{ marginLeft: 4 }}>cut</span> : ''}</td><td>{p.insp_lot}</td><td className="muted">{p.note}</td>
-                          <td>{canEdit && (boss || r.by_user === me) && <button className="btn sm" onClick={() => cancel(`/api/pick/roll/${p.id}`, `roll ${p.pallet}`)}>Remove</button>}</td>
+                          <td style={{ whiteSpace: 'nowrap' }}>{canEdit && (boss || r.by_user === me) && <>
+                            <button className="btn sm danger" title="A problem with this roll: take it off the pick into Rejected rolls (it is not picked again) and assign another Korber roll" onClick={() => rejectRoll(p.id, p.pallet)}>Reject</button>{' '}
+                            <button className="btn sm" onClick={() => cancel(`/api/pick/roll/${p.id}`, `roll ${p.pallet}`)}>Remove</button></>}</td>
                         </tr>
                       ))}</tbody>
                     </table>
@@ -801,6 +874,96 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
             })}</tbody>
           </table>
         </div>
+      )}
+    </section>
+  );
+}
+
+interface Reject { id: number; day: string; week: string; plan: string; so: string; li: string; item: string; pallet: string; qty: number; lot: string | null; insp_lot: string | null; batch: string | null; shade: string | null; reason: string; by_user: string; at: string; replaced_by: string | null; replaced_qty: number | null; replaced_user: string | null; replaced_at: string | null }
+/** Rolls rejected from a pick (a problem with them): assign a Korber roll of the same Material as the replacement, picked into the same pick. */
+function RejectedRolls({ canEdit, toast, onChanged }: { canEdit: boolean; toast: (m: string) => void; onChanged: () => void }) {
+  const [all, setAll] = useState(false);
+  const [rows, setRows] = useState<Reject[] | null>(null);
+  const [assign, setAssign] = useState<Reject | null>(null);
+  const load = useCallback(() => { api<{ rejects: Reject[] }>('/api/pick/rejects' + (all ? '?all=1' : '')).then((r) => setRows(r.rejects)).catch(() => setRows([])); }, [all]);
+  useEffect(() => { load(); }, [load]);
+  const use = async (rj: Reject, k: KorberRow) => {
+    try {
+      const r = await api<{ qty: number }>('/api/pick/replace', { method: 'POST', body: { rejectId: rj.id, pallet: k.pallet, qty: Math.min(k.available, rj.qty) } });
+      toast(`${k.pallet} (${fmtQty(r.qty)}) picked for ${rj.so} / ${rj.li} in place of ${rj.pallet}`); setAssign(null); load(); onChanged();
+    } catch (e) { toast(e instanceof Error ? e.message : 'Could not assign.'); }
+  };
+  const open = (rows || []).filter((r) => !r.replaced_by).length;
+  return (
+    <section className="card" aria-labelledby="rj-title">
+      <div className="sheet-top">
+        <div>
+          <h2 id="rj-title">Rejected rolls {open > 0 && <span className="pill bad" style={{ marginLeft: 6 }}>{open} to replace</span>}</h2>
+          <p className="sub" style={{ margin: 0 }}>Rolls taken off a pick for a problem (Reject in the pick history). A rejected pallet is never picked again. Assign a Korber roll of the same Material: it is picked into the same pick (Pick Id 0, not picked before — only a cut roll&apos;s balance).</p>
+        </div>
+        <div className="seg" role="group"><button className={!all ? 'on' : ''} onClick={() => setAll(false)}>To replace</button><button className={all ? 'on' : ''} onClick={() => setAll(true)}>All</button></div>
+      </div>
+      {!rows ? <Loader label="Loading rejected rolls…" /> : !rows.length ? <p className="muted">{all ? 'No rolls were rejected.' : 'No rejected roll is waiting for a replacement.'}</p> : (
+        <div className="table-wrap" style={{ maxHeight: 360 }}>
+          <table className="mini">
+            <thead><tr><th>Day</th><th>Plan</th><th>SO / LI</th><th>Material</th><th>Rejected pallet</th><th className="n">QTY</th><th>Lot</th><th>Reason</th><th>By</th><th>Replacement</th></tr></thead>
+            <tbody>{rows.map((r) => (
+              <tr key={r.id}>
+                <td>{fmtDate(r.day)}</td><td className="small">{r.plan}</td><td>{r.so} / {r.li}</td><td>{r.item}</td><td className="mono">{r.pallet}</td><td className="n">{fmtQty(r.qty)}</td><td>{r.lot}</td>
+                <td><span className="pill bad">{r.reason}</span></td><td>{r.by_user}</td>
+                <td>{r.replaced_by ? <span className="pill ok" title={`${r.replaced_user} · ${r.replaced_at ? new Date(r.replaced_at).toLocaleString() : ''}`}>{r.replaced_by} · {fmtQty(Number(r.replaced_qty))}</span>
+                  : canEdit ? <button className="btn sm primary" onClick={() => setAssign(r)}>Assign Korber roll…</button> : '–'}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+      )}
+      {assign && <KorberChooser item={assign.item} rid={assign.week} roll={{ lot: assign.insp_lot || '', batch: assign.batch || '', material: assign.item, vendor_batch: assign.lot, roll_no: null, barcode: null, roll_qty: assign.qty, shade: assign.shade, invoice: null, reason: '', suggest: [] } as ManualRoll}
+        taken={[]} onUse={(k) => use(assign, k)} onClose={() => setAssign(null)} />}
+    </section>
+  );
+}
+
+interface FoundPick { id: number; day: string; plan: string; so: string; li: string; item: string; pallet: string; qty: number; roll_qty: number; partial: number; shade: string | null; lot: string | null; insp_lot: string | null; batch: string | null; note: string | null; by_user: string; at: string; seq: number; pick_no: string | null; kind: string | null }
+/** The whole pick history (every day, every user): search by any value. */
+function HistorySearch() {
+  const [q, setQ] = useState('');
+  const [res, setRes] = useState<{ rows: FoundPick[]; rejects: Reject[] } | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (q.trim().length < 2) { setRes(null); return; }
+    const t = setTimeout(() => { setBusy(true); api<{ rows: FoundPick[]; rejects: Reject[] }>('/api/pick/search?q=' + encodeURIComponent(q.trim())).then(setRes).catch(() => setRes({ rows: [], rejects: [] })).finally(() => setBusy(false)); }, 350);
+    return () => clearTimeout(t);
+  }, [q]);
+  return (
+    <section className="card" aria-labelledby="hs-title">
+      <h2 id="hs-title">Search the pick history</h2>
+      <p className="sub">Every pick of every day and user. Type any value: pallet, SO, material, lot, batch, inspection lot, HJ Pick No, shade, user, plan (e.g. 2026-10-24, C064), invoice or any Korber field.</p>
+      <input type="search" className="as-search" style={{ width: '100%', maxWidth: 520 }} placeholder="Search pallet, SO, item, lot, pick no, user…" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search pick history" />
+      {busy && <Loader inline label="Searching…" />}
+      {res && !busy && (
+        <>
+          <p className="muted small" style={{ margin: '8px 0' }}>{res.rows.length} roll pick{res.rows.length === 1 ? '' : 's'}{res.rows.length >= 300 ? ' (first 300)' : ''}{res.rejects.length ? ` · ${res.rejects.length} rejected` : ''}</p>
+          {res.rows.length > 0 && (
+            <div className="table-wrap" style={{ maxHeight: 420 }}>
+              <table className="mini">
+                <thead><tr><th>Day</th><th>Plan</th><th>Pick</th><th>HJ Pick No</th><th>SO / LI</th><th>Item</th><th>Pallet</th><th className="n">QTY</th><th>Cut</th><th>Lot</th><th>Batch</th><th>Shade</th><th>By</th><th>Note</th></tr></thead>
+                <tbody>{res.rows.map((r) => (
+                  <tr key={r.id}><td>{fmtDate(r.day)}</td><td className="small">{r.plan}</td><td>{ordinal(r.seq)}</td><td>{r.pick_no || ''}</td><td>{r.so} / {r.li}</td><td>{r.item}</td><td className="mono">{r.pallet}</td>
+                    <td className="n">{fmtQty(r.qty)}</td><td>{r.partial ? 'cut' : ''}</td><td>{r.lot}</td><td className="mono small">{r.batch}</td><td>{r.shade}</td><td>{r.by_user}</td><td className="muted small">{r.note}</td></tr>
+                ))}</tbody>
+              </table>
+            </div>
+          )}
+          {res.rejects.length > 0 && (
+            <div className="table-wrap" style={{ maxHeight: 240, marginTop: 8 }}>
+              <table className="mini">
+                <thead><tr><th>Rejected</th><th>Plan</th><th>SO / LI</th><th>Pallet</th><th className="n">QTY</th><th>Reason</th><th>Replaced by</th></tr></thead>
+                <tbody>{res.rejects.map((r) => <tr key={r.id}><td>{fmtDate(r.day)}</td><td className="small">{r.plan}</td><td>{r.so} / {r.li}</td><td className="mono">{r.pallet}</td><td className="n">{fmtQty(r.qty)}</td><td>{r.reason}</td><td>{r.replaced_by || '–'}</td></tr>)}</tbody>
+              </table>
+            </div>
+          )}
+        </>
       )}
     </section>
   );

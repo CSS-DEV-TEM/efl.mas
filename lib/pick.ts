@@ -34,6 +34,8 @@ export interface Candidate {
   sameSoPlant?: { plant: string; lines: string[] };
   /** that PO / invoice / lot is shared by this many SO lines: the user ticks the rolls */
   pool?: number;
+  /** of a shared lot: one of the rolls whose Actual Qty adds up to this lot's QTY (proposed; the user ticks) */
+  suggested?: boolean;
   /** how much of the roll is in each batch of this line */
   parts?: { batch: string; lot: string; qty: number }[];
 }
@@ -42,7 +44,7 @@ export interface LotInfo { via?: string | null; noShade?: boolean; /** rolls fou
 export interface ManualRoll { lot: string; batch: string; material: string; vendor_batch: string | null; roll_no: string | null; barcode: string | null; roll_qty: number; shade: string | null; invoice: string | null; po?: string | null; reason: string;
   /** Korber rolls with the same item, Lot Number, Supplier Hu, Invoice and Po (another pallet). */
   suggest?: KorberRow[] }
-export interface KorberRow { pallet: string; item: string; lot: string | null; qty: number; uom: string | null; invoice: string | null; location: string | null; supplier_hu: string | null; status: string | null; available: number; picked_before: number; picks?: PalletPick[] }
+export interface KorberRow { /** not pickable: Korber Pick Id not 0, or rejected */ blocked?: string; pick_id?: string | null; pallet: string; item: string; lot: string | null; qty: number; uom: string | null; invoice: string | null; location: string | null; supplier_hu: string | null; status: string | null; available: number; picked_before: number; picks?: PalletPick[] }
 /** an earlier pick of a pallet: QTY, the plan it went to (day plan round / week), SO / LI, HJ Pick No, day, who */
 export interface PalletPick { day: string; by_user: string; qty: number; plan?: string; so?: string; li?: string; pick_no?: string | null; at?: string }
 /** "64.46 · 20 Oct · VAANAVIL Pick 1 · E101698226 / 10 · HJ 5501 · admin" */
@@ -50,7 +52,7 @@ export const pickNote = (p: PalletPick) => [String(p.qty), p.plan || p.day, p.so
 /** A Korber roll offered for a shade-report roll with no Barcode Number (same item; Lot / Supplier Hu agree). */
 export interface NbOption extends KorberRow { checks: Record<string, boolean | null>; exact: boolean }
 /** A shade-report roll with no Barcode Number: the user chooses its Korber roll from `options`. */
-export interface NoBarcodeRoll extends Omit<ManualRoll, 'reason' | 'suggest'> { options: NbOption[]; /** its Korber roll was picked in full already */ done?: boolean; /** an inspection lot with no Shade Report in ZCOMENT: roll_qty = the lot QTY */ noShade?: boolean; /** its ZCOMENT barcode is not a Korber pallet */ zcBarcode?: string }
+export interface NoBarcodeRoll extends Omit<ManualRoll, 'reason' | 'suggest'> { /** its Lot Number is not in Korber: the invoice's other lots are offered */ lotChoice?: boolean; options: NbOption[]; /** its Korber roll was picked in full already */ done?: boolean; /** an inspection lot with no Shade Report in ZCOMENT: roll_qty = the lot QTY */ noShade?: boolean; /** its ZCOMENT barcode is not a Korber pallet */ zcBarcode?: string }
 export interface Candidates {
   manual?: ManualRoll[];
   /** rolls without a Barcode Number, each with the Korber rolls that match its other fields */
@@ -60,6 +62,8 @@ export interface Candidates {
   /** what is still needed from each batch (its UR less what was picked), trimmed to the line balance */
   batchNeed?: { batch: string; lots: string[]; ur: number; picked: number; need: number }[];
   line: { so: string; li: string; item: string; qty: number; plant: string | null; key: string; week: string; date: string };
+  /** plan QTY and the UR (Total − SO Blocked − Assigned); need = what to pick = the smaller of the two */
+  planQty?: number; ur?: number;
   need: number; picked: number; stock: { batch: string; ur: number; sloc: string }[]; lots: LotInfo[]; rolls: Candidate[]; steps: string[];
 }
 export interface PickReq { id: number; day: string; seq: number; pick_no: string | null; week: string; line: string; so: string; li: string; item: string; plant: string | null; need: number; qty: number; rolls: number; by_user: string; at: string; cancelled_at: string | null; cancelled_by: string | null; match?: string | null; kind?: string | null; closed?: number | null; short?: number | null }
