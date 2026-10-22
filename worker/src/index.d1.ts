@@ -404,7 +404,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 53; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 54; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -2492,6 +2492,17 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
     if (!z.length) steps.push(`Batch ${st.batch}: not in ZINSR for this SO / LI / Material.`);
     lotsByBatch.push({ st, z });
   }
+  // what ZINSR has for this Sales Order: its Line Items (only this one is taken) and this Line Item's batches and lots
+  {
+    const all = (await env.DB.prepare('SELECT li, batch, lot FROM zinr WHERE so = ? AND material = ?').bind(normId(line.so), normId(line.item)).all<Row>()).results;
+    const lis = Array.from(new Set(all.map((x) => String(x.li)))).sort((a, b) => Number(a) - Number(b));
+    const mine = all.filter((x) => normId(x.li) === normId(line.li));
+    const ub = new Set(stock.filter((x) => Number(x.ur) > 0).map((x) => normId(x.batch)));
+    const byB = new Map<string, string[]>(); for (const x of mine) byB.set(String(x.batch), [...(byB.get(String(x.batch)) || []), String(x.lot)]);
+    if (all.length) steps.push(`ZINSR — SO ${line.so}: Line Item${lis.length === 1 ? '' : 's'} ${lis.join(', ')}; LI ${line.li} only: ${Array.from(byB).map(([b0, ls]) => `batch ${b0}${ub.has(normId(b0)) ? '' : ' (no UR in ZMMBE — not taken)'} → lot${ls.length === 1 ? '' : 's'} ${ls.join(', ')}`).join(' · ') || 'no lot'}.`);
+  }
+  // every ZINSR lot of this SO + Line Item + Material (its batches with UR)
+  const lineLots = new Set(lotsByBatch.flatMap((x) => x.z.map((l) => String(l.lot))));
   for (const { st, z } of lotsByBatch) {
     let batchLeft = Math.min(left, Number(st.ur));
     for (const x of z) {
@@ -2543,9 +2554,10 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
         const zcOf = new Map<string, string>();
         for (const k of base) {
           if (up(k.lot) === vb || !usable(k)) continue;
-          // the barcode of a ZCOMENT roll: only when that roll is of this line's ZMMBE batch (the same SAP batch, another lot)
+          // the barcode of a ZCOMENT roll: only when that roll is in a ZINSR lot of this same SO + Line Item (another lot of it);
+          // a roll of another SO / Line Item's lot is that line's roll, even with the same batch
           const own = (await env.DB.prepare('SELECT lot, batch FROM zcoment WHERE barcode = ?').bind(up(k.pallet)).all<Row>()).results;
-          if (own.length && !own.some((o) => urBatches.has(normId(o.batch)))) continue;
+          if (own.length && !own.some((o) => lineLots.has(String(o.lot)) && urBatches.has(normId(o.batch)))) continue;
           if (own.length) zcOf.set(up(k.pallet), own.map((o) => o.lot).join(', '));
           inv.push(k);
         }
@@ -2662,7 +2674,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
     const mat = normId(line.item);
     for (const st of stock.filter((x) => Number(x.ur) > 0)) {
       const bt = normId(st.batch);
-      const zr0 = (await env.DB.prepare('SELECT barcode, bin, batch, status, material, qty, pcore FROM zroll WHERE batch = ?').bind(bt).all<Row>()).results;
+      const zr0 = (await env.DB.prepare('SELECT barcode, bin, batch, status, material, qty, pcore, so, li FROM zroll WHERE batch = ?').bind(bt).all<Row>()).results;
       // the same Material (a ZROLLMGT row without Material counts; the Korber item is checked below)
       const zr = zr0.filter((z) => !z.material || normId(z.material) === mat || normId(z.material) === normId(st.material));
       if (!zr.length) { steps.push(`Batch ${st.batch}: ZROLLMGT has no roll with System Batch ${bt}${zr0.length ? ` of material ${mat} (${zr0.length} of another material)` : ''}.`); continue; }
@@ -2679,9 +2691,15 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
         continue;
       }
       const lot0: Row = lots.find((l) => normId(l.batch) === bt) ?? { ...zi[0], lot_need: 0 };
-      let added = 0, known = 0, off = 0, noK = 0, other = 0;
+      // exactly this SO + LI: the ZINSR lots of this Sales Order + Line Item + Material + Batch (one SO has several Line Items,
+      // one Line Item several batches, one batch several lots — and the same batch can be in other SO lines too)
+      const myLots = new Set(zi.map((l) => String(l.lot)));
+      const sharers = (await env.DB.prepare('SELECT DISTINCT so, li FROM zinr WHERE material = ?1 AND batch = ?2 AND NOT (so = ?3 AND li = ?4)').bind(mat, bt, normId(line.so), normId(line.li)).all<Row>()).results;
+      let added = 0, known = 0, off = 0, noK = 0, other = 0, otherLine = 0, shared = 0;
       for (const z of zr) {
         const pal = up(z.barcode);
+        // ZROLLMGT with its own Sales Order / Line Item: must be this line's
+        if ((z.so && normId(z.so) !== normId(line.so)) || (z.li && normId(z.li) !== normId(line.li))) { otherLine++; continue; }
         // its Korber pallet: the Barcode Number, else the same roll number (CP… / COMPCP…) of the same item
         let k = await env.DB.prepare('SELECT * FROM korber WHERE pallet = ?').bind(pal).first<Row>();
         if (!k && z.pcore) k = await env.DB.prepare('SELECT * FROM korber WHERE pcore = ? AND item = ? LIMIT 1').bind(z.pcore, mat).first<Row>();
@@ -2697,14 +2715,21 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
         if (normId(k.item) !== mat) { other++; continue; }
         if (rejected.has(kp)) { rejectedSkip++; continue; }
         if (String(k.pick_id ?? '0') !== '0' && String(k.pick_id ?? '') !== '') { notPickable++; continue; }
-        const sh = await env.DB.prepare('SELECT shade, lot FROM zcoment WHERE barcode IN (?, ?) LIMIT 1').bind(pal, kp).first<Row>();
+        // the roll's ZCOMENT lots: when it has some, one must be a ZINSR lot of this SO + LI + batch (else it is another line's roll)
+        const zcl = (await env.DB.prepare('SELECT shade, lot FROM zcoment WHERE barcode IN (?, ?)').bind(pal, kp).all<Row>()).results;
+        const mine = zcl.find((x) => myLots.has(String(x.lot)));
+        if (zcl.length && !mine) { otherLine++; continue; }
+        const sh = mine ?? zcl[0] ?? null;
         const l1 = sh?.lot ? { ...lot0, lot: sh.lot } : lot0;
-        addRoll(await korberBase(k, l1, { shade: (sh?.shade as string) ?? null, zroll: true, via: kp !== pal ? kp : null,
+        // no ZCOMENT lot to tell which SO line the roll is for, and the batch is in other SO lines too: offered, not selected
+        const pool = !mine && sharers.length ? sharers.length + 1 : undefined;
+        if (pool) shared++;
+        addRoll(await korberBase(k, l1, { shade: (sh?.shade as string) ?? null, zroll: true, via: kp !== pal ? kp : null, ...(pool ? { pool } : {}),
           checks: { item: true, batch: true, bin: true, lot: null, hu: null, invoice: lot0.invoice && k.invoice ? invRoot(k.invoice) === invRoot(lot0.invoice) : null },
           qtyNote: `ZMMBE batch ${st.batch} = ZINSR SO ${line.so} / LI ${line.li} / Material / Batch (ZINSR lot ${zi.map((l) => l.lot).join(', ')}) = ZROLLMGT System Batch → Barcode ${pal}${kp !== pal ? ` (Korber pallet ${kp})` : ''} = Korber Pallet${gate.on ? ` · StorageBin ${gate.bin}${gate.hasStatus ? ' · Status UR' : ''}` : ''}` }), l1);
         added++;
       }
-      steps.push(`Batch ${st.batch}: ZROLLMGT has ${zr.length} roll${zr.length === 1 ? '' : 's'} with this System Batch${added ? ` — ${added} matched straight to Korber` : ''}${known ? `, ${known} already matched` : ''}${off ? `, ${off} not pickable (bin / status)` : ''}${noK ? `, ${noK} not in this Pick's Korber` : ''}${other ? `, ${other} another item in Korber` : ''}.`);
+      steps.push(`Batch ${st.batch}: ZROLLMGT has ${zr.length} roll${zr.length === 1 ? '' : 's'} with this System Batch${added ? ` — ${added} matched straight to Korber` : ''}${known ? `, ${known} already matched` : ''}${otherLine ? `, ${otherLine} belong to another SO / Line Item (ZCOMENT lot / ZROLLMGT SO)` : ''}${off ? `, ${off} not pickable (bin / status)` : ''}${noK ? `, ${noK} not in this Pick's Korber` : ''}${other ? `, ${other} another item in Korber` : ''}.${shared ? ` ${shared} roll${shared === 1 ? ' has' : 's have'} no ZCOMENT lot and batch ${bt} is in ${sharers.length} other SO line${sharers.length === 1 ? '' : 's'} (${sharers.slice(0, 4).map((x) => `${x.so}/${x.li}`).join(', ')}) — tick them yourself.` : ''}`);
     }
   } else if (gate.on) steps.push('ZMMBE batch → ZROLLMGT System Batch: no ZROLLMGT uploaded for this Pick.');
   // the Invoice + Item category offers only rolls not matched already (a matched roll is ticked in Matched rolls)
