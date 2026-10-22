@@ -499,11 +499,13 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
               {c.steps.length > 0 && <button type="button" className="linkish" onClick={() => setShowNotes((v) => !v)}>{showNotes ? 'Hide' : 'Show'} {c.steps.length} note{c.steps.length === 1 ? '' : 's'}</button>}
             </div>
             {showNotes && <div className="notice warn" style={{ fontSize: 12.5 }}>{c.steps.map((s, i) => <div key={i}>{s}</div>)}</div>}
+            {c.gate?.on && !c.gate.loaded && <div className="notice bad">No ZROLLMGT uploaded for this Pick — upload it on the Data tab (or the Pick card). Only rolls at StorageBin {c.gate.bin} can be picked.</div>}
 
             <div className="pk-sec">
               <div className="pk-sec-head">
                 <h3>Matched rolls <span className="pill ok">{open.length}</span>{gone.length > 0 && <span className="muted small"> · {gone.length} already picked</span>}</h3>
-                <span className="muted small">Barcode = Pallet (or Supplier Hu = Vendor Roll No) with Lot, Invoice and Po (ZCOMENT), or straight from ZINR: Item, Lot Number, Invoice and Po — a Supplier Hu that is this lot's Vendor Roll No makes it this line's roll. QTY = Korber Actual Qty. The system selects them for the plan QTY — rolls of a PO shared by several SO lines you tick yourself.</span>
+                {c.gate?.on ? <span className="muted small">Only rolls whose ZCOMENT VIEW Barcode Number (of this line&apos;s ZMMBE batch) = Korber Pallet and is in ZROLLMGT at StorageBin <b>{c.gate.bin}</b>. QTY = Korber Actual Qty.</span> :
+                <span className="muted small">Barcode = Pallet (or Supplier Hu = Vendor Roll No) with Lot, Invoice and Po (ZCOMENT), or straight from ZINR: Item, Lot Number, Invoice and Po — a Supplier Hu that is this lot's Vendor Roll No makes it this line's roll. QTY = Korber Actual Qty. The system selects them for the plan QTY — rolls of a PO shared by several SO lines you tick yourself.</span>}
                 <span style={{ flex: 1 }} />
                 {open.length > 0 && <button type="button" className="btn sm" onClick={() => applyAuto(c, Object.fromEntries([...manualSel, ...nbSel]))}>Auto select</button>}
                 {open.some((r) => r.pool) && <button type="button" className="btn sm primary" title="The Lot Number is shared by several SO lines: select the suggested rolls (their Actual Qty adds up to this line's lot QTY) — check them" onClick={() => applyAuto(c, Object.fromEntries([...manualSel, ...nbSel]), true)}>{open.some((r) => r.suggested) ? `Select suggested rolls (${open.filter((r) => r.suggested && r.available > 1e-9).length})` : 'Select shared-lot rolls too'}</button>}
@@ -539,6 +541,21 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
                 </div>
               )}
             </div>
+
+            {!!c.blocked?.length && (
+              <details className="pk-sec pk-blocked">
+                <summary><h3 style={{ display: 'inline' }}>Not pickable <span className="pill bad">{c.blocked.length}</span></h3> <span className="muted small">rolls of this line that fail the ZROLLMGT check — click to see why</span></summary>
+                <div className="table-wrap" style={{ maxHeight: 260 }}>
+                  <table className="mini">
+                    <thead><tr><th>Lot</th><th>Batch</th><th>Roll</th><th>Barcode</th><th>Pallet</th><th>Shade</th><th className="n">QTY</th><th>Why</th></tr></thead>
+                    <tbody>{c.blocked.map((b, i) => (
+                      <tr key={i}><td>{b.lot}</td><td>{b.batch}</td><td>{b.roll_no || '–'}</td><td className="mono">{b.barcode || '–'}</td><td className="mono">{b.pallet || '–'}</td><td>{b.shade || '–'}</td>
+                        <td className="n">{b.qty != null ? fmtQty(b.qty) : '–'}</td><td><span className="pill bad">{b.why}</span></td></tr>
+                    ))}</tbody>
+                  </table>
+                </div>
+              </details>
+            )}
 
             {lastOn && last && (() => { const sp = c.rolls.find((r) => r.pallet === last.pallet)?.sameSoPlant; return sp ? (
               <div className="notice ok so-plant">

@@ -6,11 +6,12 @@ import type { Line } from './calc';
 import { api } from './api';
 import { readWorkbook, type Grid } from './mapping';
 
-export type PickSrc = 'zinr' | 'zcoment' | 'korber';
+export type PickSrc = 'zinr' | 'zcoment' | 'korber' | 'zroll';
 export const PICK_SRCS: { src: PickSrc; title: string; hint: string; needs: string[] }[] = [
   { src: 'zinr', title: 'ZINR', hint: 'Inspection lots: Sales Order, Line Item, Material, Batch, Insp. Lot Quantity, Vendor Invoice No', needs: ['inspection lot', 'insp lot quantity'] },
   // either layout: the detail export (Inspection lot, Report Name, Roll qty.) or the roll view (Inspection #, Vendor Roll No, Shade, Barcode Number)
   { src: 'zcoment', title: 'ZCOMENT VIEW', hint: 'One row per roll: Inspection # / Inspection lot, Vendor Batch, Vendor Roll No, Shade, Barcode Number (only "Shade Report" rows when there is a Report Name)', needs: ['vendor roll no', 'shade'] },
+  { src: 'zroll', title: 'ZROLLMGT', hint: 'Roll management: Barcode Number and StorageBin (only rolls at EXPO-FIX can be picked)', needs: ['barcode number|barcode|barcode no|barcode no.', 'storagebin|storage bin|bin|bin location'] },
   { src: 'korber', title: 'Korber Inventory', hint: 'Only rolls of items in the plan are uploaded: Pallet, Item Number, Lot Number, Actual Qty, Supplier Hu', needs: ['pallet', 'item number', 'actual qty'] },
 ];
 
@@ -65,7 +66,10 @@ export interface Candidates {
   /** plan QTY and the UR (Total − SO Blocked − Assigned); need = what to pick = the smaller of the two */
   planQty?: number; ur?: number;
   need: number; picked: number; stock: { batch: string; ur: number; sloc: string }[]; lots: LotInfo[]; rolls: Candidate[]; steps: string[];
+  /** ZROLLMGT check: rolls of this line that cannot be picked, and why */
+  blocked?: BlockedRoll[]; gate?: { on: boolean; bin: string; loaded: boolean };
 }
+export interface BlockedRoll { lot: string; batch: string | null; roll_no: string | null; barcode: string | null; shade: string | null; pallet: string | null; qty: number | null; why: string }
 export interface PickReq { id: number; day: string; seq: number; pick_no: string | null; week: string; line: string; so: string; li: string; item: string; plant: string | null; need: number; qty: number; rolls: number; by_user: string; at: string; cancelled_at: string | null; cancelled_by: string | null; match?: string | null; kind?: string | null; closed?: number | null; short?: number | null }
 export interface PickRoll { id: number; req_id: number; day: string; week: string; line: string; so: string; li: string; item: string; pallet: string; qty: number; roll_qty: number; partial: number; shade: string | null; lot: string | null; insp_lot: string | null; batch: string | null; note: string | null; by_user: string; at: string; cancelled_at: string | null; korber: string | null }
 export interface PickHistory { day: string | null; requests: PickReq[]; picks: PickRoll[]; days: { day: string; n: number; open: number }[]; korberHeader: unknown[] | null }
@@ -82,7 +86,7 @@ export function findTable(sheets: { name: string; grid: Grid }[], src: PickSrc) 
   for (const s of sheets) {
     for (let r = 0; r < Math.min(15, s.grid.length); r++) {
       const row = (s.grid[r] || []).map(hn);
-      if (needs.every((n) => row.includes(n))) {
+      if (needs.every((n) => n.split('|').some((alt) => row.includes(alt)))) {
         const rows = s.grid.slice(r + 1).filter((x) => x && x.some((v) => v !== null && v !== ''));
         return { sheet: s.name, header: s.grid[r] as unknown[], rows: rows as unknown[][] };
       }
@@ -97,7 +101,7 @@ export async function uploadPickFile(src: PickSrc, file: File, rid?: string | nu
   const sheets = readWorkbook(await file.arrayBuffer());
   const t = findTable(sheets, src);
   const title = PICK_SRCS.find((x) => x.src === src)!.title;
-  if (!t) throw new Error(`${file.name} does not look like ${title}: no header row with ${PICK_SRCS.find((x) => x.src === src)!.needs.join(', ')}.`);
+  if (!t) throw new Error(`${file.name} does not look like ${title}: no header row with ${PICK_SRCS.find((x) => x.src === src)!.needs.map((n) => n.split('|')[0]).join(', ')}.`);
   let rows = t.rows;
   const total = rows.length;
   if (src === 'korber') {

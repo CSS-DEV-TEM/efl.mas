@@ -11,7 +11,7 @@ export default function Page() {
   return <Shell admin><Settings /></Shell>;
 }
 
-export interface SystemSettings { fullRollPct: number; defaultPickKind: 'normal' | 'offsite'; allowOffsite: boolean; allowNormalShort: boolean; allowNormalFull: boolean; deriveFromZmmbe: boolean; pfcSlocs: string[]; plantSlocs: string[]; soliPerHour: number; lateGraceMin: number; defaultTarget: string; zmmbePlants?: PlantPair[] }
+export interface SystemSettings { fullRollPct: number; defaultPickKind: 'normal' | 'offsite'; allowOffsite: boolean; allowNormalShort: boolean; allowNormalFull: boolean; deriveFromZmmbe: boolean; pfcSlocs: string[]; plantSlocs: string[]; soliPerHour: number; lateGraceMin: number; defaultTarget: string; zmmbePlants?: PlantPair[]; rollGate?: boolean; pickBin?: string }
 export interface PlantPair { plant: string; soPlant: string; link: string }
 
 const TABS = [['plants', 'Plants'], ['zmmbe', 'ZMMBE plants'], ['reports', 'Locations'], ['time', 'Time setup'], ['plans', 'Plans (data change)'], ['pick', 'Pick rules'], ['users', 'Users & roles'], ['backup', 'Backup & Restore'], ['database', 'Database']] as const;
@@ -86,6 +86,14 @@ function PickRules({ toast }: { toast: (m: string) => void }) {
         <label className="set-row">
           <span><b>Normal: leave the last roll (close the line short)</b><small>Send a little less without a cut; the line counts as complete.</small></span>
           <input type="checkbox" checked={s.allowNormalShort} onChange={(e) => set('allowNormalShort', e.target.checked)} />
+        </label>
+        <label className="set-row">
+          <span><b>ZROLLMGT check</b><small>Pick only rolls whose Barcode Number is in ZROLLMGT at the StorageBin below, is a ZCOMENT VIEW Barcode Number and is the Korber Pallet. Off = the older matching (invoice / lot / supplier HU) is offered too.</small></span>
+          <input type="checkbox" checked={s.rollGate !== false} onChange={(e) => set('rollGate', e.target.checked)} />
+        </label>
+        <label className="set-row">
+          <span><b>ZROLLMGT StorageBin to pick from</b><small>Rolls in any other bin cannot be picked.</small></span>
+          <input type="text" value={s.pickBin ?? 'EXPO-FIX'} onChange={(e) => set('pickBin', e.target.value.toUpperCase())} style={{ width: 130 }} />
         </label>
       </div>
       {err && <div className="notice bad">{err}</div>}

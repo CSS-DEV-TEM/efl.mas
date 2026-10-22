@@ -178,7 +178,7 @@ function Uploads() {
       <div className="page-head">
         <div>
           <h1>Upload reports</h1>
-          <p>Dispatch / pick files (JAN0190…) go on the <Link href="/dispatch/">Dispatch page</Link>. First create the day and the Pick, then upload the Pick's Plan and ZMMBE (drop them below) and its ZINSR, ZCOMENT VIEW and Korber Inventory (in the Pick card). Each upload replaces that report's previous data, the calculation runs again and every open dashboard updates live.</p>
+          <p>Dispatch / pick files (JAN0190…) go on the <Link href="/dispatch/">Dispatch page</Link>. First create the day and the Pick, then upload the Pick's Plan and ZMMBE (drop them below) and its ZINSR, ZCOMENT VIEW, Korber Inventory and ZROLLMGT (in the Pick card, ZROLLMGT also on the Data tab). Each upload replaces that report's previous data, the calculation runs again and every open dashboard updates live.</p>
         </div>
       </div>
 

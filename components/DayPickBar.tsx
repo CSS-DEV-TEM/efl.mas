@@ -9,7 +9,7 @@ export interface DayRow { day: string; picks: number; lines: number }
 export interface PickRound { id: string; plant: string | null; round: number; lines: number; qty: number; src_at?: string | null; created_by?: string; reports: string[] }
 interface Report { src: string; uses: 'own' | 'shared' | 'none'; rows: number; missing?: string[]; own: { file_name: string | null; uploaded_by: string; uploaded_at: string } | null; shared: { file_name: string | null; uploaded_by: string; uploaded_at: string } | null }
 
-const REPORT_NAME: Record<string, string> = { plan: 'Plan', zmmbe: 'ZMMBE', zinr: 'ZINSR / ZINR', zcoment: 'ZCOMENT VIEW', korber: 'Korber Inventory' };
+const REPORT_NAME: Record<string, string> = { plan: 'Plan', zmmbe: 'ZMMBE', zinr: 'ZINSR / ZINR', zcoment: 'ZCOMENT VIEW', korber: 'Korber Inventory', zroll: 'ZROLLMGT' };
 const KEY_DAY = 'mas-day', KEY_RID = 'mas-rid';
 export const pickLabel = (r: { plant: string | null; round: number }, names: Record<string, string> = {}) => `${(r.plant && names[r.plant]) || r.plant || 'No plant'} · Pick ${r.round}`;
 
@@ -116,7 +116,7 @@ export default function DayPickBar({ day, setDay, rid, setRid, toast, refreshKey
         <div className="dpb-reports">
           {(reports || []).map((r) => {
             const u = r.own ?? r.shared;
-            const pickSrc = ['zinr', 'zcoment', 'korber'].includes(r.src);
+            const pickSrc = ['zinr', 'zcoment', 'korber', 'zroll'].includes(r.src);
             return (
               <div key={r.src} className={`dpb-rep ${r.uses}`}>
                 <div className="dpb-h"><b>{REPORT_NAME[r.src]}</b><span className={`pill ${r.uses === 'own' ? 'ok' : r.uses === 'shared' ? 'warn' : 'bad'}`}>{r.uses === 'own' ? 'this Pick' : r.uses === 'shared' ? 'shared' : 'missing'}</span></div>
