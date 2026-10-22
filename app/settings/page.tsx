@@ -11,9 +11,10 @@ export default function Page() {
   return <Shell admin><Settings /></Shell>;
 }
 
-export interface SystemSettings { fullRollPct: number; defaultPickKind: 'normal' | 'offsite'; allowOffsite: boolean; allowNormalShort: boolean; allowNormalFull: boolean; deriveFromZmmbe: boolean; pfcSlocs: string[]; plantSlocs: string[]; soliPerHour: number; lateGraceMin: number; defaultTarget: string }
+export interface SystemSettings { fullRollPct: number; defaultPickKind: 'normal' | 'offsite'; allowOffsite: boolean; allowNormalShort: boolean; allowNormalFull: boolean; deriveFromZmmbe: boolean; pfcSlocs: string[]; plantSlocs: string[]; soliPerHour: number; lateGraceMin: number; defaultTarget: string; zmmbePlants?: PlantPair[] }
+export interface PlantPair { plant: string; soPlant: string; link: string }
 
-const TABS = [['plants', 'Plants'], ['reports', 'Locations'], ['time', 'Time setup'], ['plans', 'Plans (data change)'], ['pick', 'Pick rules'], ['users', 'Users & roles'], ['backup', 'Backup & Restore'], ['database', 'Database']] as const;
+const TABS = [['plants', 'Plants'], ['zmmbe', 'ZMMBE plants'], ['reports', 'Locations'], ['time', 'Time setup'], ['plans', 'Plans (data change)'], ['pick', 'Pick rules'], ['users', 'Users & roles'], ['backup', 'Backup & Restore'], ['database', 'Database']] as const;
 type Tab = (typeof TABS)[number][0];
 
 /** Admin only: the system settings. Head accounts can do everything else but cannot open this page. */
@@ -35,6 +36,7 @@ function Settings() {
       </div>
       {tab === 'pick' && <PickRules toast={toast} />}
       {tab === 'reports' && <ReportRules toast={toast} />}
+      {tab === 'zmmbe' && <ZmmbePlants toast={toast} />}
       {tab === 'plants' && <PlantsSettings toast={toast} />}
       {tab === 'time' && <TimeSetup toast={toast} />}
       {tab === 'plans' && <PlansAdmin toast={toast} />}
@@ -273,4 +275,75 @@ function PlansAdmin({ toast }: { toast: (m: string) => void }) {
 function planPeriod(p: { week: string; day?: string | null }) {
   const m = /^(\d{4}-\d{2}-\d{2})~([^~]*)~(\d+)$/.exec(p.week);
   return m ? `${m[1]} · ${m[2] === '-' ? 'no plant' : m[2]} · Pick ${m[3]}` : p.day || p.week;
+}
+
+/**
+ * Settings → ZMMBE plants: the Plant + SO Plant pairs of ZMMBE that count, each linked to a plant (Settings → Plants).
+ * Only rows of these pairs go into UR; the others are left out and listed at the upload. No pairs: every row counts.
+ */
+function ZmmbePlants({ toast }: { toast: (m: string) => void }) {
+  const [rows, setRows] = useState<PlantPair[] | null>(null);
+  const [plants, setPlants] = useState<PlantInfo[]>([]);
+  const [seen, setSeen] = useState<{ plant: string; soPlant: string; n: number; ur: number }[]>([]);
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
+  useEffect(() => {
+    api<{ settings: SystemSettings }>('/api/settings').then((r) => setRows(r.settings.zmmbePlants || [])).catch((e) => setErr(e instanceof Error ? e.message : 'Could not load.'));
+    api<{ plants: PlantInfo[] }>('/api/plants').then((r) => setPlants(r.plants)).catch(() => {});
+    api<{ pairs: { plant: string; soPlant: string; n: number; ur: number }[] }>('/api/zmmbe-pairs').then((r) => setSeen(r.pairs)).catch(() => {});
+  }, []);
+  const set = (i: number, k: keyof PlantPair, v: string) => setRows((l) => (l || []).map((x, j) => (j === i ? { ...x, [k]: v.toUpperCase() } : x)));
+  // covered: the exact pair, or that Plant with SO Plant * (any)
+  const has = (p: string, sp: string) => (rows || []).some((x) => x.plant === p && (x.soPlant === (sp || '*') || x.soPlant === '*'));
+  const save = async () => {
+    setBusy(true); setErr('');
+    try {
+      const clean = (rows || []).filter((x) => x.plant.trim());
+      const r = await api<{ settings: SystemSettings }>('/api/settings', { method: 'POST', body: { zmmbePlants: clean } });
+      setRows(r.settings.zmmbePlants || []); toast(`ZMMBE plants saved (${(r.settings.zmmbePlants || []).length}) — they apply from the next ZMMBE upload`);
+    } catch (e) { setErr(e instanceof Error ? e.message : 'Could not save.'); } finally { setBusy(false); }
+  };
+  if (!rows) return <section className="card">{err ? <div className="notice bad">{err}</div> : <Loader />}</section>;
+  return (
+    <section className="card set-card">
+      <h2>ZMMBE plants</h2>
+      <p className="sub">The ZMMBE <b>Plant</b> + <b>SO Plant</b> pairs that count, each linked to its plant. Only rows of these pairs go into UR (and KFC / PFC); a pair not set up here is left out and listed when the ZMMBE is uploaded. <b>SO Plant *</b> = any SO Plant of that Plant. With no pair set up, every ZMMBE row counts (as before).</p>
+      <div className="table-wrap" style={{ maxHeight: 'none' }}>
+        <table className="mini" data-nofilter>
+          <thead><tr><th>ZMMBE Plant</th><th>SO Plant</th><th>Linked plant</th><th /></tr></thead>
+          <tbody>
+            {rows.map((r, i) => (
+              <tr key={i}>
+                <td><input className="set-text" style={{ width: 110 }} value={r.plant} onChange={(e) => set(i, 'plant', e.target.value)} placeholder="C065" aria-label="ZMMBE Plant" /></td>
+                <td><input className="set-text" style={{ width: 110 }} value={r.soPlant} onChange={(e) => set(i, 'soPlant', e.target.value)} placeholder="C064 or *" aria-label="SO Plant" /></td>
+                <td><select value={r.link} onChange={(e) => set(i, 'link', e.target.value)} aria-label="Linked plant">
+                  <option value="">— none —</option>
+                  {plants.map((p) => <option key={p.code} value={p.code.toUpperCase()}>{p.name ? `${p.name} (${p.code})` : p.code}</option>)}
+                </select></td>
+                <td><button type="button" className="btn sm" aria-label="Remove" onClick={() => setRows((l) => (l || []).filter((_, j) => j !== i))}>✕</button></td>
+              </tr>
+            ))}
+            {!rows.length && <tr><td colSpan={4} className="muted">No pair yet — every ZMMBE row counts. Add the pairs below.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', margin: '10px 0' }}>
+        <button type="button" className="btn sm" onClick={() => setRows((l) => [...(l || []), { plant: '', soPlant: '', link: '' }])}>+ Add pair</button>
+      </div>
+      {seen.length > 0 && (
+        <div className="notice" style={{ display: 'grid', gap: 6 }}>
+          <b>Pairs in the ZMMBE uploaded</b>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {seen.map((x) => (
+              <button key={`${x.plant}|${x.soPlant}`} type="button" className={`btn sm ${has(x.plant, x.soPlant) ? '' : 'primary'}`} disabled={has(x.plant, x.soPlant)}
+                title={`${x.n} rows · UR ${x.ur}`} onClick={() => setRows((l) => [...(l || []), { plant: x.plant, soPlant: x.soPlant || '*', link: plants.some((p) => p.code.toUpperCase() === (x.soPlant || x.plant)) ? (x.soPlant || x.plant) : '' }])}>
+                {has(x.plant, x.soPlant) ? '✓ ' : '+ '}{x.plant} + {x.soPlant || '–'} <span className="muted">· {x.n} rows</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      {err && <div className="notice bad">{err}</div>}
+      <div style={{ marginTop: 12 }}><button className="btn primary" aria-busy={!!busy || undefined} disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save ZMMBE plants'}</button></div>
+    </section>
+  );
 }

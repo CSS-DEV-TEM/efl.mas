@@ -147,7 +147,7 @@ const thisWeek = () => weekId(new Date(Date.now() + 5.5 * 3600 * 1000).toISOStri
  * adds plan.week, fills it from the dates, and moves dashboard edits to week-scoped keys ("2026-W42#SO|LI|Item").
  */
 let schemaReady = false;
-const SCHEMA_V = '23';
+const SCHEMA_V = '25';
 async function ensureSchema(env: Env) {
   if (schemaReady || !env.DB) return;
   try {
@@ -272,6 +272,15 @@ async function ensureSchema(env: Env) {
       FROM plan WHERE plan_type = 'day' AND instr(week, '~') > 0 GROUP BY week`),
     env.DB.prepare("INSERT OR IGNORE INTO plan_day (day, created_by, created_at) SELECT DISTINCT day, created_by, created_at FROM pick_round"),
   ]);
+  // v25: balance follow-up — a line picked short is followed until its balance is picked (a line added for it: follow_of = the
+  // original line, "week|key|date"); a balance closed by hand
+  try { await env.DB.prepare('ALTER TABLE plan ADD COLUMN follow_of TEXT').run(); } catch { /* already there */ }
+  await env.DB.batch([
+    env.DB.prepare('CREATE TABLE IF NOT EXISTS follow_close (ref TEXT PRIMARY KEY, note TEXT, by_user TEXT, at TEXT)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS plan_follow ON plan(follow_of)'),
+  ]);
+  // v24: the ZMMBE row's plant (Settings → ZMMBE plants: Plant + SO Plant → plant)
+  try { await env.DB.prepare('ALTER TABLE stock ADD COLUMN plant_link TEXT').run(); } catch { /* already there */ }
   // v23: Korber Pick Id (0 = pickable); rejected rolls (a picked roll taken back for a problem, and its replacement)
   try { await env.DB.prepare("ALTER TABLE korber ADD COLUMN pick_id TEXT NOT NULL DEFAULT '0'").run(); } catch { /* already there */ }
   await env.DB.batch([
@@ -380,7 +389,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 42; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 44; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -488,6 +497,9 @@ async function handleUpload(env: Env, req: Request) {
   }
   let stockDups = 0;
   let plantOut = 0;
+  // ZMMBE rows whose Plant + SO Plant is not in Settings → ZMMBE plants (left out)
+  let notInSetup: { plant: string; soPlant: string; rows: number; ur: number }[] = [];
+  let setupOut = 0;
   let stockDiff: { added: number; removed: number; unchanged: number } | null = null;
   let derived: { kfc: number; pfc: number; plant: number | null; plantKept?: number } | null = null;
   if (!ALL_SRCS.includes(body.src)) throw new HttpError(400, 'Unknown report type.');
@@ -590,7 +602,7 @@ async function handleUpload(env: Env, req: Request) {
   } else {
     mapped = mapStock(body.src, body.rows);
     stockDups = body.rows.filter((r) => normId(r.so) && normId(r.li) && normId(r.material)).length - mapped.length;
-    const cols = ['rid', 'src', 'key', 'plant', 'sloc', 'so_plant', 'so', 'li', 'material', 'batch', 'style', 'ur', 'qi', 'block', 'assigned', 'total'];
+    const cols = ['rid', 'src', 'key', 'plant', 'sloc', 'so_plant', 'so', 'li', 'material', 'batch', 'style', 'ur', 'qi', 'block', 'assigned', 'total', 'plant_link'];
     const srid = pickRid ?? '';
     // "add": another part of the same report replaces only the rows this file has, the rest stay; otherwise the whole report is replaced.
     // Either way only changed rows are written.
@@ -602,6 +614,25 @@ async function handleUpload(env: Env, req: Request) {
         : diffReplace(env, 'stock', cols, rowsIn, 'src = ? AND rid = ?', [src, srid]);
     };
     const rules = await getSettings(env);
+    // Settings → ZMMBE plants: only the Plant + SO Plant pairs set up count (each linked to its plant); the others are left out
+    // and listed so they can be added. No pairs set up: every row counts.
+    if (rules.zmmbePlants.length && ['zmmbe', 'kfc', 'pfc'].includes(body.src)) {
+      const plantLoc = new Set(rules.plantSlocs.map(up));
+      const keep: Row[] = [];
+      const miss = new Map<string, { plant: string; soPlant: string; rows: number; ur: number }>();
+      for (const r of mapped) {
+        const pr = pairOf(rules.zmmbePlants, r.plant, r.so_plant);
+        if (pr) { r.plant_link = pr.link || null; keep.push(r); continue; }
+        if (plantLoc.has(up(r.sloc))) { keep.push(r); continue; } // a plant-location row: left out by its own rule below
+        const k = `${up(r.plant)}|${up(r.so_plant)}`;
+        const m = miss.get(k) || { plant: up(r.plant), soPlant: up(r.so_plant), rows: 0, ur: 0 };
+        m.rows++; m.ur = r3(m.ur + Number(r.ur || 0)); miss.set(k, m);
+      }
+      notInSetup = Array.from(miss.values()).sort((a, b) => b.ur - a.ur);
+      setupOut = mapped.length - keep.length;
+      mapped = keep;
+      if (!mapped.length) throw new HttpError(400, `No row of this ZMMBE is a Plant + SO Plant set up in Settings → ZMMBE plants (${notInSetup.map((m) => `${m.plant} + ${m.soPlant || '–'}`).join(', ')}). Add them there first.`);
+    }
     if (body.src === 'zmmbe' && rules.deriveFromZmmbe) {
       // one ZMMBE gives the other reports, like the Pull Plan workbook: PFC = the PFC storage locations (41, COMF),
       // KFC = every other ZMMBE row, PLANT = plant storage locations (40, 70, 75) if the export has them (they are not ZMMBE stock)
@@ -645,7 +676,7 @@ async function handleUpload(env: Env, req: Request) {
   await env.DB.batch(stmts); // all or nothing
 
   await broadcast(env, { type: 'data', src: body.src, by: s.u, rows: mapped.length, weeks });
-  return json({ ok: true, src: body.src, accepted: mapped.length, skipped: Math.max(0, body.rows.length - mapped.length - plantOut - (Number(planSummary?.inFileDups) || 0) - stockDups), stockDups, mode: body.src === 'plan' ? undefined : body.mode === 'add' ? 'add' : 'replace', weeks, changes: stockDiff ? { added: stockDiff.added, removed: stockDiff.removed, unchanged: stockDiff.unchanged } : undefined, derived: derived ?? undefined, ...(planSummary || {}) });
+  return json({ ok: true, src: body.src, accepted: mapped.length, skipped: Math.max(0, body.rows.length - mapped.length - plantOut - setupOut - (Number(planSummary?.inFileDups) || 0) - stockDups), stockDups, ...(notInSetup.length ? { notInSetup, setupOut } : {}), mode: body.src === 'plan' ? undefined : body.mode === 'add' ? 'add' : 'replace', weeks, changes: stockDiff ? { added: stockDiff.added, removed: stockDiff.removed, unchanged: stockDiff.unchanged } : undefined, derived: derived ?? undefined, ...(planSummary || {}) });
 }
 
 // ---------------------------------------------------------------- the pull plan calculation
@@ -682,6 +713,7 @@ WITH s AS (
     SUM(CASE WHEN src='plant' THEN total END) AS plant_qty,
     GROUP_CONCAT(DISTINCT CASE WHEN src='zmmbe' THEN plant END) AS stock_plant,
     GROUP_CONCAT(DISTINCT CASE WHEN src='zmmbe' THEN sloc END)  AS stock_sloc,
+    GROUP_CONCAT(DISTINCT CASE WHEN src='zmmbe' THEN plant_link END) AS stock_link,
     GROUP_CONCAT(DISTINCT CASE WHEN src='plant' THEN plant END) AS at_plant
   FROM stock WHERE key IN (SELECT key FROM plan WHERE (?1 IS NULL OR week = ?1) AND (?5 IS NULL OR date = ?5)) GROUP BY key
 ),
@@ -692,7 +724,7 @@ SELECT p.rowid AS id, p.row_no, p.key, p.week, p.owner, p.plan_type, p.src_user,
   p.qty - COALESCE(s.assigned,0) AS variance,
   COALESCE(s.kfc_ur,0) AS kfc_ur, COALESCE(s.kfc_qi,0) AS kfc_qi, COALESCE(s.kfc_block,0) AS kfc_block,
   COALESCE(s.pfc_ur,0) AS pfc_ur, COALESCE(s.pfc_qi,0) AS pfc_qi, COALESCE(s.pfc_block,0) AS pfc_block,
-  COALESCE(s.plant_qty,0) AS plant_qty, s.stock_plant, s.stock_sloc, s.at_plant,
+  COALESCE(s.plant_qty,0) AS plant_qty, s.stock_plant, s.stock_sloc, s.stock_link, s.at_plant,
   COALESCE(t.tn_qty,0) AS tn_qty, t.tn_number, d.dup,
   CASE WHEN ?2 IS NOT NULL AND EXISTS (
     SELECT 1 FROM plan pp LEFT JOIN line_status pls ON pls.key = ${SK('pp')}
@@ -729,11 +761,28 @@ interface Settings {
   deriveFromZmmbe: boolean; pfcSlocs: string[]; plantSlocs: string[];
   /** time setup: SO/LI lines handled per hour (W/H), minutes after the target time before a plan counts as late, default target time */
   soliPerHour: number; lateGraceMin: number; defaultTarget: string;
+  /** ZMMBE Plant + SO Plant pairs that count (each linked to a plant of Settings → Plants); none = every row counts */
+  zmmbePlants: { plant: string; soPlant: string; link: string }[];
 }
 const DEFAULT_SETTINGS: Settings = { fullRollPct: 10, defaultPickKind: 'normal', allowOffsite: true, allowNormalShort: true, allowNormalFull: true,
-  deriveFromZmmbe: true, pfcSlocs: ['41', 'COMF'], plantSlocs: ['40', '70', '75'], soliPerHour: 12, lateGraceMin: 0, defaultTarget: '' };
+  deriveFromZmmbe: true, pfcSlocs: ['41', 'COMF'], plantSlocs: ['40', '70', '75'], soliPerHour: 12, lateGraceMin: 0, defaultTarget: '', zmmbePlants: [] };
 const slocList = (v: unknown, def: string[]) => Array.isArray(v) || typeof v === 'string'
   ? Array.from(new Set((Array.isArray(v) ? v : String(v).split(/[,\s]+/)).map((x) => normId(String(x).trim()).toUpperCase()).filter(Boolean))).slice(0, 30) : def;
+/** ZMMBE Plant + SO Plant pairs: upper case, no blanks, each pair once ("*" = any SO Plant) */
+function plantPairs(v: unknown): Settings['zmmbePlants'] {
+  const out: Settings['zmmbePlants'] = [];
+  for (const x of Array.isArray(v) ? v : []) {
+    const plant = String((x as Row)?.plant ?? '').trim().toUpperCase(), soPlant = String((x as Row)?.soPlant ?? '').trim().toUpperCase() || '*';
+    if (!plant || out.some((o) => o.plant === plant && o.soPlant === soPlant)) continue;
+    out.push({ plant, soPlant, link: String((x as Row)?.link ?? '').trim().toUpperCase() });
+  }
+  return out.slice(0, 200);
+}
+/** the setup pair a ZMMBE row belongs to (exact SO Plant first, then "*"); null = not in the setup */
+const pairOf = (pairs: Settings['zmmbePlants'], plant: unknown, soPlant: unknown) => {
+  const p0 = String(plant ?? '').trim().toUpperCase(), s0 = String(soPlant ?? '').trim().toUpperCase();
+  return pairs.find((x) => x.plant === p0 && x.soPlant === s0) ?? pairs.find((x) => x.plant === p0 && x.soPlant === '*') ?? null;
+};
 async function getSettings(env: Env): Promise<Settings> {
   try {
     const v = (await env.DB.prepare("SELECT v FROM config WHERE k = 'settings'").first<{ v: string }>())?.v;
@@ -862,6 +911,95 @@ async function reportStatus(env: Env, rid: string) {
 }
 
 /** GET /api/rounds?day=yyyy-mm-dd[&plant=] — the day plan rounds (Pick 1, 2 …) already uploaded for that day, per plant. */
+/**
+ * Balance follow-up (master, every day / Pick / user): a plan line where less than its QTY was picked is followed until the
+ * balance is picked. "Add to Pick" puts the balance into a Pick as a line of its own (follow_of = the original line); its picks
+ * count for the original. Closed by hand (with a note) or done when the balance is 0.
+ *   GET  /api/follow?state=open|closed|all
+ *   POST /api/follow {action: 'add', ref, rid} · {action: 'close', ref, note} · {action: 'reopen', ref}
+ */
+async function handleFollow(env: Env, req: Request) {
+  const sp = new URL(req.url).searchParams;
+  const ref = (r: Row) => `${r.week}|${r.key}|${r.date ?? ''}`;
+  // picks per plan line (week + line); follow-up lines and their picks per original line
+  const followData = async () => {
+    const picks = (await env.DB.prepare(`SELECT week, line, SUM(qty) q, COUNT(*) n, MAX(at) last, MAX(day) day FROM picks WHERE cancelled_at IS NULL GROUP BY week, line`).all<Row>()).results;
+    const pk = new Map(picks.map((x) => [`${x.week}|${x.line}`, x]));
+    const kids = (await env.DB.prepare('SELECT week, key, date, qty, follow_of FROM plan WHERE follow_of IS NOT NULL').all<Row>()).results;
+    return { pk, kids };
+  };
+  if (req.method === 'GET') {
+    await requireUser(env, req);
+    const state = sp.get('state') || 'open';
+    const { pk, kids } = await followData();
+    // the original lines that were picked (picked short); follow-up lines themselves are counted under their original
+    const lines = (await env.DB.prepare(`SELECT p.week, p.key, p.date, p.so, p.li, p.item, p.qty, p.plant, p.owner, p.plan_type, ls.status
+      FROM plan p LEFT JOIN line_status ls ON ls.key = ${SK('p')} WHERE p.follow_of IS NULL`).all<Row>()).results;
+    const closed = new Map((await env.DB.prepare('SELECT * FROM follow_close').all<Row>()).results.map((x) => [String(x.ref), x]));
+    const shortClosed = new Set((await env.DB.prepare('SELECT week, line FROM pick_req WHERE cancelled_at IS NULL AND closed = 1').all<Row>()).results.map((x) => `${x.week}|${x.line}`));
+    const out: Row[] = [];
+    for (const l of lines) {
+      const own = pk.get(`${ref(l).split('|')[0]}|${l.key}|${l.date ?? ''}`);
+      if (!own) continue; // never picked: not "sent less" yet
+      const r = ref(l);
+      const mine = kids.filter((k) => k.follow_of === r);
+      const kidPicked = mine.reduce((t, k) => t + Number(pk.get(`${k.week}|${k.key}|${k.date ?? ''}`)?.q ?? 0), 0);
+      const picked = r3(Number(own.q) + kidPicked);
+      const balance = r3(Number(l.qty) - picked);
+      if (balance <= 0.0005) continue;
+      const cl = closed.get(r);
+      const isClosed = !!cl || /\bdone\b/i.test(String(l.status ?? ''));
+      if (state === 'open' && isClosed) continue;
+      if (state === 'closed' && !isClosed) continue;
+      const last = [own, ...mine.map((k) => pk.get(`${k.week}|${k.key}|${k.date ?? ''}`)).filter(Boolean)].map((x) => String((x as Row).last)).sort().pop();
+      out.push({ ref: r, week: l.week, plan: periodLabel(l.week), date: l.date, so: l.so, li: l.li, item: l.item, plant: l.plant, owner: l.owner, qty: l.qty, picked, balance,
+        first_picked: own.day, closed_short: shortClosed.has(`${l.week}|${l.key}|${l.date ?? ''}`), last_at: last, rolls: Number(own.n), in_picks: mine.map((k) => ({ plan: periodLabel(k.week), week: k.week, qty: k.qty, picked: r3(Number(pk.get(`${k.week}|${k.key}|${k.date ?? ''}`)?.q ?? 0)) })),
+        closed: isClosed, closed_note: cl ? cl.note : /\bdone\b/i.test(String(l.status ?? '')) ? 'Completed by hand' : null, closed_by: cl?.by_user ?? null, closed_at: cl?.at ?? null });
+    }
+    out.sort((a, b) => String(b.last_at).localeCompare(String(a.last_at)));
+    return json({ follow: out });
+  }
+  const s = await requireUser(env, req, 'editor');
+  const b = (await req.json()) as { action?: string; ref?: string; rid?: string; note?: string };
+  const r0 = String(b.ref || '');
+  const [wk, so, li, item, date] = r0.split('|');
+  const orig = await env.DB.prepare('SELECT * FROM plan WHERE week = ? AND key = ? AND COALESCE(date, \'\') = ? AND follow_of IS NULL').bind(wk, `${so}|${li}|${item}`, date ?? '').first<Row>();
+  if (!orig) throw new HttpError(404, 'That plan line is no longer there.');
+  if (b.action === 'close' || b.action === 'reopen') {
+    await env.DB.batch([
+      b.action === 'close' ? env.DB.prepare('INSERT OR REPLACE INTO follow_close (ref, note, by_user, at) VALUES (?,?,?,?)').bind(r0, txt(b.note) || 'Closed', s.u, now()) : env.DB.prepare('DELETE FROM follow_close WHERE ref = ?').bind(r0),
+      env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'follow', `${b.action === 'close' ? 'Closed' : 'Reopened'} the balance of ${orig.so} / ${orig.li} / ${orig.item} (${periodLabel(wk)})${b.note ? ' — ' + b.note : ''}`),
+    ]);
+    await broadcast(env, { type: 'data', src: 'plan', by: s.u, rows: 0 });
+    return json({ ok: true });
+  }
+  if (b.action !== 'add') throw new HttpError(400, 'Unknown action.');
+  const rnd = parseRound(b.rid);
+  if (!rnd) throw new HttpError(400, 'Choose the Pick to add the balance to.');
+  // the open balance now
+  const { pk, kids } = await followData();
+  const own = Number(pk.get(`${wk}|${orig.key}|${orig.date ?? ''}`)?.q ?? 0);
+  const kidPicked = kids.filter((k) => k.follow_of === r0).reduce((t, k) => t + Number(pk.get(`${k.week}|${k.key}|${k.date ?? ''}`)?.q ?? 0), 0);
+  // what is already planned for it in other Picks and not picked yet
+  // (a follow-up line that was picked already does not hold any more balance: what it left is the balance again)
+  const kidOpen = kids.filter((k) => k.follow_of === r0 && !pk.get(`${k.week}|${k.key}|${k.date ?? ''}`)).reduce((t, k) => t + Number(k.qty), 0);
+  const bal = r3(Number(orig.qty) - own - kidPicked - kidOpen);
+  if (bal <= 0.0005) throw new HttpError(409, kidOpen > 0 ? 'The balance is already in another Pick (not picked yet).' : 'There is no balance left.');
+  const rid = String(b.rid);
+  if (await env.DB.prepare('SELECT 1 FROM plan WHERE week = ? AND key = ?').bind(rid, orig.key).first()) throw new HttpError(409, `${orig.so} / ${orig.li} / ${orig.item} is already in ${periodLabel(rid)}.`);
+  await env.DB.batch([
+    env.DB.prepare('INSERT OR IGNORE INTO plan_day (day, created_by, created_at) VALUES (?,?,?)').bind(rnd.day, s.u, now()),
+    env.DB.prepare('INSERT OR IGNORE INTO pick_round (rid, day, plant, round, created_by, created_at) VALUES (?,?,?,?,?,?)').bind(rid, rnd.day, rnd.plant, rnd.round, s.u, now()),
+    env.DB.prepare(`INSERT INTO plan (key, so, li, item, date, week, qty, plant, remarks, row_no, src_user, src_at, owner, plan_type, follow_of)
+      VALUES (?,?,?,?,?,?,?,?,?, (SELECT COALESCE(MAX(row_no), 0) + 1 FROM plan WHERE week = ?), ?, ?, ?, 'day', ?)`)
+      .bind(orig.key, orig.so, orig.li, orig.item, rnd.day, rid, bal, rnd.plant || orig.plant, `Balance of ${periodLabel(wk)} (${orig.qty} − picked ${r3(own + kidPicked)})`, rid, s.u, now(), orig.owner ?? s.u, r0),
+    env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'follow', `Balance ${bal} of ${orig.so} / ${orig.li} / ${orig.item} (${periodLabel(wk)}) added to ${periodLabel(rid)}`),
+    env.DB.prepare("DELETE FROM config WHERE k IN ('c_counts', 'c_weeks') OR k LIKE 'c_weeks:%'"),
+  ]);
+  await broadcast(env, { type: 'data', src: 'plan', by: s.u, rows: 1 });
+  return json({ ok: true, qty: bal, rid });
+}
+
 async function handleRounds(env: Env, req: Request) {
   const sp = new URL(req.url).searchParams;
   // POST {day, plant}: a new Pick of that plant on that day (the next Pick No)
@@ -1306,7 +1444,7 @@ async function handleAssign(env: Env, req: Request, id: string) {
 
 /** What "Clear database" can empty. Users and sign-in keys are never touched. */
 const CLEAR_GROUPS: Record<string, { label: string; tables: string[] }> = {
-  plan: { label: 'Day plans (days, Picks, plan lines) + dashboard edits', tables: ['plan', 'line_status', 'plant_received', 'stock_release', 'dispatch_assign', 'pick_round', 'plan_day'] },
+  plan: { label: 'Day plans (days, Picks, plan lines) + dashboard edits', tables: ['plan', 'line_status', 'plant_received', 'stock_release', 'dispatch_assign', 'pick_round', 'plan_day', 'follow_close'] },
   stock: { label: 'Stock reports (ZMMBE, KFC, PFC, PLANT, TRR)', tables: ['stock', 'trr'] },
   pickdata: { label: 'Pick data (ZINR, ZCOMENT VIEW, Korber)', tables: ['zinr', 'zcoment', 'korber'] },
   picks: { label: 'Pick history + packing lists', tables: ['picks', 'pick_req'] },
@@ -2774,6 +2912,7 @@ export default {
             soliPerHour: b.soliPerHour === undefined ? cur.soliPerHour : Math.max(1, Math.min(1000, Number(b.soliPerHour) || cur.soliPerHour)),
             lateGraceMin: b.lateGraceMin === undefined ? cur.lateGraceMin : Math.max(0, Math.min(600, Number(b.lateGraceMin) || 0)),
             defaultTarget: b.defaultTarget === undefined ? cur.defaultTarget : String(b.defaultTarget).trim().slice(0, 20),
+            zmmbePlants: b.zmmbePlants === undefined ? cur.zmmbePlants : plantPairs(b.zmmbePlants),
           };
           await env.DB.batch([
             env.DB.prepare("INSERT INTO config (k, v) VALUES ('settings', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(JSON.stringify(next)),
@@ -2796,6 +2935,12 @@ export default {
       else if (p === '/api/plants/received') res = await handleReceived(env, req);
       else if (p === '/api/pullplan' && req.method === 'GET') res = await handlePullPlan(env, req);
       else if (p === '/api/rounds') res = await handleRounds(env, req);
+      // the Plant + SO Plant pairs in the ZMMBE uploads (for Settings → ZMMBE plants)
+      else if (p === '/api/follow') res = await handleFollow(env, req);
+      else if (p === '/api/zmmbe-pairs' && req.method === 'GET') {
+        await requireUser(env, req, 'admin');
+        res = json({ pairs: (await env.DB.prepare("SELECT upper(COALESCE(plant, '')) plant, upper(COALESCE(so_plant, '')) soPlant, COUNT(*) n, ROUND(SUM(ur), 3) ur FROM stock WHERE src = 'zmmbe' GROUP BY 1, 2 ORDER BY ur DESC").all()).results });
+      }
       else if (p === '/api/days') res = await handleDays(env, req);
       else if (p === '/api/backup' || p.startsWith('/api/backup/') || p.startsWith('/api/restore/')) res = await handleBackup(env, req, p);
       else if (p === '/api/upload' && req.method === 'POST') res = await handleUpload(env, req);

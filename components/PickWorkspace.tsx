@@ -224,6 +224,8 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
 
       {holding && <HoldDialog line={holding} onClose={() => setHolding(null)} onSave={(r) => { const l = holding; setHolding(null); void setHold(l, r); }} />}
 
+      <BalanceFollow key={`bf${histKey}`} rid={week} label={label} canEdit={canEdit} toast={toast} onChanged={() => { reload(); setHistKey((k) => k + 1); }} />
+
       <PickHistoryCard key={histKey} canEdit={canEdit} toast={toast} onChanged={() => { reload(); setHistKey((k) => k + 1); }} />
 
       <RejectedRolls key={`rj${histKey}`} canEdit={canEdit} toast={toast} onChanged={() => { reload(); setHistKey((k) => k + 1); }} />
@@ -920,6 +922,84 @@ function RejectedRolls({ canEdit, toast, onChanged }: { canEdit: boolean; toast:
       )}
       {assign && <KorberChooser item={assign.item} rid={assign.week} roll={{ lot: assign.insp_lot || '', batch: assign.batch || '', material: assign.item, vendor_batch: assign.lot, roll_no: null, barcode: null, roll_qty: assign.qty, shade: assign.shade, invoice: null, reason: '', suggest: [] } as ManualRoll}
         taken={[]} onUse={(k) => use(assign, k)} onClose={() => setAssign(null)} />}
+    </section>
+  );
+}
+
+interface Follow {
+  ref: string; week: string; plan: string; date: string | null; so: string; li: string; item: string; plant: string | null; owner: string | null;
+  qty: number; picked: number; balance: number; first_picked: string | null; last_at: string | null; rolls: number; closed_short: boolean;
+  in_picks: { plan: string; week: string; qty: number; picked: number }[]; closed: boolean; closed_note: string | null; closed_by: string | null; closed_at: string | null;
+}
+/**
+ * Balance follow-up (master: every day, every Pick, every user). A plan line picked with less than its QTY stays here until the
+ * balance is picked: "Add to this Pick" puts the balance into the Pick on screen as a line of its own; what is picked there counts
+ * for the original line. Close it when the balance will not be sent.
+ */
+function BalanceFollow({ rid, label, canEdit, toast, onChanged }: { rid: string; label?: string; canEdit: boolean; toast: (m: string) => void; onChanged: () => void }) {
+  const [state, setState] = useState<'open' | 'closed' | 'all'>('open');
+  const [rows, setRows] = useState<Follow[] | null>(null);
+  const [q, setQ] = useState('');
+  const [busy, setBusy] = useState('');
+  const load = useCallback(() => { api<{ follow: Follow[] }>('/api/follow?state=' + state).then((r) => setRows(r.follow)).catch(() => setRows([])); }, [state]);
+  useEffect(() => { load(); }, [load]);
+  const isPick = rid.includes('~');
+  const act = async (f: Follow, action: 'add' | 'close' | 'reopen') => {
+    let note: string | null = null;
+    if (action === 'close') { note = window.prompt(`Close the balance ${fmtQty(f.balance)} of ${f.so} / ${f.li} / ${f.item}? Reason (e.g. Customer cut the QTY):`, 'Not needed'); if (note === null) return; }
+    setBusy(f.ref);
+    try {
+      const r = await api<{ qty?: number }>('/api/follow', { method: 'POST', body: { action, ref: f.ref, rid, note } });
+      toast(action === 'add' ? `Balance ${fmtQty(Number(r.qty))} of ${f.so} / ${f.li} added to ${label || 'this Pick'}` : action === 'close' ? `Balance of ${f.so} / ${f.li} closed` : `Balance of ${f.so} / ${f.li} open again`);
+      load(); onChanged();
+    } catch (e) { toast(e instanceof Error ? e.message : 'Could not save.'); } finally { setBusy(''); }
+  };
+  const t = q.trim().toLowerCase();
+  const list = (rows || []).filter((f) => !t || [f.so, f.li, f.item, f.plant, f.plan, f.owner].some((v) => String(v ?? '').toLowerCase().includes(t)));
+  const openN = (rows || []).filter((f) => !f.closed).length;
+  const openQty = (rows || []).filter((f) => !f.closed).reduce((a, f) => a + f.balance, 0);
+  return (
+    <section className="card" aria-labelledby="bf-title">
+      <div className="sheet-top">
+        <div>
+          <h2 id="bf-title">Balance follow-up {state !== 'closed' && openN > 0 && <span className="pill warn" style={{ marginLeft: 6 }}>{openN} open · {fmtQty(openQty)}</span>}</h2>
+          <p className="sub" style={{ margin: 0 }}>Every plan line picked with less than its QTY (all days, all Picks, all users) stays here until the balance is picked. <b>Add to this Pick</b> puts the balance into {isPick ? (label || 'the Pick on screen') : 'the Pick on screen'}; what is picked there counts for the original line.</p>
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <input type="search" placeholder="SO, LI, Item…" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search balances" style={{ width: 160 }} />
+          <div className="seg" role="group">
+            {(['open', 'closed', 'all'] as const).map((k) => <button key={k} className={state === k ? 'on' : ''} onClick={() => setState(k)}>{k === 'open' ? 'Open' : k === 'closed' ? 'Closed' : 'All'}</button>)}
+          </div>
+        </div>
+      </div>
+      {!rows ? <Loader label="Loading balances…" /> : !list.length ? <p className="muted">{state === 'open' ? 'No balance to follow — every picked line got its full QTY.' : 'Nothing here.'}</p> : (
+        <div className="table-wrap" style={{ maxHeight: 380 }}>
+          <table className="mini">
+            <thead><tr><th>Plan</th><th>SO / LI</th><th>Item</th><th>Plant</th><th className="n">Plan QTY</th><th className="n">Picked</th><th className="n">Balance</th><th>Last pick</th><th>Balance in Picks</th><th>Status</th>{canEdit && <th></th>}</tr></thead>
+            <tbody>{list.map((f) => {
+              const here = f.in_picks.some((k) => k.week === rid);
+              const waiting = f.in_picks.some((k) => k.picked <= 0);
+              return (
+                <tr key={f.ref}>
+                  <td className="small">{f.plan}{f.owner ? <div className="muted">{f.owner}</div> : null}</td>
+                  <td>{f.so} / {f.li}</td><td>{f.item}</td><td>{f.plant || '–'}</td>
+                  <td className="n">{fmtQty(f.qty)}</td><td className="n">{fmtQty(f.picked)}</td><td className="n"><b>{fmtQty(f.balance)}</b></td>
+                  <td className="small">{f.last_at ? <span title={new Date(f.last_at).toLocaleString()}>{ago(f.last_at)}</span> : '–'}</td>
+                  <td className="small">{f.in_picks.length ? f.in_picks.map((k) => <div key={k.week}>{k.plan}: {fmtQty(k.picked)} / {fmtQty(k.qty)}</div>) : '–'}</td>
+                  <td>{f.closed ? <span className="pill mute" title={[f.closed_by, f.closed_at ? new Date(f.closed_at).toLocaleString() : ''].filter(Boolean).join(' · ')}>Closed · {f.closed_note}</span>
+                    : <>{waiting ? <span className="pill accent">In a Pick</span> : <span className="pill warn">To pick</span>}{f.closed_short && <span className="pill mute" style={{ marginLeft: 4 }} title="The pick was saved with “Close the line short”">closed short</span>}</>}</td>
+                  {canEdit && <td style={{ whiteSpace: 'nowrap' }}>
+                    {f.closed ? <button className="btn sm" disabled={!!busy} onClick={() => act(f, 'reopen')}>Reopen</button> : <>
+                      <button className="btn sm primary" disabled={!!busy || !isPick || here || waiting} onClick={() => act(f, 'add')}
+                        title={!isPick ? 'Choose a Day and a Pick first' : here ? 'Already in this Pick' : waiting ? 'The balance is already in a Pick, not picked yet' : `Add ${fmtQty(f.balance)} to ${label || 'this Pick'}`}>Add to this Pick</button>{' '}
+                      <button className="btn sm" disabled={!!busy} onClick={() => act(f, 'close')}>Close</button></>}
+                  </td>}
+                </tr>
+              );
+            })}</tbody>
+          </table>
+        </div>
+      )}
     </section>
   );
 }

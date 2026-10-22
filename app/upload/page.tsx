@@ -128,12 +128,14 @@ function Uploads() {
     setJob(j.id, { state: 'sending', msg: undefined });
     try {
       const rows = applyMapping(j.src, j.grid, j.map);
-      const r = await api<PlanPreview & { accepted: number; skipped: number; weeks?: string[]; stockDups?: number; changes?: { added: number; removed: number; unchanged: number }; derived?: { kfc: number; pfc: number; plant: number | null; plantKept?: number } }>('/api/upload', { method: 'POST', body: { src: j.src, fileName: j.file, sheetName: j.sheet, rows, ...planOpts(j, rid) } });
+      const r = await api<PlanPreview & { accepted: number; skipped: number; weeks?: string[]; stockDups?: number; changes?: { added: number; removed: number; unchanged: number }; derived?: { kfc: number; pfc: number; plant: number | null; plantKept?: number }; notInSetup?: { plant: string; soPlant: string; rows: number; ur: number }[]; setupOut?: number }>('/api/upload', { method: 'POST', body: { src: j.src, fileName: j.file, sheetName: j.sheet, rows, ...planOpts(j, rid) } });
       const wk = r.weeks?.length ? ` to ${r.weeks.map((w) => roundName(w, plantNames)).join(', ')}` : '';
       await loadStatus(); setBarKey((k) => k + 1);
       if (j.src === 'zmmbe' || j.src === 'plan') setShowReady(true);
       const plan = j.src === 'plan' && r.added !== undefined ? `${fmt(r.added)} new, ${fmt(r.updated)} updated${r.removed ? `, ${fmt(r.removed)} removed` : ''}${r.inFileDups ? `, ${fmt(r.inFileDups)} repeated rows (last row kept${r.dupQtyCount ? `; ${fmt(r.dupQtyCount)} had a different QTY` : ''})` : ''}` : `${fmt(r.accepted)} rows saved — ${j.stockMode === 'add' ? 'added to the current report' : 'whole report replaced, no duplicates'}${r.stockDups ? ` · ${fmt(r.stockDups)} repeated rows counted once` : ''}${r.changes ? ` · ${fmt(r.changes.unchanged)} unchanged, ${fmt(r.changes.added)} new or changed, ${fmt(r.changes.removed)} removed` : ''}${r.derived ? ` · also built ZMMBE KFC (${fmt(r.derived.kfc)}) and PFC (${fmt(r.derived.pfc)})${r.derived.plant ? ` · ${fmt(r.derived.plant)} plant-location row${r.derived.plant === 1 ? '' : 's'} left out` : ''}` : ''}`;
-      setJob(j.id, { state: 'done', msg: `${plan}${wk}${r.skipped > 0 ? ` · ${fmt(r.skipped)} rows without SO/LI/Material skipped` : ''}. Every open dashboard has updated.` });
+      // Plant + SO Plant pairs not in Settings → ZMMBE plants: left out, listed so they can be added
+      const notSet = r.notInSetup?.length ? ` · ${fmt(r.setupOut || 0)} row${r.setupOut === 1 ? '' : 's'} left out — Plant + SO Plant not in Settings → ZMMBE plants: ${r.notInSetup.map((m) => `${m.plant} + ${m.soPlant || '–'} (${fmt(m.rows)} rows, UR ${fmt(m.ur, 2)})`).join(', ')}` : '';
+      setJob(j.id, { state: 'done', msg: `${plan}${wk}${notSet}${r.skipped > 0 ? ` · ${fmt(r.skipped)} rows without SO/LI/Material skipped` : ''}. Every open dashboard has updated.` });
     } catch (e) {
       setJob(j.id, { state: 'error', msg: e instanceof Error ? e.message : 'Upload failed.' });
     }

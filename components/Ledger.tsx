@@ -39,6 +39,7 @@ const COLS: Col[] = [
   { id: 'coverage', label: 'Coverage', full: true, get: (l) => coverage(l), render: (l) => <span className={`pill ${COV_PILL[coverage(l)]}`}>{coverage(l)}</span> },
   { id: 'stock_plant', label: 'Plant', grp: 'Stock at', full: true, get: (l) => l.stock_plant || '' },
   { id: 'stock_sloc', label: 'St Loc', grp: 'Stock at', full: true, get: (l) => l.stock_sloc || '' },
+  { id: 'stock_link', label: 'For plant', grp: 'Stock at', full: true, get: (l) => l.stock_link || '' },
   { id: 'tn_qty', label: 'TN QTY', grp: 'TRR', n: true, get: (l) => l.tn_qty, render: (l) => q(l.tn_qty) },
   { id: 'tn_number', label: 'TN #', grp: 'TRR', get: (l) => l.tn_number || '' },
   { id: 'remarks', label: 'Remarks', get: (l) => l.remarks || '' },

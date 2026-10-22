@@ -6,6 +6,8 @@ export interface Line {
   ur: number; qi: number; block: number; assigned: number; variance: number;
   kfc_ur: number; kfc_qi: number; kfc_block: number; pfc_ur: number; pfc_qi: number; pfc_block: number;
   plant_qty: number; stock_plant: string | null; stock_sloc: string | null; at_plant: string | null;
+  /** the plant(s) the ZMMBE rows are linked to (Settings → ZMMBE plants) */
+  stock_link?: string | null;
   tn_qty: number; tn_number: string | null; dup: number;
   /** 1 when the same SO / LI / Item was in the previous week's plan and not marked Done there */
   carried?: number;
