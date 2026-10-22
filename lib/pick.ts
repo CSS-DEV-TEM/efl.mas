@@ -226,7 +226,7 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
   const rollsOf = (r: PickReq) => h.picks.filter((p) => p.req_id === r.id && !p.cancelled_at);
   const korberPicks: PickRoll[] = [];
 
-  interface Entry { r: PickReq; p: PickRoll; raw: unknown[]; kind: 'KFC' | 'PFC'; group: string; row: (string | number | null)[]; batches: { batch: string; qty: number }[] }
+  interface Entry { r: PickReq; p: PickRoll; raw: unknown[]; kind: 'KFC' | 'PFC'; sapKind: 'KFC' | 'PFC'; client: string | null; clientKind: 'KFC' | 'PFC' | null; group: string; row: (string | number | null)[]; batches: { batch: string; qty: number }[] }
   const entries: Entry[] = [];
   const bkey = (v: unknown) => String(v ?? '').trim().replace(/^0+(?=\d)/, '');
   for (const r of reqs) {
@@ -259,12 +259,18 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
         const k = x.KFC >= bt.qty - 1e-9 || x.KFC >= x.PFC ? 'KFC' : 'PFC';
         got[k] += bt.qty; x[k] = Math.max(0, x[k] - bt.qty);
       }
-      // a roll is on one sheet: where most of its QTY is
-      const kind: 'KFC' | 'PFC' = got.PFC > got.KFC ? 'PFC' : 'KFC';
+      // SAP: where most of the roll's QTY is (ZMMBE storage location of its batch)
+      const sapKind: 'KFC' | 'PFC' = got.PFC > got.KFC ? 'PFC' : 'KFC';
       const v = (c: string) => { const i = col(PL_SRC[c] ?? []); return i >= 0 ? raw[i] : null; };
+      // Korber: the roll's Client Code — MASK = PFC, MASKRE = KFC (else the client prefix of its Item Number, MASK-… / MASKRE-…)
+      const ccRaw = String((() => { const i = col(['client code']); return i >= 0 ? raw[i] : ''; })() ?? '').trim().toUpperCase();
+      const client = ccRaw || (/^([A-Z]{2,10})-/.exec(String(v('Item Number') ?? '').trim().toUpperCase())?.[1] ?? null);
+      const clientKind: 'KFC' | 'PFC' | null = client === 'MASK' ? 'PFC' : client === 'MASKRE' ? 'KFC' : null;
+      // the sheet = the Korber client (where the roll physically is); SAP location when Korber has no client
+      const kind: 'KFC' | 'PFC' = clientKind ?? sapKind;
       const row = PL_HEAD2.map((c) => (c === 'Actual Qty' ? Math.round(p.qty * 1000) / 1000 : c === 'Shade' ? p.shade ?? '' : c === 'Pick No' ? null : ((v(c) ?? '') as string | number)));
       const group = ['Asn Number', 'Po Number', 'Lot Number'].map((c) => String(v(c) ?? '').trim()).join('\u0001');
-      entries.push({ r, p, raw, kind, group, row, batches: rollBatches(r, m, p) });
+      entries.push({ r, p, raw, kind, sapKind, client, clientKind, group, row, batches: rollBatches(r, m, p) });
     }
   }
 
@@ -327,6 +333,7 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
       const tq = Math.round(g.reduce((t, m) => t + m.qty, 0) * 1000) / 1000;
       const sq = Math.round(Array.from(sap.values()).reduce((t, row) => t + Number(row[2]), 0) * 1000) / 1000;
       if (Math.abs(tq - sq) > 0.0005) { badRows.push(aoa.length); aoa.push([`CHECK: SAP lines ${sq} ≠ Actual Qty ${tq}`]); }
+      for (const m of g) if (m.e.clientKind && m.e.clientKind !== m.e.sapKind) { badRows.push(aoa.length); aoa.push([`CHECK: ${m.e.p.pallet} — Korber client ${m.e.client} (${m.e.clientKind}) but SAP location of its batch is ${m.e.sapKind}`]); }
       aoa.push([]);
     }
     const qty = Math.round(list.reduce((t, m) => t + m.qty, 0) * 1000) / 1000;
@@ -387,7 +394,7 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
   sws['!cols'] = [{ wch: multi ? 16 : 8 }, { wch: 11 }, { wch: 10 }, { wch: 10 }, { wch: 11 }, { wch: 14 }, { wch: 9 }, { wch: 52 }];
   U.book_append_sheet(wb, sws, 'Summary');
   // Tally: each pick (one SO / LI / Item) — picked QTY = KFC + PFC sheets = its SAP lines (batch by batch)
-  const tally: (string | number | null)[][] = [['Req', 'SO', 'LI', 'Item', 'Picked Qty', 'Rolls', 'KFC Qty', 'PFC Qty', 'SAP lines Qty', 'Batches (SAP lines)', 'Check']];
+  const tally: (string | number | null)[][] = [['Req', 'SO', 'LI', 'Item', 'Picked Qty', 'Rolls', 'KFC Qty', 'PFC Qty', 'SAP lines Qty', 'Batches (SAP lines)', 'Korber client / SAP location', 'Check']];
   const tq = (x: number) => Math.round(x * 1000) / 1000;
   for (const r of reqs) {
     const es = entries.filter((e) => e.r.id === r.id);
@@ -396,16 +403,19 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
     const byB = new Map<string, number>();
     for (const e of es) for (const b of e.batches) { const bb = String(b.batch).replace(/^0+(?=\d)/, '') || '–'; byB.set(bb, tq((byB.get(bb) ?? 0) + b.qty)); }
     const sapQ = tq(Array.from(byB.values()).reduce((t, x) => t + x, 0));
-    const ok = Math.abs(picked - (k + pf)) <= 0.0005 && Math.abs(picked - sapQ) <= 0.0005;
+    const clash = es.filter((e) => e.clientKind && e.clientKind !== e.sapKind);
+    const where = Array.from(new Set(es.map((e) => `${e.client ?? '–'} → ${e.kind}${e.clientKind && e.clientKind !== e.sapKind ? ` (SAP ${e.sapKind})` : ''}`))).join(' · ');
+    const ok = Math.abs(picked - (k + pf)) <= 0.0005 && Math.abs(picked - sapQ) <= 0.0005 && !clash.length;
     tally.push([reqName(r), String(r.so), num(r.li), num(r.item), picked, new Set(es.map((e) => e.p.pallet)).size, k, pf, sapQ,
-      Array.from(byB).map(([b, q0]) => `${b}: ${q0}`).join(' · '), ok ? '✓' : `✗ ${tq(picked - sapQ)}`]);
+      Array.from(byB).map(([b, q0]) => `${b}: ${q0}`).join(' · '), where,
+      ok ? '✓' : Math.abs(picked - sapQ) > 0.0005 ? `✗ ${tq(picked - sapQ)}` : `✗ ${clash.length} roll${clash.length === 1 ? '' : 's'}: Korber client ≠ SAP location`]);
   }
   const tn = tally.length;
-  tally.push(['Total', null, null, null, ...[4, 5, 6, 7, 8].map((i) => tq(tally.slice(1).reduce((t, row) => t + Number(row[i] || 0), 0))), null, tally.slice(1).every((row) => row[10] === '✓') ? '✓' : '✗']);
+  tally.push(['Total', null, null, null, ...[4, 5, 6, 7, 8].map((i) => tq(tally.slice(1).reduce((t, row) => t + Number(row[i] || 0), 0))), null, null, tally.slice(1).every((row) => row[11] === '✓') ? '✓' : '✗']);
   const tws = U.aoa_to_sheet(tally);
-  for (let i = 0; i < 11; i++) { const ref = U.encode_cell({ r: 0, c: i }); (tws[ref] as { s?: unknown }).s = ST.head; const t = U.encode_cell({ r: tn, c: i }); if (tws[t]) (tws[t] as { s?: unknown }).s = ST.top; }
-  for (let r = 1; r < tn; r++) { const ref = U.encode_cell({ r, c: 10 }); if (tws[ref] && tally[r][10] !== '✓') (tws[ref] as { s?: unknown }).s = ST.cut; }
-  tws['!cols'] = [10, 13, 5, 12, 11, 7, 10, 10, 13, 40, 9].map((w) => ({ wch: w }));
+  for (let i = 0; i < 12; i++) { const ref = U.encode_cell({ r: 0, c: i }); (tws[ref] as { s?: unknown }).s = ST.head; const t = U.encode_cell({ r: tn, c: i }); if (tws[t]) (tws[t] as { s?: unknown }).s = ST.top; }
+  for (let r = 1; r < tn; r++) { const ref = U.encode_cell({ r, c: 11 }); if (tws[ref] && tally[r][11] !== '✓') (tws[ref] as { s?: unknown }).s = ST.cut; }
+  tws['!cols'] = [10, 13, 5, 12, 11, 7, 10, 10, 13, 36, 26, 14].map((w) => ({ wch: w }));
   U.book_append_sheet(wb, tws, 'Tally');
   // the dashboard's plan table of the Pick(s): what was planned, picked, still open, UR / Korber on the shelf
   if (opts.plan?.length) {
