@@ -65,7 +65,7 @@ function DataPage() {
       <div className="page-head">
         <div>
           <h1>Data</h1>
-          <p>The Pick&apos;s ZROLLMGT (roll management). A roll is picked only when its <b>Barcode Number</b> is in ZROLLMGT at StorageBin <b>{bin}</b>, is a <b>ZCOMENT VIEW Barcode Number</b> (of the line&apos;s ZMMBE batch) and is the <b>Korber Pallet</b> (Pick Id 0). Every pick, manual roll and replacement is checked against it.</p>
+          <p>The Pick&apos;s ZROLLMGT (roll management). A roll is picked only when its <b>Barcode Number</b> is in ZROLLMGT at StorageBin <b>{bin}</b>, is a <b>ZCOMENT VIEW Barcode Number</b> (of the line&apos;s ZMMBE batch) and is the <b>Korber Pallet</b> (Pick Id 0). A roll with no ZCOMENT barcode is matched on Invoice, Item and Lot, and its <b>Korber Pallet</b> must be in ZROLLMGT at {bin}. Every pick, manual roll and replacement is checked against it.</p>
         </div>
       </div>
 
@@ -109,7 +109,7 @@ function DataPage() {
             <table className="mini">
               <thead><tr><th>Barcode Number</th><th>StorageBin</th><th>Material</th><th>Batch</th><th className="n">QTY</th><th>ZCOMENT VIEW</th><th>Korber</th><th className="n">Picked</th><th>Pick check</th></tr></thead>
               <tbody>{res.rows.map((r) => {
-                const why = !r.bin_ok ? `Bin ${r.bin || '–'}` : !r.zc_lot ? 'Not in ZCOMENT VIEW' : r.k_qty == null ? 'Not in Korber' : r.k_pick !== '0' ? `Korber Pick Id ${r.k_pick}` : r.rejected ? 'Rejected' : null;
+                const why = !r.bin_ok ? `Bin ${r.bin || '–'}` : r.k_qty == null ? 'Not in Korber' : r.k_pick !== '0' ? `Korber Pick Id ${r.k_pick}` : r.rejected ? 'Rejected' : null;
                 const full = r.k_qty != null && Number(r.picked || 0) >= Number(r.k_qty) - 0.0005;
                 return (
                   <tr key={r.barcode}>
@@ -120,7 +120,7 @@ function DataPage() {
                     <td className="small">{r.zc_lot ? <>Lot {r.zc_lot} · {r.zc_batch}{r.zc_shade ? ` · shade ${r.zc_shade}` : ''}</> : <span className="muted">–</span>}</td>
                     <td className="small">{r.k_qty != null ? <>{fmtQty(r.k_qty)}{r.k_pick !== '0' ? ` · Pick Id ${r.k_pick}` : ''}</> : <span className="muted">–</span>}</td>
                     <td className="n">{r.picked ? fmtQty(r.picked) : '–'}</td>
-                    <td>{why ? <span className="pill bad">{why}</span> : full ? <span className="pill mute">Picked in full</span> : <span className="pill ok">Pickable ✓</span>}</td>
+                    <td>{why ? <span className="pill bad">{why}</span> : full ? <span className="pill mute">Picked in full</span> : <span className="pill ok" title={r.zc_lot ? 'ZCOMENT Barcode = Korber Pallet = ZROLLMGT Barcode' : 'No ZCOMENT barcode: matched on Invoice, Item and Lot'}>Pickable ✓{r.zc_lot ? '' : ' · no ZCOMENT barcode'}</span>}</td>
                   </tr>
                 );
               })}</tbody>

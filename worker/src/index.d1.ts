@@ -1034,9 +1034,9 @@ async function handleZroll(env: Env, req: Request) {
       EXISTS (SELECT 1 FROM pick_reject r WHERE r.pallet = z.barcode) AS rejected
     FROM zroll z WHERE (?2 = '' OR z.barcode LIKE '%' || ?2 || '%' OR z.material LIKE '%' || ?2 || '%' OR z.batch LIKE '%' || ?2 || '%' OR upper(COALESCE(z.bin, '')) LIKE '%' || ?2 || '%'))`;
   const sum = await senv.DB.prepare(`${cte} SELECT COUNT(*) n, SUM(bin_ok) bin, SUM(zc_lot IS NOT NULL) zc, SUM(k_qty IS NOT NULL) korber,
-      SUM(bin_ok AND zc_lot IS NOT NULL AND k_qty IS NOT NULL AND k_pick = '0' AND NOT rejected) ok,
-      SUM(bin_ok AND zc_lot IS NOT NULL AND k_qty IS NOT NULL AND k_pick = '0' AND NOT rejected AND COALESCE(picked, 0) < k_qty - 0.0005) open FROM x`).bind(bin, q).first<Row>();
-  const where = state === 'ok' ? "bin_ok AND zc_lot IS NOT NULL AND k_qty IS NOT NULL AND k_pick = '0' AND NOT rejected" : state === 'bin' ? 'NOT bin_ok'
+      SUM(bin_ok AND k_qty IS NOT NULL AND k_pick = '0' AND NOT rejected) ok,
+      SUM(bin_ok AND k_qty IS NOT NULL AND k_pick = '0' AND NOT rejected AND COALESCE(picked, 0) < k_qty - 0.0005) open FROM x`).bind(bin, q).first<Row>();
+  const where = state === 'ok' ? "bin_ok AND k_qty IS NOT NULL AND k_pick = '0' AND NOT rejected" : state === 'bin' ? 'NOT bin_ok'
     : state === 'nozc' ? 'zc_lot IS NULL' : state === 'nokorber' ? 'k_qty IS NULL' : '1';
   const rows = (await senv.DB.prepare(`${cte} SELECT * FROM x WHERE ${where} ORDER BY bin_ok DESC, barcode LIMIT ?3`).bind(bin, q, limit).all<Row>()).results;
   const upl = await env.DB.prepare("SELECT file_name, row_count, uploaded_by, uploaded_at, rid FROM uploads WHERE src = 'zroll' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC, id DESC LIMIT 1").bind(rid).first<Row>();
@@ -1720,7 +1720,7 @@ async function handlePick(env: Env, req: Request, p: string) {
       r.available = wms || rej.has(up(r.pallet)) ? 0 : Math.max(0, r3(base - pp.before));
       if (wms) r.blocked = `Korber Pick Id ${r.pick_id}`;
       if (rej.has(up(r.pallet))) r.blocked = `Rejected: ${rej.get(up(r.pallet))}`;
-      if (!r.blocked) { const why = await gate.check(String(r.pallet)); if (why) { r.blocked = why; r.available = 0; } }
+      if (!r.blocked) { const why = await gate.check(String(r.pallet), null, false); if (why) { r.blocked = why; r.available = 0; } }
       r.picks = pp.picks;
     }
     return json({ rows });
@@ -1777,7 +1777,7 @@ async function handlePick(env: Env, req: Request, p: string) {
       // Korber Pick Id must be 0 (another number: the roll is already on a WMS pick); a rejected roll is not picked again
       const kp = await senv.DB.prepare('SELECT pick_id FROM korber WHERE pallet = ?').bind(up(r.pallet)).first<{ pick_id: string | null }>();
       if (kp && String(kp.pick_id ?? '0') !== '0' && String(kp.pick_id ?? '') !== '') throw new HttpError(409, `Pallet ${r.pallet} is on Korber Pick Id ${kp.pick_id} — only rolls with Pick Id 0 can be picked.`);
-      { const why = await gate.check(r.pallet, (r as Candidate & { barcode?: string | null }).barcode ?? null); if (why) throw new HttpError(409, `Pallet ${r.pallet} cannot be picked — ${why}.`); }
+      { const bc = (r as Candidate & { barcode?: string | null }).barcode ?? null; const why = await gate.check(r.pallet, bc, !!bc && !nb && !x.manual); if (why) throw new HttpError(409, `Pallet ${r.pallet} cannot be picked — ${why}.`); }
       const rj = await env.DB.prepare('SELECT reason, by_user, day FROM pick_reject WHERE pallet = ? ORDER BY id DESC LIMIT 1').bind(up(r.pallet)).first<Row>();
       if (rj) throw new HttpError(409, `Pallet ${r.pallet} was rejected (${rj.reason ?? '–'} · ${rj.day} · ${rj.by_user}) — it is not picked again.`);
       const q = r3(num(x.qty));
@@ -1946,7 +1946,7 @@ async function handlePick(env: Env, req: Request, p: string) {
     if (normId(k.item) !== normId(rj.item)) throw new HttpError(400, `Pallet ${pallet} is item ${k.item}, not ${rj.item}.`);
     if (String(k.pick_id ?? '0') !== '0' && String(k.pick_id ?? '') !== '') throw new HttpError(409, `Pallet ${pallet} is on Korber Pick Id ${k.pick_id}.`);
     if (await env.DB.prepare('SELECT 1 FROM pick_reject WHERE pallet = ?').bind(pallet).first()) throw new HttpError(409, `Pallet ${pallet} was rejected itself.`);
-    { const why = await (await makeGate(senv)).check(pallet); if (why) throw new HttpError(409, `Pallet ${pallet} cannot be picked — ${why}.`); }
+    { const why = await (await makeGate(senv)).check(pallet, null, false); if (why) throw new HttpError(409, `Pallet ${pallet} cannot be picked — ${why}.`); }
     const pp = await palletPicks(env, pallet);
     const base = pp.base ?? Number(k.qty);
     const avail = Math.max(0, r3(base - pp.before));
@@ -2311,17 +2311,27 @@ async function makeGate(env: Env) {
   const bin = up(st.pickBin || 'EXPO-FIX').replace(/\s+/g, '');
   const on = st.rollGate !== false;
   const loaded = on ? !!(await env.DB.prepare('SELECT 1 FROM zroll LIMIT 1').first()) : true;
-  const check = async (pallet: string, barcode?: string | null): Promise<string | null> => {
+  // zc = the roll came by its ZCOMENT VIEW Barcode Number (that barcode must be a ZCOMENT one); a roll with no ZCOMENT barcode
+  // (matched on invoice / lot / supplier HU) needs only its Korber Pallet in ZROLLMGT at the bin
+  const check = async (pallet: string, barcode?: string | null, zc = true): Promise<string | null> => {
     if (!on) return null;
     if (!loaded) return 'No ZROLLMGT uploaded for this Pick';
     const ids = JSON.stringify(Array.from(new Set([up(barcode), up(pallet)].filter(Boolean))));
     const zr = (await env.DB.prepare('SELECT barcode, bin FROM zroll WHERE barcode IN (SELECT value FROM json_each(?))').bind(ids).all<Row>()).results;
     if (!zr.length) return 'Not in ZROLLMGT';
     if (!zr.some((z) => up(z.bin).replace(/\s+/g, '') === bin)) return `ZROLLMGT StorageBin ${Array.from(new Set(zr.map((z) => z.bin || '–'))).join(' / ')} — must be ${bin}`;
-    if (!(await env.DB.prepare('SELECT 1 FROM zcoment WHERE barcode IN (SELECT value FROM json_each(?)) LIMIT 1').bind(ids).first())) return 'Not a ZCOMENT VIEW Barcode Number';
+    if (zc && !(await env.DB.prepare('SELECT 1 FROM zcoment WHERE barcode IN (SELECT value FROM json_each(?)) LIMIT 1').bind(ids).first())) return 'Not a ZCOMENT VIEW Barcode Number';
     return null;
   };
-  return { on, bin, loaded, check };
+  /** of these Korber pallets, the ones in ZROLLMGT at the bin (all of them when the check is off) */
+  const atBin = async (pallets: string[]): Promise<Set<string>> => {
+    const ps = Array.from(new Set(pallets.map(up).filter(Boolean)));
+    if (!on) return new Set(ps);
+    if (!loaded || !ps.length) return new Set();
+    const zr = (await env.DB.prepare('SELECT barcode, bin FROM zroll WHERE barcode IN (SELECT value FROM json_each(?))').bind(JSON.stringify(ps)).all<Row>()).results;
+    return new Set(zr.filter((z) => up(z.bin).replace(/\s+/g, '') === bin).map((z) => up(z.barcode)));
+  };
+  return { on, bin, loaded, check, atBin };
 }
 
 /**
@@ -2398,13 +2408,12 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
     const rows0 = (await env.DB.prepare('SELECT * FROM zcoment WHERE lot = ? ORDER BY sys_roll, roll_no').bind(lot.lot).all<Row>()).results;
     lotInfo.push({ lot: lot.lot, batch: lot.batch, qty: lot.qty, need: lot.lot_need, ur: lot.zmmbe_ur, qty_ok: true, invoice: lot.invoice, po: lot.po, vendor_batch: lot.vendor_batch, sloc: lot.sloc, rolls: rows0.length, roll_sum: 0, noShade: !rows0.length });
     // the Korber rolls of this lot's invoice + item (must), Pick Id 0
-    const base = (await env.DB.prepare(`SELECT * FROM korber WHERE item = ? AND ${PICKABLE}`).bind(normId(lot.material)).all<Row>()).results.filter((k) => !lot.invoice || invRoot(k.invoice) === invRoot(lot.invoice));
+    const base0 = (await env.DB.prepare(`SELECT * FROM korber WHERE item = ? AND ${PICKABLE}`).bind(normId(lot.material)).all<Row>()).results.filter((k) => !lot.invoice || invRoot(k.invoice) === invRoot(lot.invoice));
+    // ZROLLMGT check: a roll without a ZCOMENT barcode is picked only when its Korber Pallet is in ZROLLMGT at the bin
+    const okBin = await gate.atBin(base0.map((k) => String(k.pallet)));
+    const base = base0.filter((k) => okBin.has(up(k.pallet)));
+    const offBin = base0.length - base.length;
     const usable = (k: Row) => { if (rejected.has(up(k.pallet))) { rejectedSkip++; return false; } return true; };
-    if (!rows0.length && gate.on) {
-      // ZROLLMGT check: a roll is picked by its ZCOMENT VIEW Barcode Number only
-      steps.push(`Inspection lot ${lot.lot} (batch ${lot.batch}): no rolls in ZCOMENT VIEW — nothing to pick (a roll needs its ZCOMENT Barcode Number in ZROLLMGT at ${gate.bin} and in Korber).`);
-      continue;
-    }
     if (!rows0.length) {
       // 4c. no rolls in ZCOMENT: the rolls of the invoice + item + Lot Number (= Vendor Batch), Po preferred
       const vb = up(lot.vendor_batch);
@@ -2415,11 +2424,11 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
       if (!free.length) {
         // Lot Number not found: offered by Lot Number (the invoice's other lots of the item)
         const other = base.filter((k) => up(k.lot) !== vb && usable(k));
-        steps.push(`Inspection lot ${lot.lot}: no Korber roll with Lot Number ${lot.vendor_batch ?? '–'} on invoice ${lot.invoice ?? '–'}${other.length ? ' — choose the rolls by Lot Number' : ''}.`);
+        steps.push(`Inspection lot ${lot.lot}: no Korber roll with Lot Number ${lot.vendor_batch ?? '–'} on invoice ${lot.invoice ?? '–'}${gate.on && offBin ? ` in ZROLLMGT at ${gate.bin} (${offBin} roll${offBin === 1 ? '' : 's'} of the invoice + item are not)` : ''}${other.length ? ' — choose the rolls by Lot Number' : ''}.`);
         if (other.length) nobarcode.push({ lot: lot.lot, batch: lot.batch, material: lot.material, vendor_batch: lot.vendor_batch, roll_no: null, barcode: null, roll_qty: lot.lot_need, shade: null, invoice: lot.invoice, po: lot.po, noShade: true, lotChoice: true,
           options: await nbOptions(env, other, lot, null) });
         else manual.push({ lot: lot.lot, batch: lot.batch, material: lot.material, vendor_batch: lot.vendor_batch, roll_no: null, barcode: null, roll_qty: lot.lot_need, shade: null, invoice: lot.invoice, po: lot.po,
-          reason: `No Korber roll of item ${lot.material} on invoice ${lot.invoice ?? '–'} (Pick Id 0)`, suggest: [] });
+          reason: `No Korber roll of item ${lot.material} on invoice ${lot.invoice ?? '–'} (Pick Id 0${gate.on ? `, in ZROLLMGT at ${gate.bin}` : ''})`, suggest: [] });
         continue;
       }
       // other SO lines whose inspection lots have the same Lot Number on the same invoice: the rolls are shared — suggested, not selected
@@ -2481,7 +2490,8 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
           continue;
         }
       }
-      if (gate.on) { if (!sh.barcode) block('No Barcode Number in ZCOMENT VIEW'); else if (!k) block(`Barcode ${sh.barcode} is not in Korber Inventory`); continue; }
+      // ZROLLMGT check: a ZCOMENT barcode must be the Korber Pallet; a roll with no barcode is matched below (its Korber roll must be in ZROLLMGT at the bin)
+      if (gate.on && sh.barcode) { if (!k) block(`Barcode ${sh.barcode} is not in Korber Inventory`); continue; }
       // 4b. no barcode / not in Korber: invoice + item (must), Lot Number (must, else by Lot Number), Po and Supplier Hu (preferred)
       const vb = up(sh.vendor_batch || lot.vendor_batch), hu = up(sh.roll_no);
       const others: Row[] = [];
@@ -2505,7 +2515,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
       if (opts.length) nobarcode.push({ lot: lot.lot, batch: lot.batch, material: lot.material, vendor_batch: sh.vendor_batch, roll_no: sh.roll_no, barcode: null, roll_qty: sh.roll_qty, shade, invoice: lot.invoice, po: lot.po,
         ...(sh.barcode ? { zcBarcode: sh.barcode } : {}), ...(byLot.length ? {} : { lotChoice: true }), options: opts, done: opts.every((o) => Number(o.picked_before) > 0 && Number(o.available) <= 1e-9) });
       else manual.push({ lot: lot.lot, batch: lot.batch, material: lot.material, vendor_batch: sh.vendor_batch, roll_no: sh.roll_no, barcode: sh.barcode ?? null, roll_qty: sh.roll_qty, shade, invoice: lot.invoice, po: lot.po,
-        reason: `No Korber roll of item ${lot.material} on invoice ${lot.invoice ?? '–'}${sh.barcode ? ` (barcode ${sh.barcode} is not in Korber)` : ''}`, suggest: [] });
+        reason: `No Korber roll of item ${lot.material} on invoice ${lot.invoice ?? '–'}${sh.barcode ? ` (barcode ${sh.barcode} is not in Korber)` : ''}${gate.on ? ` in ZROLLMGT at ${gate.bin}` : ''}`, suggest: [] });
     }
   }
   if (batchSkip) steps.push(`${batchSkip} ZCOMENT VIEW roll${batchSkip === 1 ? '' : 's'} of a batch that is not this line's ZMMBE batch with UR (${Array.from(urBatches).join(', ')}) — left out.`);

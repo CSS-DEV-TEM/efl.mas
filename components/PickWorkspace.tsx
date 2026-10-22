@@ -504,7 +504,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
             <div className="pk-sec">
               <div className="pk-sec-head">
                 <h3>Matched rolls <span className="pill ok">{open.length}</span>{gone.length > 0 && <span className="muted small"> · {gone.length} already picked</span>}</h3>
-                {c.gate?.on ? <span className="muted small">Only rolls whose ZCOMENT VIEW Barcode Number (of this line&apos;s ZMMBE batch) = Korber Pallet and is in ZROLLMGT at StorageBin <b>{c.gate.bin}</b>. QTY = Korber Actual Qty.</span> :
+                {c.gate?.on ? <span className="muted small">Only rolls in ZROLLMGT at StorageBin <b>{c.gate.bin}</b>: the ZCOMENT VIEW Barcode Number (of this line&apos;s ZMMBE batch) = Korber Pallet = ZROLLMGT Barcode Number. A roll with no ZCOMENT barcode is matched on Invoice, Item, Lot (Po, Supplier Hu) and its Korber Pallet must be in ZROLLMGT at {c.gate.bin}. QTY = Korber Actual Qty.</span> :
                 <span className="muted small">Barcode = Pallet (or Supplier Hu = Vendor Roll No) with Lot, Invoice and Po (ZCOMENT), or straight from ZINR: Item, Lot Number, Invoice and Po — a Supplier Hu that is this lot's Vendor Roll No makes it this line's roll. QTY = Korber Actual Qty. The system selects them for the plan QTY — rolls of a PO shared by several SO lines you tick yourself.</span>}
                 <span style={{ flex: 1 }} />
                 {open.length > 0 && <button type="button" className="btn sm" onClick={() => applyAuto(c, Object.fromEntries([...manualSel, ...nbSel]))}>Auto select</button>}
