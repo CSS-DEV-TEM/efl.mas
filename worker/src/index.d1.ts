@@ -404,7 +404,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 52; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 53; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -2666,7 +2666,19 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
       // the same Material (a ZROLLMGT row without Material counts; the Korber item is checked below)
       const zr = zr0.filter((z) => !z.material || normId(z.material) === mat || normId(z.material) === normId(st.material));
       if (!zr.length) { steps.push(`Batch ${st.batch}: ZROLLMGT has no roll with System Batch ${bt}${zr0.length ? ` of material ${mat} (${zr0.length} of another material)` : ''}.`); continue; }
-      const lot0: Row = lots.find((l) => normId(l.batch) === bt) ?? { lot: '', batch: bt, material: st.material };
+      // ZINSR must agree too: Sales Order + Line Item + Material + Batch = the plan line's SO / LI / Item and this batch
+      const zi = lotsByBatch.find((x) => normId(x.st.batch) === bt)?.z ?? [];
+      if (!zi.length) {
+        steps.push(`Batch ${st.batch}: ZINSR has no Sales Order ${line.so} + Line Item ${line.li} + Material ${mat} + Batch ${bt} — its ${zr.length} ZROLLMGT roll${zr.length === 1 ? ' is' : 's are'} not taken.`);
+        for (const z of zr) {
+          const pal = up(z.barcode);
+          if (rolls.has(pal) || seenBlock.has(pal)) continue;
+          seenBlock.add(pal);
+          blocked.push({ lot: '–', batch: st.batch, roll_no: null, barcode: pal, shade: null, pallet: pal, qty: Number(z.qty) || null, why: `ZINSR has no SO ${line.so} / LI ${line.li} / Material ${mat} / Batch ${bt}` });
+        }
+        continue;
+      }
+      const lot0: Row = lots.find((l) => normId(l.batch) === bt) ?? { ...zi[0], lot_need: 0 };
       let added = 0, known = 0, off = 0, noK = 0, other = 0;
       for (const z of zr) {
         const pal = up(z.barcode);
@@ -2689,7 +2701,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
         const l1 = sh?.lot ? { ...lot0, lot: sh.lot } : lot0;
         addRoll(await korberBase(k, l1, { shade: (sh?.shade as string) ?? null, zroll: true, via: kp !== pal ? kp : null,
           checks: { item: true, batch: true, bin: true, lot: null, hu: null, invoice: lot0.invoice && k.invoice ? invRoot(k.invoice) === invRoot(lot0.invoice) : null },
-          qtyNote: `ZMMBE batch ${st.batch} = ZROLLMGT System Batch → Barcode ${pal}${kp !== pal ? ` (Korber pallet ${kp})` : ''} = Korber Pallet${gate.on ? ` · StorageBin ${gate.bin}${gate.hasStatus ? ' · Status UR' : ''}` : ''}` }), l1);
+          qtyNote: `ZMMBE batch ${st.batch} = ZINSR SO ${line.so} / LI ${line.li} / Material / Batch (ZINSR lot ${zi.map((l) => l.lot).join(', ')}) = ZROLLMGT System Batch → Barcode ${pal}${kp !== pal ? ` (Korber pallet ${kp})` : ''} = Korber Pallet${gate.on ? ` · StorageBin ${gate.bin}${gate.hasStatus ? ' · Status UR' : ''}` : ''}` }), l1);
         added++;
       }
       steps.push(`Batch ${st.batch}: ZROLLMGT has ${zr.length} roll${zr.length === 1 ? '' : 's'} with this System Batch${added ? ` — ${added} matched straight to Korber` : ''}${known ? `, ${known} already matched` : ''}${off ? `, ${off} not pickable (bin / status)` : ''}${noK ? `, ${noK} not in this Pick's Korber` : ''}${other ? `, ${other} another item in Korber` : ''}.`);
@@ -2705,7 +2717,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
   if (batchSkip) steps.push(`${batchSkip} ZCOMENT VIEW roll${batchSkip === 1 ? '' : 's'} of a batch that is not this line's ZMMBE batch with UR (${Array.from(urBatches).join(', ')}) — left out.`);
   if (blocked.length) {
     const why = new Map<string, number>();
-    for (const b0 of blocked) { const w = String(b0.why).replace(/^Barcode \S+ is not in Korber Inventory$/, 'Barcode not in Korber Inventory').replace(/^ZROLLMGT StorageBin .*/, `ZROLLMGT StorageBin not ${gate.bin}`).replace(/^ZROLLMGT System Batch .*/, 'ZROLLMGT System Batch not the ZMMBE batch').replace(/^ZROLLMGT Status .*/, 'ZROLLMGT Status not UR'); why.set(w, (why.get(w) || 0) + 1); }
+    for (const b0 of blocked) { const w = String(b0.why).replace(/^Barcode \S+ is not in Korber Inventory$/, 'Barcode not in Korber Inventory').replace(/^ZROLLMGT StorageBin .*/, `ZROLLMGT StorageBin not ${gate.bin}`).replace(/^ZROLLMGT System Batch .*/, 'ZROLLMGT System Batch not the ZMMBE batch').replace(/^ZROLLMGT Status .*/, 'ZROLLMGT Status not UR').replace(/^ZINSR has no SO .*/, 'ZINSR SO / LI / Material / Batch not matched'); why.set(w, (why.get(w) || 0) + 1); }
     steps.push(`${blocked.length} roll${blocked.length === 1 ? '' : 's'} not pickable (ZROLLMGT check): ${Array.from(why).map(([w, n]) => `${n} × ${w}`).join(' · ')}.`);
   }
   if (notPickable) steps.push(`${notPickable} roll${notPickable === 1 ? ' is' : 's are'} already on a Korber (WMS) pick — Pick Id not 0 — and left out.`);

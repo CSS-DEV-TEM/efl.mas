@@ -531,7 +531,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
             <div className="pk-sec">
               <div className="pk-sec-head">
                 <h3>Matched rolls <span className="pill ok">{open.length}</span>{gone.length > 0 && <span className="muted small"> · {gone.length} already picked</span>}</h3>
-                {c.gate?.on ? <span className="muted small">Only rolls in ZROLLMGT at StorageBin <b>{c.gate.bin}</b> whose System Batch is this line&apos;s ZMMBE batch: ZMMBE batch → ZROLLMGT System Batch → Barcode Number = Korber Pallet, or the ZCOMENT VIEW Barcode Number (of this line&apos;s ZMMBE batch) = Korber Pallet = ZROLLMGT Barcode Number. A roll with no ZCOMENT barcode is matched on Invoice, Item, Lot (Po, Supplier Hu) and its Korber Pallet must be in ZROLLMGT at {c.gate.bin}. QTY = Korber Actual Qty.</span> :
+                {c.gate?.on ? <span className="muted small">Only rolls in ZROLLMGT at StorageBin <b>{c.gate.bin}</b> whose System Batch is this line&apos;s ZMMBE batch: ZMMBE batch + ZINSR (Sales Order, Line Item, Material, Batch = this line) → ZROLLMGT System Batch → Barcode Number = Korber Pallet, or the ZCOMENT VIEW Barcode Number (of this line&apos;s ZMMBE batch) = Korber Pallet = ZROLLMGT Barcode Number. A roll with no ZCOMENT barcode is matched on Invoice, Item, Lot (Po, Supplier Hu) and its Korber Pallet must be in ZROLLMGT at {c.gate.bin}. QTY = Korber Actual Qty.</span> :
                 <span className="muted small">Barcode = Pallet (or Supplier Hu = Vendor Roll No) with Lot, Invoice and Po (ZCOMENT), or straight from ZINR: Item, Lot Number, Invoice and Po — a Supplier Hu that is this lot's Vendor Roll No makes it this line's roll. QTY = Korber Actual Qty. The system selects them for the plan QTY — rolls of a PO shared by several SO lines you tick yourself.</span>}
                 <span style={{ flex: 1 }} />
                 {open.length > 0 && <button type="button" className="btn sm" onClick={() => applyAuto(c, Object.fromEntries([...manualSel, ...nbSel]))}>Auto select</button>}
@@ -560,7 +560,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
                           </span> : ''}</td>
                           <td>{r.needsConfirm ? <span className="pill warn" title={`${r.warnings.join('\n')}\n\n${checkText(r.checks)}`}>Check: {r.warnings[0]}</span>
                             : r.pool ? <span className={`pill ${r.suggested ? 'ok' : 'info'}`} title={r.qtyNote || ''}>{r.suggested ? 'Suggested · ' : ''}Lot shared by {r.pool} SO lines — tick</span>
-                            : r.zroll && !r.barcode ? <span className="pill ok" title={r.qtyNote || ''}>ZROLLMGT batch ✓ (System Batch = ZMMBE batch)</span>
+                            : r.zroll && !r.barcode ? <span className="pill ok" title={r.qtyNote || ''}>ZROLLMGT batch ✓ (ZMMBE + ZINSR SO / LI / Batch = System Batch)</span>
                             : r.direct ? <span className="pill ok" title={r.qtyNote || ''}>ZINR → Korber ✓ (Item, Lot, Invoice, Po{r.checks.hu ? ', Roll no' : ''})</span>
                             : <span className="pill ok" title={`${checkText(r.checks)}${r.qtyNote ? `\n\n${r.qtyNote}` : ''}`}>All match ✓{r.korberQty ? ' · Korber qty' : r.qtyNote ? ' · split roll' : ''}</span>}</td>
                         </tr>
