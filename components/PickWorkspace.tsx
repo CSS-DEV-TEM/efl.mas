@@ -943,6 +943,7 @@ function RejectedRolls({ canEdit, toast, onChanged }: { canEdit: boolean; toast:
   );
 }
 
+interface FollowCheck { ref: string; ur?: number; need?: number; avail?: number; can?: number; rolls?: number; blocked?: number; status: 'ok' | 'part' | 'none'; why: string | null }
 interface Follow {
   ref: string; week: string; plan: string; date: string | null; so: string; li: string; item: string; plant: string | null; owner: string | null;
   qty: number; picked: number; balance: number; first_picked: string | null; last_at: string | null; rolls: number; closed_short: boolean;
@@ -961,6 +962,17 @@ function BalanceFollow({ rid, label, canEdit, toast, onChanged }: { rid: string;
   const load = useCallback(() => { api<{ follow: Follow[] }>('/api/follow?state=' + state).then((r) => setRows(r.follow)).catch(() => setRows([])); }, [state]);
   useEffect(() => { load(); }, [load]);
   const isPick = rid.includes('~');
+  // can each open balance be picked from this Pick's reports (ZMMBE UR → ZINSR → ZCOMENT → Korber, ZROLLMGT)?
+  const [chk, setChk] = useState<Record<string, FollowCheck> | null>(null);
+  const [checking, setChecking] = useState(false);
+  const runCheck = useCallback((list: Follow[]) => {
+    const items = list.filter((f) => !f.closed).slice(0, 60).map((f) => ({ ref: f.ref, bal: f.balance }));
+    if (!isPick || !items.length) { setChk(null); return; }
+    setChecking(true);
+    api<{ check: FollowCheck[] }>(`/api/follow?check=${encodeURIComponent(rid)}&items=${encodeURIComponent(JSON.stringify(items))}`)
+      .then((r) => setChk(Object.fromEntries(r.check.map((x) => [x.ref, x])))).catch(() => setChk(null)).finally(() => setChecking(false));
+  }, [rid, isPick]);
+  useEffect(() => { if (rows) runCheck(rows); }, [rows, runCheck]);
   const act = async (f: Follow, action: 'add' | 'close' | 'reopen') => {
     let note: string | null = null;
     if (action === 'close') { note = window.prompt(`Close the balance ${fmtQty(f.balance)} of ${f.so} / ${f.li} / ${f.item}? Reason (e.g. Customer cut the QTY):`, 'Not needed'); if (note === null) return; }
@@ -980,10 +992,11 @@ function BalanceFollow({ rid, label, canEdit, toast, onChanged }: { rid: string;
       <div className="sheet-top">
         <div>
           <h2 id="bf-title">Balance follow-up {state !== 'closed' && openN > 0 && <span className="pill warn" style={{ marginLeft: 6 }}>{openN} open · {fmtQty(openQty)}</span>}</h2>
-          <p className="sub" style={{ margin: 0 }}>Every plan line picked with less than its QTY (all days, all Picks, all users) stays here until the balance is picked. <b>Add to this Pick</b> puts the balance into {isPick ? (label || 'the Pick on screen') : 'the Pick on screen'}; what is picked there counts for the original line.</p>
+          <p className="sub" style={{ margin: 0 }}>Every plan line picked with less than its QTY (all days, all Picks, all users) stays here until the balance is picked. <b>Add to this Pick</b> puts the balance into {isPick ? (label || 'the Pick on screen') : 'the Pick on screen'}; what is picked there counts for the original line.{isPick ? ' “Pick from …?” checks each balance against that Pick’s uploaded ZMMBE, ZINSR, ZCOMENT VIEW, Korber and ZROLLMGT.' : ''}</p>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           <input type="search" placeholder="SO, LI, Item…" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search balances" style={{ width: 160 }} />
+          {isPick && <button className="btn sm" disabled={checking || !rows?.length} onClick={() => rows && runCheck(rows)} title="Check the open balances against this Pick's ZMMBE, ZINSR, ZCOMENT VIEW, Korber and ZROLLMGT">{checking ? 'Checking…' : 'Check this Pick'}</button>}
           <div className="seg" role="group">
             {(['open', 'closed', 'all'] as const).map((k) => <button key={k} className={state === k ? 'on' : ''} onClick={() => setState(k)}>{k === 'open' ? 'Open' : k === 'closed' ? 'Closed' : 'All'}</button>)}
           </div>
@@ -992,7 +1005,7 @@ function BalanceFollow({ rid, label, canEdit, toast, onChanged }: { rid: string;
       {!rows ? <Loader label="Loading balances…" /> : !list.length ? <p className="muted">{state === 'open' ? 'No balance to follow — every picked line got its full QTY.' : 'Nothing here.'}</p> : (
         <div className="table-wrap" style={{ maxHeight: 380 }}>
           <table className="mini">
-            <thead><tr><th>Plan</th><th>SO / LI</th><th>Item</th><th>Plant</th><th className="n">Plan QTY</th><th className="n">Picked</th><th className="n">Balance</th><th>Last pick</th><th>Balance in Picks</th><th>Status</th>{canEdit && <th></th>}</tr></thead>
+            <thead><tr><th>Plan</th><th>SO / LI</th><th>Item</th><th>Plant</th><th className="n">Plan QTY</th><th className="n">Picked</th><th className="n">Balance</th>{isPick && <th>Pick from {label || 'this Pick'}?</th>}<th>Last pick</th><th>Balance in Picks</th><th>Status</th>{canEdit && <th></th>}</tr></thead>
             <tbody>{list.map((f) => {
               const here = f.in_picks.some((k) => k.week === rid);
               const waiting = f.in_picks.some((k) => k.picked <= 0);
@@ -1001,6 +1014,11 @@ function BalanceFollow({ rid, label, canEdit, toast, onChanged }: { rid: string;
                   <td className="small">{f.plan}{f.owner ? <div className="muted">{f.owner}</div> : null}</td>
                   <td>{f.so} / {f.li}</td><td>{f.item}</td><td>{f.plant || '–'}</td>
                   <td className="n">{fmtQty(f.qty)}</td><td className="n">{fmtQty(f.picked)}</td><td className="n"><b>{fmtQty(f.balance)}</b></td>
+                  {isPick && <td className="small">{f.closed ? '–' : (() => { const k = chk?.[f.ref]; if (!k) return checking ? <span className="muted">checking…</span> : '–';
+                    const t = `UR ${fmtQty(Number(k.ur ?? 0))} · rolls ${fmtQty(Number(k.avail ?? 0))} (${k.rolls ?? 0})${k.blocked ? ` · ${k.blocked} not pickable (ZROLLMGT)` : ''}`;
+                    return k.status === 'ok' ? <span className="pill ok" title={t}>Pickable ✓ · {fmtQty(Number(k.can))} · {k.rolls} roll{k.rolls === 1 ? '' : 's'}</span>
+                      : k.status === 'part' ? <span className="pill accent" title={t}>Part · {fmtQty(Number(k.can))} of {fmtQty(f.balance)}</span>
+                      : <span className="pill bad" title={t}>{k.why || 'Not pickable'}</span>; })()}</td>}
                   <td className="small">{f.last_at ? <span title={new Date(f.last_at).toLocaleString()}>{ago(f.last_at)}</span> : '–'}</td>
                   <td className="small">{f.in_picks.length ? f.in_picks.map((k) => <div key={k.week}>{k.plan}: {fmtQty(k.picked)} / {fmtQty(k.qty)}</div>) : '–'}</td>
                   <td>{f.closed ? <span className="pill mute" title={[f.closed_by, f.closed_at ? new Date(f.closed_at).toLocaleString() : ''].filter(Boolean).join(' · ')}>Closed · {f.closed_note}</span>

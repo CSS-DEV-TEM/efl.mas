@@ -157,7 +157,110 @@ function openPop(th: HTMLTableCellElement) {
   q.focus();
 }
 
+// ---------------------------------------------------------------- Excel export of any table
+/**
+ * Every data table gets an "Excel" button (top-right corner, shown when the pointer is over the table): the rows as they are
+ * shown (column filters applied) go to an .xlsx named after the card's title. The button lives on <body>, not in the table.
+ */
+let xbtn: HTMLButtonElement | null = null;
+let xTable: HTMLTableElement | null = null;
+const TABLES = 'main table, .modal table';
+const wrapOf = (t: HTMLTableElement) => (t.closest('.table-wrap') as HTMLElement | null) ?? t;
+/** a cell's text as it reads on screen: inline pieces run together, block pieces (a second line) get a space; buttons are left out */
+function exportText(td: Element | undefined | null): string {
+  if (!td) return '';
+  const inp = td.querySelector('input:not([type=checkbox]):not([type=radio]), select') as HTMLInputElement | HTMLSelectElement | null;
+  if (inp) return inp.value.replace(/\s+/g, ' ').trim();
+  const blockOf = (n: Node) => { let e = n.parentElement; while (e && e !== td && (getComputedStyle(e).display || 'inline').startsWith('inline')) e = e.parentElement; return e; };
+  let out = '', prev: Element | null | undefined;
+  const w = document.createTreeWalker(td, NodeFilter.SHOW_TEXT);
+  for (let n = w.nextNode(); n; n = w.nextNode()) {
+    if (n.parentElement?.closest('button, .tx-skip, svg')) continue;
+    const t = n.nodeValue || '';
+    if (!t.trim()) { if (t && out && !out.endsWith(' ')) out += ' '; continue; }
+    const b = blockOf(n);
+    if (prev !== undefined && b !== prev && out && !out.endsWith(' ')) out += ' ';
+    out += t; prev = b;
+  }
+  return out.replace(/\s+/g, ' ').trim();
+}
+function titleOf(t: HTMLTableElement) {
+  const box = t.closest('details, section, .modal, .card');
+  const h0 = box?.querySelector('h2, h3, summary h3, .modal-head h2');
+  // the heading without its badges (counts, totals)
+  const h = h0 ? (() => { const c = h0.cloneNode(true) as Element; c.querySelectorAll('.pill, .muted, button').forEach((x) => x.remove()); return c; })() : null;
+  return ((h?.textContent || document.title || 'Table').replace(/\s+/g, ' ').trim().replace(/[\\/:*?"<>|[\]]+/g, ' ').slice(0, 60).trim()) || 'Table';
+}
+const asNum = (v: string) => {
+  const t = v.replace(/,/g, '');
+  return /^-?\d+(\.\d+)?$/.test(t) && !/^0\d/.test(t) && t.replace(/[-.]/g, '').length <= 15 ? Number(t) : null;
+};
+async function exportTable(t: HTMLTableElement) {
+  const XLSX = await import('xlsx-js-style');
+  const head = Array.from(t.tHead?.rows ?? []);
+  const rows = bodyRows(t).filter((r) => !r.hasAttribute('data-tf-hide'));
+  // columns: the header cells (colspans spread), skipping a column that is only a checkbox
+  const hr = head[head.length - 1];
+  const width = Math.max(hr ? Array.from(hr.cells).reduce((n, c) => n + (c.colSpan || 1), 0) : 0, ...rows.map((r) => Array.from(r.cells).reduce((n, c) => n + (c.colSpan || 1), 0)));
+  const cols = Array.from({ length: width }, (_, i) => i);
+  const hdr = cols.map((c) => (hr ? exportText(cellAt(hr, c)) : ''));
+  const keep = cols.filter((c) => hdr[c] !== '' || rows.some((r) => exportText(cellAt(r, c)) !== ''));
+  const aoa: (string | number)[][] = [keep.map((c) => hdr[c] || `Column ${c + 1}`)];
+  for (const r of rows) {
+    if (r.cells.length === 1 && (r.cells[0].colSpan || 1) > 1) { aoa.push([exportText(r.cells[0])]); continue; } // a group row
+    aoa.push(keep.map((c) => { const v = exportText(cellAt(r, c)); const n = asNum(v); return n ?? v; }));
+  }
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = keep.map((_, i) => ({ wch: Math.min(50, Math.max(8, ...aoa.slice(0, 300).map((r) => String(r[i] ?? '').length + 1))) }));
+  ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: Math.max(0, aoa.length - 1), c: keep.length - 1 } }) };
+  ws['!freeze'] = { xSplit: 0, ySplit: 1 };
+  for (let i = 0; i < keep.length; i++) {
+    const a = XLSX.utils.encode_cell({ r: 0, c: i });
+    if (ws[a]) ws[a].s = { font: { bold: true, color: { rgb: 'FFFFFF' } }, fill: { fgColor: { rgb: '1F3A5F' } }, alignment: { vertical: 'center', wrapText: true } };
+  }
+  const wb = XLSX.utils.book_new();
+  const title = titleOf(t);
+  XLSX.utils.book_append_sheet(wb, ws, title.slice(0, 31) || 'Table');
+  const stamp = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 16).replace('T', '_').replace(':', '');
+  XLSX.writeFile(wb, `${title.replace(/→/g, '-').replace(/\s+/g, '_')}_${stamp}.xlsx`, { cellStyles: true });
+}
+function placeBtn(t: HTMLTableElement | null) {
+  if (!xbtn) return;
+  if (!t || !t.isConnected || !bodyRows(t).length) { xbtn.style.display = 'none'; xTable = null; return; }
+  xTable = t;
+  const r = wrapOf(t).getBoundingClientRect();
+  if (r.bottom < 0 || r.top > window.innerHeight) { xbtn.style.display = 'none'; return; }
+  xbtn.style.display = 'block';
+  const navH = (document.querySelector('.bar') as HTMLElement | null)?.getBoundingClientRect().bottom ?? 0;
+  xbtn.style.top = `${Math.min(r.bottom - 26, Math.max(navH + 4, r.top + 4))}px`;
+  // left of the last column's filter funnel (its right edge)
+  xbtn.style.left = `${Math.max(4, Math.min(window.innerWidth - xbtn.offsetWidth - 30, r.right - xbtn.offsetWidth - 30))}px`;
+}
+
 export default function TableFilters() {
+  useEffect(() => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'tx-btn'; b.textContent = '⤓ Excel'; b.title = 'Download this table as an Excel report (the rows shown, with the filters)';
+    b.style.display = 'none';
+    b.onclick = (e) => { e.stopPropagation(); const t = xTable; if (t) void exportTable(t).catch(() => alert('Could not make the Excel file.')); };
+    document.body.append(b); xbtn = b;
+    const over = (e: MouseEvent) => {
+      const el = e.target as Element | null;
+      if (!el || el === b) return;
+      const t = el.closest?.(TABLES) as HTMLTableElement | null ?? (el.closest?.('.table-wrap')?.querySelector('table') as HTMLTableElement | null);
+      if (t && !t.hasAttribute('data-noexport')) placeBtn(t);
+      else if (!el.closest?.('.tx-btn')) { if (xTable && !wrapOf(xTable).contains(el)) placeBtn(null); }
+    };
+    const reflow = () => { if (xTable) placeBtn(xTable); };
+    document.addEventListener('mouseover', over);
+    window.addEventListener('scroll', reflow, true);
+    window.addEventListener('resize', reflow);
+    return () => { document.removeEventListener('mouseover', over); window.removeEventListener('scroll', reflow, true); window.removeEventListener('resize', reflow); b.remove(); xbtn = null; };
+  }, []);
+  return <TableFiltersCore />;
+}
+
+function TableFiltersCore() {
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const run = () => { clearTimeout(timer); timer = setTimeout(() => mark(document), 120); };

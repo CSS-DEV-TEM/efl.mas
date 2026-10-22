@@ -395,7 +395,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 45; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 46; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -928,6 +928,37 @@ async function reportStatus(env: Env, rid: string) {
  */
 async function handleFollow(env: Env, req: Request) {
   const sp = new URL(req.url).searchParams;
+  // GET /api/follow?check=<rid>: can the open balances be picked from that Pick's reports (ZMMBE UR, ZINSR, ZCOMENT, Korber, ZROLLMGT)?
+  if (req.method === 'GET' && parseRound(sp.get('check'))) {
+    await requireUser(env, req);
+    const rid = String(sp.get('check'));
+    let items: { ref: string; bal: number }[] = [];
+    try { items = (JSON.parse(sp.get('items') || '[]') as { ref: string; bal: number }[]).filter((x) => x && typeof x.ref === 'string').slice(0, 60); } catch { throw new HttpError(400, 'Bad list.'); }
+    const sc = await scopeOf(env, rid);
+    const senv = scopedEnv(env, sc);
+    // the ZMMBE UR is as of its upload: what was picked for the SO line since then is no longer UR
+    const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid = ?").bind(sc.stock).first<{ at: string | null }>())?.at ?? '';
+    const out: Row[] = [];
+    for (const { ref: r0, bal: bal0 } of items) {
+      const [wk, so, li, item, date] = r0.split('|');
+      const orig = await env.DB.prepare('SELECT * FROM plan WHERE week = ? AND key = ? AND COALESCE(date, \'\') = ? AND follow_of IS NULL').bind(wk, `${so}|${li}|${item}`, date ?? '').first<Row>();
+      if (!orig) continue;
+      const bal = Number(bal0) || 0;
+      try {
+        // the balance as a line of that Pick (no picks of its own yet): what to pick = the balance, at most the UR
+        const c = await pickCandidates(senv, rid, String(orig.key), `~follow~${r0}`, { so: orig.so, li: orig.li, item: orig.item, qty: bal > 0 ? bal : orig.qty, plant: orig.plant, date: parseRound(rid)!.day });
+        const avail = r3(Number(c.matchedAvail) + Number(c.nbAvail));
+        const since = zAt ? Number((await env.DB.prepare("SELECT COALESCE(SUM(qty), 0) q FROM picks WHERE cancelled_at IS NULL AND line LIKE ? || '|%' AND at > ?").bind(String(orig.key), zAt).first<{ q: number }>())?.q ?? 0) : 0;
+        const urLeft = Math.max(0, r3(Number(c.ur) - since));
+        c.need = r3(Math.min(bal > 0 ? bal : Number(orig.qty), urLeft));
+        const rolls = c.rolls.filter((x) => x.available > 1e-9 && (!x.pool || x.suggested)).length + (c.nobarcode || []).filter((m) => !m.done).length;
+        const can = r3(Math.min(Number(c.need), avail));
+        const why = !c.stock.length ? 'Not in this Pick\'s ZMMBE' : urLeft <= 1e-9 ? (since > 0 ? 'No UR left (picked since the ZMMBE upload)' : 'No UR in ZMMBE') : !c.lots.length ? 'No ZINSR lot' : avail <= 1e-9 ? (c.blocked?.length ? `No roll — ${c.blocked.length} not pickable (ZROLLMGT)` : 'No Korber roll') : null;
+        out.push({ ref: r0, ur: urLeft, picked_since: r3(since), need: c.need, avail, can, rolls, blocked: c.blocked?.length ?? 0, status: why ? 'none' : can >= (bal || Number(orig.qty)) - 0.0005 ? 'ok' : 'part', why });
+      } catch (e) { out.push({ ref: r0, status: 'none', why: e instanceof Error ? e.message : 'Check failed' }); }
+    }
+    return json({ rid, check: out });
+  }
   const ref = (r: Row) => `${r.week}|${r.key}|${r.date ?? ''}`;
   // picks per plan line (week + line); follow-up lines and their picks per original line
   const followData = async () => {
