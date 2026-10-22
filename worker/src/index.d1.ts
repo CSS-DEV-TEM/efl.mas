@@ -147,7 +147,7 @@ const thisWeek = () => weekId(new Date(Date.now() + 5.5 * 3600 * 1000).toISOStri
  * adds plan.week, fills it from the dates, and moves dashboard edits to week-scoped keys ("2026-W42#SO|LI|Item").
  */
 let schemaReady = false;
-const SCHEMA_V = '28';
+const SCHEMA_V = '29';
 async function ensureSchema(env: Env) {
   if (schemaReady || !env.DB) return;
   try {
@@ -272,6 +272,8 @@ async function ensureSchema(env: Env) {
       FROM plan WHERE plan_type = 'day' AND instr(week, '~') > 0 GROUP BY week`),
     env.DB.prepare("INSERT OR IGNORE INTO plan_day (day, created_by, created_at) SELECT DISTINCT day, created_by, created_at FROM pick_round"),
   ]);
+  // v29: a pick saved by "Pick all matched" (auto = 1)
+  try { await env.DB.prepare('ALTER TABLE pick_req ADD COLUMN auto INTEGER DEFAULT 0').run(); } catch { /* already there */ }
   // v28: ZROLLMGT roll number core (CP000008064260 = COMPCP000008064260 …) to find its Korber pallet; Status (UR) is checked
   try { await env.DB.prepare('ALTER TABLE zroll ADD COLUMN pcore TEXT').run(); } catch { /* already there */ }
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS zroll_pcore ON zroll(pcore)').run();
@@ -404,7 +406,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 55; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 56; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1290,7 +1292,7 @@ async function handlePullPlan(env: Env, req: Request) {
   // picked QTY per plan line, all weeks (cancelled picks do not count). picked_after = picked after the latest full ZMMBE,
   // still inside ZMMBE's UR, so it comes off UR here; earlier picks are already out of that ZMMBE.
   // qty_after: picked after the ZMMBE the line reads (each Pick has its own) — still inside that ZMMBE's UR, so it comes off UR
-  type PickAgg = { week: string; line: string; qty: number; qty_after: number; rolls: number; closed: number; last_at: string | null; reqs: number };
+  type PickAgg = { week: string; line: string; qty: number; qty_after: number; rolls: number; closed: number; last_at: string | null; reqs: number; auto_qty?: number };
   const pickBy = new Map<string, PickAgg[]>();
   const picksAt = async (z: string | null | undefined) => {
     const k = z ?? '';
@@ -1298,7 +1300,7 @@ async function handlePullPlan(env: Env, req: Request) {
       let rs: PickAgg[] = [];
       try {
         rs = (await env.DB.prepare(`SELECT p.week, p.line, SUM(p.qty) qty, SUM(CASE WHEN ?1 IS NULL OR p.at > ?1 THEN p.qty ELSE 0 END) qty_after, COUNT(*) rolls,
-          MAX(COALESCE(r.closed, 0)) closed, MAX(p.at) last_at, COUNT(DISTINCT p.req_id) reqs FROM picks p LEFT JOIN pick_req r ON r.id = p.req_id WHERE p.cancelled_at IS NULL GROUP BY p.week, p.line`).bind(z ?? null).all<PickAgg>()).results;
+          MAX(COALESCE(r.closed, 0)) closed, MAX(p.at) last_at, COUNT(DISTINCT p.req_id) reqs, SUM(CASE WHEN COALESCE(r.auto, 0) = 1 THEN p.qty ELSE 0 END) auto_qty FROM picks p LEFT JOIN pick_req r ON r.id = p.req_id WHERE p.cancelled_at IS NULL GROUP BY p.week, p.line`).bind(z ?? null).all<PickAgg>()).results;
       } catch { /* pick tables not created yet */ }
       pickBy.set(k, rs);
     }
@@ -1355,7 +1357,7 @@ async function handlePullPlan(env: Env, req: Request) {
  * Whatever is left after every line of the item is full is reported as over-dispatched.
  */
 /** Picked QTY counts as dispatched on its plan line; picks after the latest ZMMBE also come off UR left. */
-function applyPicks(plan: Row[], picks: { week?: string; line: string; qty: number; qty_after: number; rolls: number; closed?: number; last_at?: string | null; reqs?: number }[]) {
+function applyPicks(plan: Row[], picks: { week?: string; line: string; qty: number; qty_after: number; rolls: number; closed?: number; last_at?: string | null; reqs?: number; auto_qty?: number }[]) {
   // a pick belongs to its plan line: the period (week / day round) and SO / LI / Item / date
   const byLine = new Map(picks.map((x) => [`${x.week ?? ''}\u0001${x.line}`, x]));
   for (const r of plan) {
@@ -1364,6 +1366,8 @@ function applyPicks(plan: Row[], picks: { week?: string; line: string; qty: numb
     r.picked_rolls = x ? Number(x.rolls) : 0;
     r.last_pick_at = x?.last_at ?? null;
     r.pick_reqs = x ? Number(x.reqs ?? 0) : 0;
+    // picked by "Pick all matched"
+    r.auto_picked = x ? r3(Number(x.auto_qty ?? 0)) : 0;
     if (!x) continue;
     const take = Math.min(Number(x.qty), Math.max(0, Number(r.qty) - Number(r.dispatched || 0)));
     r.dispatched = r3(Number(r.dispatched || 0) + take);
@@ -1788,7 +1792,7 @@ async function handlePick(env: Env, req: Request, p: string) {
   // POST {week, key, date, pickNo, rolls:[{pallet, qty, confirmed, manual?: {roll_no, barcode, lot, shade, roll_qty}}]}
   if (part === '' && req.method === 'POST') {
     const s = await requireUser(env, req, 'editor');
-    const b = (await req.json()) as { week: string; key: string; date: string | null; pickNo?: string; kind?: string; overConfirmed?: boolean; closeShort?: boolean; rolls: { pallet: string; qty: number; confirmed?: boolean; manual?: ManualFor; nobarcode?: boolean }[] };
+    const b = (await req.json()) as { week: string; key: string; date: string | null; pickNo?: string; kind?: string; auto?: boolean; overConfirmed?: boolean; closeShort?: boolean; rolls: { pallet: string; qty: number; confirmed?: boolean; manual?: ManualFor; nobarcode?: boolean }[] };
     if (!b.week || !b.key || !Array.isArray(b.rolls) || !b.rolls.length) throw new HttpError(400, 'Choose at least one roll.');
     const kind = b.kind === 'offsite' ? 'offsite' : 'normal';
     const rules = await getSettings(env);
@@ -1932,8 +1936,8 @@ async function handlePick(env: Env, req: Request, p: string) {
     };
     const pre = await over();
     if (pre.length) throw new HttpError(409, `Picked meanwhile — ${pre.join(' · ')}. Refresh and pick again.`);
-    const reqRow = await env.DB.prepare(`INSERT INTO pick_req (day, seq, pick_no, week, line, so, li, item, plant, need, qty, rolls, by_user, at, match, kind, closed, short) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`)
-      .bind(day, seq, txt(b.pickNo), b.week, lineId, line.so, line.li, line.item, line.plant ?? null, cand.need, total, picks.length, s.u, at, match, kind, closed, short).first<{ id: number }>();
+    const reqRow = await env.DB.prepare(`INSERT INTO pick_req (day, seq, pick_no, week, line, so, li, item, plant, need, qty, rolls, by_user, at, match, kind, closed, short, auto) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`)
+      .bind(day, seq, txt(b.pickNo), b.week, lineId, line.so, line.li, line.item, line.plant ?? null, cand.need, total, picks.length, s.u, at, match, kind, closed, short, b.auto ? 1 : 0).first<{ id: number }>();
     const reqId = Number(reqRow!.id);
     for (const x of picks) x.req_id = reqId;
     await env.DB.batch([

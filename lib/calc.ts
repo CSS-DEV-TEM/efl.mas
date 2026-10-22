@@ -27,6 +27,8 @@ export interface Line {
   korber_avail?: number; korber_rolls?: number;
   /** Pick Hold: the reason, who and when (null = not on hold) — a held line is not picked */
   hold?: string | null; hold_by?: string | null; hold_at?: string | null;
+  /** QTY picked by "Pick all matched" */
+  auto_picked?: number;
   /** dispatch item whose left-over QTY was assigned to this line */
   assigned_from?: string;
 }
