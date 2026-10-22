@@ -20,6 +20,8 @@ export interface Candidate {
   actual_qty: number; base_qty: number; picked_before: number; available: number; roll_qty: number; shade: string | null;
   insp_lots: string[]; batches: string[]; checks: Record<string, boolean | null>; warnings: string[]; needsConfirm: boolean;
   picks: PalletPick[];
+  /** in ZROLLMGT under the line's ZMMBE batch (System Batch) at the bin: Barcode Number = Korber Pallet */
+  zroll?: boolean;
   /** found under another pallet label than the ZCOMENT Barcode Number (e.g. COMPCP… for CP…) */
   via?: string | null; barcode?: string | null;
   qtyNote?: string | null;
