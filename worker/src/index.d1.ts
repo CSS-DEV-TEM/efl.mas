@@ -400,7 +400,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 47; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 48; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1852,8 +1852,6 @@ async function handlePick(env: Env, req: Request, p: string) {
     // the ZMMBE rows and ZINR lots behind the rolls, kept for the packing list
     const usedLots = new Set(picks.flatMap((x) => String(x.insp_lot).split(',')));
     const zinrUsed = (await env.DB.prepare('SELECT * FROM zinr WHERE so = ? AND li = ? AND material = ?').bind(line.so, line.li, line.item).all<Row>()).results.filter((z) => usedLots.has(String(z.lot)));
-    // the ZMMBE rows of those lots: same batch and the lot's storage location
-    const used = new Set(zinrUsed.map((z) => `${z.batch}|${normId(z.sloc)}`));
     // what this pick took from each batch (for the packing list): a roll in two batches gives first to the batch
     // that still needs QTY (the smallest part first), then to its other parts
     const need = new Map((cand.batchNeed || []).map((x) => [String(x.batch), Number(x.need)]));
@@ -1873,7 +1871,8 @@ async function handlePick(env: Env, req: Request, p: string) {
       for (const pt of parts) give(pt, Math.min(q, pt.left));
       if (q > 1e-9 && parts.length) give({ ...parts[0], left: Infinity }, q);
     }
-    const match = JSON.stringify({ zmmbe: cand.stock.filter((x) => used.has(`${x.batch}|${normId(x.sloc)}`)), zinr: zinrUsed, lots: cand.lots.filter((l) => usedLots.has(String(l.lot))), alloc });
+    // every ZMMBE row of the line (its storage location decides KFC / PFC on the packing list, not the inspection lot's)
+    const match = JSON.stringify({ zmmbe: cand.stock, zinr: zinrUsed, lots: cand.lots.filter((l) => usedLots.has(String(l.lot))), alloc });
     // the last check, right before saving: what is picked of each pallet now (another user may have picked it meanwhile)
     const over = async (exceptReq?: number) => {
       const out: string[] = [];
@@ -1923,8 +1922,25 @@ async function handlePick(env: Env, req: Request, p: string) {
       env.DB.prepare("SELECT v FROM config WHERE k = 'korber_header'"),
     ]);
     const header = (hdr.results[0] as Row | undefined)?.v;
-    // a pick saved without a shade (a roll matched straight from ZINR to Korber): the ZCOMENT Shade, for the Packing List
+    // KFC / PFC on the packing list = the ZMMBE storage location of the batch: picks saved before every ZMMBE row of the line
+    // was kept with the pick get the Pick's ZMMBE rows now
     const envs = new Map<string, Env>();
+    const zs = new Map<string, Row[]>();
+    for (const r of reqs.results as Row[]) {
+      let m: { zmmbe?: Row[] } = {};
+      try { m = r.match ? JSON.parse(String(r.match)) : {}; } catch { /* old */ }
+      const have = new Set((m.zmmbe || []).map((z) => normId(z.batch)));
+      const need = String(((rolls.results as Row[]).filter((x) => x.req_id === r.id).map((x) => x.batch)).join(',')).split(',').map((b) => normId(b)).filter(Boolean);
+      if (need.every((b) => have.has(b))) continue;
+      const wk = String(r.week ?? ''), key = String(r.line ?? '').split('|').slice(0, 3).join('|');
+      const zk = `${wk}#${key}`;
+      if (!zs.has(zk)) {
+        if (!envs.has(wk)) envs.set(wk, await envFor(env, wk));
+        zs.set(zk, (await envs.get(wk)!.DB.prepare("SELECT batch, sloc, ur, plant FROM stock WHERE src = 'zmmbe' AND key = ?").bind(key).all<Row>()).results);
+      }
+      r.zstock = zs.get(zk);
+    }
+    // a pick saved without a shade (a roll matched straight from ZINR to Korber): the ZCOMENT Shade, for the Packing List
     for (const x of rolls.results as Row[]) {
       if (x.shade) continue;
       const wk = String(x.week ?? '');
