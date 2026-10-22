@@ -16,12 +16,13 @@ interface ZRow {
   barcode: string; bin: string | null; material: string | null; batch: string | null; qty: number | null; uom: string | null; sloc: string | null; plant: string | null;
   so: string | null; li: string | null; status: string | null; bin_ok: number; zc_lot: string | null; zc_batch: string | null; zc_shade: string | null;
   k_qty: number | null; k_item: string | null; k_pick: string | null; picked: number | null; rejected: number;
+  bin_at: number; st_ok: number; zm_line: string | null; k_pallet: string | null;
 }
 interface ZRes {
-  rid: string; bin: string; gate: boolean; upload: { file_name: string | null; row_count: number; uploaded_by: string; uploaded_at: string; rid: string } | null;
-  summary: { n: number; bin: number; zc: number; korber: number; ok: number; open: number } | null; rows: ZRow[];
+  rid: string; bin: string; hasStatus?: boolean; gate: boolean; upload: { file_name: string | null; row_count: number; uploaded_by: string; uploaded_at: string; rid: string } | null;
+  summary: { n: number; bin: number; st: number; zm: number; zc: number; korber: number; ok: number; open: number } | null; rows: ZRow[];
 }
-type State = 'all' | 'ok' | 'bin' | 'nozc' | 'nokorber';
+type State = 'all' | 'ok' | 'bin' | 'status' | 'nozm' | 'nozc' | 'nokorber';
 
 /** Data: the Pick's ZROLLMGT (roll management) — upload it here, and see which rolls pass the pick check. */
 function DataPage() {
@@ -58,6 +59,8 @@ function DataPage() {
   const bin = res?.bin || 'EXPO-FIX';
   const tabs: [State, string, number | undefined][] = [
     ['all', 'All', s?.n], ['ok', 'Pickable', s?.ok], ['bin', `Bin not ${bin}`, s ? s.n - s.bin : undefined],
+    ...(res?.hasStatus ? [['status', 'Status not UR', s ? s.n - s.st : undefined] as [State, string, number | undefined]] : []),
+    ['nozm', 'System Batch not in ZMMBE', s ? s.n - s.zm : undefined],
     ['nozc', 'Not in ZCOMENT VIEW', s ? s.n - s.zc : undefined], ['nokorber', 'Not in Korber', s ? s.n - s.korber : undefined],
   ];
   return (
@@ -107,18 +110,20 @@ function DataPage() {
         {!res ? <Loader label="Loading ZROLLMGT…" /> : !res.rows.length ? <p className="muted">{s?.n ? 'No roll in this view.' : 'No rolls.'}</p> : (
           <div className="table-wrap" style={{ maxHeight: 560 }}>
             <table className="mini">
-              <thead><tr><th>Barcode Number</th><th>StorageBin</th><th>Material</th><th>Batch</th><th className="n">QTY</th><th>ZCOMENT VIEW</th><th>Korber</th><th className="n">Picked</th><th>Pick check</th></tr></thead>
+              <thead><tr><th>Barcode Number</th><th>StorageBin</th><th>Status</th><th>Material</th><th>System Batch</th><th>ZMMBE line (batch, UR)</th><th className="n">QTY</th><th>ZCOMENT VIEW</th><th>Korber</th><th className="n">Picked</th><th>Pick check</th></tr></thead>
               <tbody>{res.rows.map((r) => {
-                const why = !r.bin_ok ? `Bin ${r.bin || '–'}` : r.k_qty == null ? 'Not in Korber' : r.k_pick !== '0' ? `Korber Pick Id ${r.k_pick}` : r.rejected ? 'Rejected' : null;
+                const why = !r.bin_at ? `Bin ${r.bin || '–'}` : !r.st_ok ? `Status ${r.status || '–'} (not UR)` : r.k_qty == null ? 'Not in Korber' : r.k_pick !== '0' ? `Korber Pick Id ${r.k_pick}` : r.rejected ? 'Rejected' : null;
                 const full = r.k_qty != null && Number(r.picked || 0) >= Number(r.k_qty) - 0.0005;
                 return (
                   <tr key={r.barcode}>
                     <td className="mono">{r.barcode}</td>
-                    <td><span className={`pill ${r.bin_ok ? 'ok' : 'bad'}`}>{r.bin || '–'}</span></td>
-                    <td>{r.material || r.k_item || '–'}</td><td>{r.batch || r.zc_batch || '–'}</td>
+                    <td><span className={`pill ${r.bin_at ? 'ok' : 'bad'}`}>{r.bin || '–'}</span></td>
+                    <td>{r.status ? <span className={`pill ${r.st_ok ? 'ok' : 'bad'}`}>{r.status}</span> : '–'}</td>
+                    <td>{r.material || r.k_item || '–'}</td><td>{r.batch || '–'}</td>
+                    <td className="small">{r.zm_line ? r.zm_line : <span className="muted">{r.batch ? 'no ZMMBE line' : '–'}</span>}</td>
                     <td className="n">{r.qty != null ? `${fmtQty(r.qty)}${r.uom ? ' ' + r.uom : ''}` : '–'}</td>
                     <td className="small">{r.zc_lot ? <>Lot {r.zc_lot} · {r.zc_batch}{r.zc_shade ? ` · shade ${r.zc_shade}` : ''}</> : <span className="muted">–</span>}</td>
-                    <td className="small">{r.k_qty != null ? <>{fmtQty(r.k_qty)}{r.k_pick !== '0' ? ` · Pick Id ${r.k_pick}` : ''}</> : <span className="muted">–</span>}</td>
+                    <td className="small">{r.k_qty != null ? <>{fmtQty(r.k_qty)}{r.k_pick !== '0' ? ` · Pick Id ${r.k_pick}` : ''}{r.k_pallet && r.k_pallet !== r.barcode ? ` · ${r.k_pallet}` : ''}</> : <span className="muted">–</span>}</td>
                     <td className="n">{r.picked ? fmtQty(r.picked) : '–'}</td>
                     <td>{why ? <span className="pill bad">{why}</span> : full ? <span className="pill mute">Picked in full</span> : <span className="pill ok" title={r.zc_lot ? 'ZCOMENT Barcode = Korber Pallet = ZROLLMGT Barcode' : 'No ZCOMENT barcode: matched on Invoice, Item and Lot'}>Pickable ✓{r.zc_lot ? '' : ' · no ZCOMENT barcode'}</span>}</td>
                   </tr>

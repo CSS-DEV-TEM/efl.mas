@@ -147,7 +147,7 @@ const thisWeek = () => weekId(new Date(Date.now() + 5.5 * 3600 * 1000).toISOStri
  * adds plan.week, fills it from the dates, and moves dashboard edits to week-scoped keys ("2026-W42#SO|LI|Item").
  */
 let schemaReady = false;
-const SCHEMA_V = '27';
+const SCHEMA_V = '28';
 async function ensureSchema(env: Env) {
   if (schemaReady || !env.DB) return;
   try {
@@ -272,6 +272,10 @@ async function ensureSchema(env: Env) {
       FROM plan WHERE plan_type = 'day' AND instr(week, '~') > 0 GROUP BY week`),
     env.DB.prepare("INSERT OR IGNORE INTO plan_day (day, created_by, created_at) SELECT DISTINCT day, created_by, created_at FROM pick_round"),
   ]);
+  // v28: ZROLLMGT roll number core (CP000008064260 = COMPCP000008064260 …) to find its Korber pallet; Status (UR) is checked
+  try { await env.DB.prepare('ALTER TABLE zroll ADD COLUMN pcore TEXT').run(); } catch { /* already there */ }
+  await env.DB.prepare('CREATE INDEX IF NOT EXISTS zroll_pcore ON zroll(pcore)').run();
+  await env.DB.prepare('CREATE INDEX IF NOT EXISTS zroll_batch ON zroll(batch)').run();
   // v27: UR never holds QI stock: UR = Total − QI − Block − Assigned (the rows saved before counted QI as UR)
   await env.DB.batch([
     env.DB.prepare('UPDATE stock SET ur = MAX(0, ROUND(total - COALESCE(qi, 0) - COALESCE(block, 0) - COALESCE(assigned, 0), 3)) WHERE COALESCE(qi, 0) > 0 AND total IS NOT NULL AND ur > MAX(0, ROUND(total - COALESCE(qi, 0) - COALESCE(block, 0) - COALESCE(assigned, 0), 3))'),
@@ -400,7 +404,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 51; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 52; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1059,25 +1063,31 @@ async function handleZroll(env: Env, req: Request) {
   const q = up(sp.get('q')).trim();
   const state = sp.get('state') || 'all';
   const limit = Math.max(1, Math.min(2000, Number(sp.get('limit')) || 500));
+  const hasStatus = !!(await senv.DB.prepare("SELECT 1 FROM zroll WHERE COALESCE(status, '') <> '' LIMIT 1").first());
+  const K = "(k.pallet = z.barcode OR (z.pcore IS NOT NULL AND k.pcore = z.pcore))";
   const cte = `WITH x AS (SELECT z.barcode, z.bin, z.material, z.batch, z.qty, z.uom, z.sloc, z.plant, z.so, z.li, z.status,
-      replace(upper(COALESCE(z.bin, '')), ' ', '') = ?1 AS bin_ok,
+      replace(upper(COALESCE(z.bin, '')), ' ', '') = ?1 AS bin_at,
+      (?4 = 0 OR replace(replace(upper(COALESCE(z.status, '')), ' ', ''), '-', '') IN ('UR', 'UNRESTRICTED', 'UNRESTRICTEDUSE', 'UNRESTRICTEDSTOCK', 'UNREST')) AS st_ok,
+      (SELECT s.so || ' / ' || s.li FROM stock s WHERE s.src = 'zmmbe' AND s.batch = z.batch AND s.ur > 0 LIMIT 1) AS zm_line,
       (SELECT c.lot FROM zcoment c WHERE c.barcode = z.barcode LIMIT 1) AS zc_lot,
       (SELECT c.batch FROM zcoment c WHERE c.barcode = z.barcode LIMIT 1) AS zc_batch,
       (SELECT c.shade FROM zcoment c WHERE c.barcode = z.barcode LIMIT 1) AS zc_shade,
-      (SELECT k.qty FROM korber k WHERE k.pallet = z.barcode LIMIT 1) AS k_qty,
-      (SELECT k.item FROM korber k WHERE k.pallet = z.barcode LIMIT 1) AS k_item,
-      (SELECT COALESCE(NULLIF(k.pick_id, ''), '0') FROM korber k WHERE k.pallet = z.barcode LIMIT 1) AS k_pick,
+      (SELECT k.pallet FROM korber k WHERE ${K} LIMIT 1) AS k_pallet,
+      (SELECT k.qty FROM korber k WHERE ${K} LIMIT 1) AS k_qty,
+      (SELECT k.item FROM korber k WHERE ${K} LIMIT 1) AS k_item,
+      (SELECT COALESCE(NULLIF(k.pick_id, ''), '0') FROM korber k WHERE ${K} LIMIT 1) AS k_pick,
       (SELECT ROUND(SUM(p.qty), 3) FROM picks p WHERE p.pallet = z.barcode AND p.cancelled_at IS NULL) AS picked,
       EXISTS (SELECT 1 FROM pick_reject r WHERE r.pallet = z.barcode) AS rejected
-    FROM zroll z WHERE (?2 = '' OR z.barcode LIKE '%' || ?2 || '%' OR z.material LIKE '%' || ?2 || '%' OR z.batch LIKE '%' || ?2 || '%' OR upper(COALESCE(z.bin, '')) LIKE '%' || ?2 || '%'))`;
-  const sum = await senv.DB.prepare(`${cte} SELECT COUNT(*) n, SUM(bin_ok) bin, SUM(zc_lot IS NOT NULL) zc, SUM(k_qty IS NOT NULL) korber,
+    FROM zroll z WHERE (?2 = '' OR z.barcode LIKE '%' || ?2 || '%' OR z.material LIKE '%' || ?2 || '%' OR z.batch LIKE '%' || ?2 || '%' OR upper(COALESCE(z.bin, '')) LIKE '%' || ?2 || '%' OR upper(COALESCE(z.status, '')) LIKE '%' || ?2 || '%')),
+    y AS (SELECT *, (bin_at AND st_ok) AS bin_ok FROM x)`;
+  const sum = await senv.DB.prepare(`${cte} SELECT COUNT(*) n, SUM(bin_at) bin, SUM(st_ok) st, SUM(zm_line IS NOT NULL) zm, SUM(zc_lot IS NOT NULL) zc, SUM(k_qty IS NOT NULL) korber,
       SUM(bin_ok AND k_qty IS NOT NULL AND k_pick = '0' AND NOT rejected) ok,
-      SUM(bin_ok AND k_qty IS NOT NULL AND k_pick = '0' AND NOT rejected AND COALESCE(picked, 0) < k_qty - 0.0005) open FROM x`).bind(bin, q).first<Row>();
-  const where = state === 'ok' ? "bin_ok AND k_qty IS NOT NULL AND k_pick = '0' AND NOT rejected" : state === 'bin' ? 'NOT bin_ok'
-    : state === 'nozc' ? 'zc_lot IS NULL' : state === 'nokorber' ? 'k_qty IS NULL' : '1';
-  const rows = (await senv.DB.prepare(`${cte} SELECT * FROM x WHERE ${where} ORDER BY bin_ok DESC, barcode LIMIT ?3`).bind(bin, q, limit).all<Row>()).results;
+      SUM(bin_ok AND k_qty IS NOT NULL AND k_pick = '0' AND NOT rejected AND COALESCE(picked, 0) < k_qty - 0.0005) open FROM y`).bind(bin, q, 0, hasStatus ? 1 : 0).first<Row>();
+  const where = state === 'ok' ? "bin_ok AND k_qty IS NOT NULL AND k_pick = '0' AND NOT rejected" : state === 'bin' ? 'NOT bin_at' : state === 'status' ? 'NOT st_ok'
+    : state === 'nozm' ? 'zm_line IS NULL' : state === 'nozc' ? 'zc_lot IS NULL' : state === 'nokorber' ? 'k_qty IS NULL' : '1';
+  const rows = (await senv.DB.prepare(`${cte} SELECT * FROM y WHERE ${where} ORDER BY bin_ok DESC, barcode LIMIT ?3`).bind(bin, q, limit, hasStatus ? 1 : 0).all<Row>()).results;
   const upl = await env.DB.prepare("SELECT file_name, row_count, uploaded_by, uploaded_at, rid FROM uploads WHERE src = 'zroll' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC, id DESC LIMIT 1").bind(rid).first<Row>();
-  return json({ rid, bin, gate: st.rollGate !== false, upload: upl ?? null, summary: sum, rows });
+  return json({ rid, bin, hasStatus, gate: st.rollGate !== false, upload: upl ?? null, summary: sum, rows });
 }
 
 async function handleRounds(env: Env, req: Request) {
@@ -1593,9 +1603,9 @@ function headerIndex(header: unknown[], names: Record<string, string[]>) {
 const PICK_COLS: Record<'zinr' | 'zcoment' | 'korber' | 'zroll', Record<string, string[]>> = {
   // SAP ZROLLMGT (roll management): where each roll (Barcode Number) is
   zroll: {
-    barcode: ['Barcode Number', 'Barcode No', 'Barcode No.', 'Barcode', 'Roll Barcode', 'HU Number', 'Handling Unit'], bin: ['StorageBin', 'Storage Bin', 'Bin', 'Bin Location', 'Storage Bin Location'],
-    material: ['Material', 'Material Number', 'Item Code'], batch: ['System Batch', 'SAP Batch', 'Batch'], qty: ['Quantity', 'Qty', 'Roll Qty', 'Roll Quantity', 'Length', 'Available Qty'], uom: ['UoM', 'Unit', 'Base UoM', 'Base Unit of Measure'],
-    sloc: ['Storage Location', 'Sloc', 'St Location', 'SLoc'], plant: ['Plant'], so: ['Sales Order', 'SO', 'Sales Document'], li: ['Line Item', 'LI', 'SO Item', 'Item'], status: ['Status', 'Roll Status'],
+    barcode: ['Barcode Number', 'Barcode No', 'Barcode No.', 'Barcode', 'Roll Barcode', 'Roll Barcode Number', 'HU Number', 'Handling Unit'], bin: ['StorageBin', 'Storage Bin', 'Bin', 'Bin Location', 'Storage Bin Location'],
+    material: ['Material', 'Material Number', 'Item Code'], batch: ['System Batch', 'System Batch No', 'System Batch Number', 'Sys Batch', 'SAP Batch', 'SAP Batch No', 'Batch No', 'Batch Number', 'Batch'], qty: ['Quantity', 'Qty', 'Roll Qty', 'Roll Quantity', 'Length', 'Available Qty'], uom: ['UoM', 'Unit', 'Base UoM', 'Base Unit of Measure'],
+    sloc: ['Storage Location', 'Sloc', 'St Location', 'SLoc'], plant: ['Plant'], so: ['Sales Order', 'SO', 'Sales Document'], li: ['Line Item', 'LI', 'SO Item', 'Item'], status: ['Status', 'Roll Status', 'Stock Status', 'Stock Type', 'Stock Category', 'Stock Cat.'],
   },
   zinr: {
     lot: ['Inspection Lot'], plant: ['Plant'], sloc: ['Storage Location'], batch: ['Batch'], material: ['Material'], qty: ['Insp. Lot Quantity', 'Inspection Lot Quantity'],
@@ -1677,7 +1687,7 @@ async function handlePick(env: Env, req: Request, p: string) {
       for (const r of b.rows) {
         const barcode = up(g(r, 'barcode'));
         if (!barcode) { skipped++; continue; }
-        seen.set(barcode, { barcode, bin: txt(up(g(r, 'bin'))), material: normId(g(r, 'material')) || null, batch: normId(g(r, 'batch')) || null, qty: ix.qty >= 0 ? num(g(r, 'qty')) : null,
+        seen.set(barcode, { barcode, pcore: palletCore(barcode), bin: txt(up(g(r, 'bin'))), material: korberItem(null, g(r, 'material')) || null, batch: normId(g(r, 'batch')) || null, qty: ix.qty >= 0 ? num(g(r, 'qty')) : null,
           uom: txt(g(r, 'uom')), sloc: txt(normId(g(r, 'sloc'))), plant: txt(g(r, 'plant')), so: normId(g(r, 'so')) || null, li: normId(g(r, 'li')) || null, status: txt(g(r, 'status')),
           raw: JSON.stringify(Object.fromEntries(b.header.map((h, i) => [String(h ?? ''), r[i] ?? null]).filter(([h, v]) => h && v !== null && v !== ''))) });
       }
@@ -1810,11 +1820,21 @@ async function handlePick(env: Env, req: Request, p: string) {
         // a manual pallet: its batch = the ZROLLMGT System Batch, else its ZCOMENT roll's batch, else the line's ZMMBE batch with the most UR
         const zb = await gate.batchOf(x.pallet);
         const zc = await senv.DB.prepare('SELECT lot, batch, shade FROM zcoment WHERE barcode = ? LIMIT 1').bind(up(x.pallet)).first<Row>();
-        const top = [...cand.stock].sort((a, c) => Number(c.ur) - Number(a.ur))[0];
-        x.manual = { free: true, lot: (zc?.lot as string) ?? null, batch: normId(zb || zc?.batch || top?.batch || '') || null, shade: (zc?.shade as string) ?? null };
+        const own = [zb, zc?.batch].map((v) => normId(v)).find((v) => v && cand.stock.some((z) => normId(z.batch) === v && Number(z.ur) > 0));
+        x.manual = { free: true, lot: (zc?.lot as string) ?? null, batch: own || null, shade: (zc?.shade as string) ?? null };
         if (!(await senv.DB.prepare('SELECT 1 FROM korber WHERE pallet = ?').bind(up(x.pallet)).first())) throw new HttpError(400, `Pallet ${x.pallet} is not in this Pick's Korber Inventory.`);
       }
-      if (!r && (x.manual || nb)) r = await manualCandidate(senv, x.pallet, nb ? { ...nb.m, ...(x.manual || {}), barcode: null } as ManualFor : x.manual!, String(line.item));
+      if (!r && (x.manual || nb)) {
+        r = await manualCandidate(senv, x.pallet, nb ? { ...nb.m, ...(x.manual || {}), barcode: null } as ManualFor : x.manual!, String(line.item));
+        // the SAP lines of a roll picked by hand: the line's ZMMBE batches — its own batch when it is one of them, else the
+        // batches that still need QTY (most first), so the packing list has SO | LI | Qty | Material | Batch for it
+        const lineB = cand.stock.filter((z) => Number(z.ur) > 0).map((z) => normId(z.batch));
+        if (r && lineB.length && !(r.batches.length && r.batches.every((bt) => lineB.includes(normId(bt))))) {
+          const needB = (cand.batchNeed || []).filter((z) => Number(z.need) > 1e-9).sort((a, c) => Number(c.need) - Number(a.need)).map((z) => normId(z.batch));
+          const top = [...cand.stock].filter((z) => Number(z.ur) > 0).sort((a, c) => Number(c.ur) - Number(a.ur)).map((z) => normId(z.batch));
+          r.batches = needB.length ? needB : top.slice(0, 1);
+        }
+      }
       if (r && nb) {
         // chosen by the user from the matching rolls: confirmation is needed only when a field did not match
         const ck = nb.o.checks as Record<string, boolean | null>;
@@ -2378,15 +2398,32 @@ async function makeGate(env: Env) {
   const bin = up(st.pickBin || 'EXPO-FIX').replace(/\s+/g, '');
   const on = st.rollGate !== false;
   const loaded = on ? !!(await env.DB.prepare('SELECT 1 FROM zroll LIMIT 1').first()) : true;
+  // ZROLLMGT Status: when the report has it, a roll is picked only at Status UR (unrestricted)
+  const hasStatus = on && loaded ? !!(await env.DB.prepare("SELECT 1 FROM zroll WHERE COALESCE(status, '') <> '' LIMIT 1").first()) : false;
+  const statusOk = (v: unknown) => ['UR', 'UNRESTRICTED', 'UNRESTRICTEDUSE', 'UNRESTRICTEDSTOCK', 'UNREST'].includes(up(v).replace(/[^A-Z]/g, ''));
+  /** why one ZROLLMGT row is not pickable (null = it is): StorageBin, Status */
+  const rowWhy = (z: Row): string | null => {
+    if (up(z.bin).replace(/\s+/g, '') !== bin) return `ZROLLMGT StorageBin ${z.bin || '–'} — must be ${bin}`;
+    if (hasStatus && !statusOk(z.status)) return `ZROLLMGT Status ${z.status || '–'} — must be UR`;
+    return null;
+  };
+  /** the ZROLLMGT rows of a roll: its Barcode Number, else the same roll number (CP… / COMPCP…) */
+  const rowsOf = async (ids: string[]) => {
+    const zr = (await env.DB.prepare('SELECT barcode, bin, batch, status, material FROM zroll WHERE barcode IN (SELECT value FROM json_each(?))').bind(JSON.stringify(ids)).all<Row>()).results;
+    if (zr.length) return zr;
+    const cores = Array.from(new Set(ids.map(palletCore).filter(Boolean)));
+    return cores.length ? (await env.DB.prepare('SELECT barcode, bin, batch, status, material FROM zroll WHERE pcore IN (SELECT value FROM json_each(?))').bind(JSON.stringify(cores)).all<Row>()).results : [];
+  };
   // zc = the roll came by its ZCOMENT VIEW Barcode Number (that barcode must be a ZCOMENT one); a roll with no ZCOMENT barcode
   // (matched on invoice / lot / supplier HU) needs only its Korber Pallet in ZROLLMGT at the bin
   const check = async (pallet: string, barcode?: string | null, zc = true): Promise<string | null> => {
     if (!on) return null;
     if (!loaded) return 'No ZROLLMGT uploaded for this Pick';
-    const ids = JSON.stringify(Array.from(new Set([up(barcode), up(pallet)].filter(Boolean))));
-    const zr = (await env.DB.prepare('SELECT barcode, bin FROM zroll WHERE barcode IN (SELECT value FROM json_each(?))').bind(ids).all<Row>()).results;
+    const idl = Array.from(new Set([up(barcode), up(pallet)].filter(Boolean)));
+    const ids = JSON.stringify(idl);
+    const zr = await rowsOf(idl);
     if (!zr.length) return 'Not in ZROLLMGT';
-    if (!zr.some((z) => up(z.bin).replace(/\s+/g, '') === bin)) return `ZROLLMGT StorageBin ${Array.from(new Set(zr.map((z) => z.bin || '–'))).join(' / ')} — must be ${bin}`;
+    if (!zr.some((z) => !rowWhy(z))) return Array.from(new Set(zr.map(rowWhy))).join(' · ');
     if (zc && !(await env.DB.prepare('SELECT 1 FROM zcoment WHERE barcode IN (SELECT value FROM json_each(?)) LIMIT 1').bind(ids).first())) return 'Not a ZCOMENT VIEW Barcode Number';
     return null;
   };
@@ -2395,14 +2432,21 @@ async function makeGate(env: Env) {
     const ps = Array.from(new Set(pallets.map(up).filter(Boolean)));
     if (!on) return new Set(ps);
     if (!loaded || !ps.length) return new Set();
-    const zr = (await env.DB.prepare('SELECT barcode, bin, batch FROM zroll WHERE barcode IN (SELECT value FROM json_each(?))').bind(JSON.stringify(ps)).all<Row>()).results;
+    const out = new Set<string>();
     // and, when ZROLLMGT has the roll's System Batch, it must be one of the line's ZMMBE batches
-    return new Set(zr.filter((z) => up(z.bin).replace(/\s+/g, '') === bin && (!batches?.size || !z.batch || batches.has(normId(z.batch)))).map((z) => up(z.barcode)));
+    const fine = (z: Row) => !rowWhy(z) && (!batches?.size || !z.batch || batches.has(normId(z.batch)));
+    const zr = (await env.DB.prepare('SELECT barcode, bin, batch, status FROM zroll WHERE barcode IN (SELECT value FROM json_each(?))').bind(JSON.stringify(ps)).all<Row>()).results;
+    for (const z of zr) if (fine(z)) out.add(up(z.barcode));
+    // a Korber pallet whose ZROLLMGT barcode is written another way (same roll number)
+    const rest = ps.filter((x) => !zr.some((z) => up(z.barcode) === x));
+    const cores = new Map(rest.map((x) => [palletCore(x), x]).filter(([c0]) => !!c0) as [string, string][]);
+    if (cores.size) for (const z of (await env.DB.prepare('SELECT barcode, bin, batch, status, pcore FROM zroll WHERE pcore IN (SELECT value FROM json_each(?))').bind(JSON.stringify(Array.from(cores.keys()))).all<Row>()).results) if (fine(z)) out.add(cores.get(String(z.pcore))!);
+    return out;
   };
   /** the roll's ZROLLMGT System Batch (null: not there / no batch) */
-  const batchOf = async (pallet: string) => loaded ? ((await env.DB.prepare('SELECT batch FROM zroll WHERE barcode = ? LIMIT 1').bind(up(pallet)).first<Row>())?.batch as string | null) ?? null : null;
-  const binOk = (b: unknown) => !on || up(b).replace(/\s+/g, '') === bin;
-  return { on, bin, loaded, check, atBin, binOk, batchOf };
+  const batchOf = async (pallet: string) => loaded ? ((await rowsOf([up(pallet)])).map((z) => z.batch as string | null).find(Boolean) ?? null) : null;
+  const rowOk = (z: Row) => !on || !rowWhy(z);
+  return { on, bin, loaded, hasStatus, check, atBin, rowOk, rowWhy, batchOf };
 }
 
 /**
@@ -2611,39 +2655,46 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
         reason: `No Korber roll of item ${lot.material} on invoice ${lot.invoice ?? '–'}${sh.barcode ? ` (barcode ${sh.barcode} is not in Korber)` : ''}${gate.on ? ` in ZROLLMGT at ${gate.bin}` : ''}`, suggest: [] });
     }
   }
-  // 4z. ZMMBE batch → ZROLLMGT System Batch (same Material, at the bin) → its Barcode Number = Korber Pallet (Pick Id 0):
-  // the rolls of the batch straight from SAP's roll management (also a batch with no ZINSR lot / no ZCOMENT barcode)
+  // 4z. ZMMBE batch → ZROLLMGT System Batch (same Material, StorageBin at the bin, Status UR) → its Barcode Number = Korber Pallet
+  // (Pick Id 0): the rolls of the batch straight from SAP's roll management (also a batch with no ZINSR lot / no ZCOMENT barcode)
   if (gate.loaded) {
     const seenBlock = new Set(blocked.map((b0) => up(b0.barcode || b0.pallet)));
+    const mat = normId(line.item);
     for (const st of stock.filter((x) => Number(x.ur) > 0)) {
-      const zr = (await env.DB.prepare('SELECT barcode, bin, material, qty FROM zroll WHERE batch = ?').bind(normId(st.batch)).all<Row>()).results
-        .filter((z) => !z.material || normId(z.material) === normId(st.material));
-      if (!zr.length) continue;
-      const lot0: Row = lots.find((l) => normId(l.batch) === normId(st.batch)) ?? { lot: '', batch: normId(st.batch), material: st.material };
-      let added = 0, known = 0, off = 0, noK = 0;
+      const bt = normId(st.batch);
+      const zr0 = (await env.DB.prepare('SELECT barcode, bin, batch, status, material, qty, pcore FROM zroll WHERE batch = ?').bind(bt).all<Row>()).results;
+      // the same Material (a ZROLLMGT row without Material counts; the Korber item is checked below)
+      const zr = zr0.filter((z) => !z.material || normId(z.material) === mat || normId(z.material) === normId(st.material));
+      if (!zr.length) { steps.push(`Batch ${st.batch}: ZROLLMGT has no roll with System Batch ${bt}${zr0.length ? ` of material ${mat} (${zr0.length} of another material)` : ''}.`); continue; }
+      const lot0: Row = lots.find((l) => normId(l.batch) === bt) ?? { lot: '', batch: bt, material: st.material };
+      let added = 0, known = 0, off = 0, noK = 0, other = 0;
       for (const z of zr) {
         const pal = up(z.barcode);
-        if (rolls.has(pal)) { const r0 = rolls.get(pal)!; r0.zroll = true; known++; continue; }
-        if (!gate.binOk(z.bin)) {
+        // its Korber pallet: the Barcode Number, else the same roll number (CP… / COMPCP…) of the same item
+        let k = await env.DB.prepare('SELECT * FROM korber WHERE pallet = ?').bind(pal).first<Row>();
+        if (!k && z.pcore) k = await env.DB.prepare('SELECT * FROM korber WHERE pcore = ? AND item = ? LIMIT 1').bind(z.pcore, mat).first<Row>();
+        const kp = k ? up(k.pallet) : pal;
+        if (rolls.has(kp)) { rolls.get(kp)!.zroll = true; known++; continue; }
+        const why = gate.on ? gate.rowWhy(z) : null;
+        if (why) {
           off++;
-          if (!seenBlock.has(pal)) { seenBlock.add(pal); blocked.push({ lot: lot0.lot || '–', batch: st.batch, roll_no: null, barcode: pal, shade: null, pallet: pal, qty: Number(z.qty) || null, why: `ZROLLMGT StorageBin ${z.bin || '–'} — must be ${gate.bin}` }); }
+          if (!seenBlock.has(kp)) { seenBlock.add(kp); blocked.push({ lot: lot0.lot || '–', batch: st.batch, roll_no: null, barcode: pal, shade: null, pallet: k ? kp : null, qty: k ? Number(k.qty) : Number(z.qty) || null, why }); }
           continue;
         }
-        const k = await env.DB.prepare('SELECT * FROM korber WHERE pallet = ?').bind(pal).first<Row>();
         if (!k) { noK++; continue; }
-        if (rejected.has(pal)) { rejectedSkip++; continue; }
+        if (normId(k.item) !== mat) { other++; continue; }
+        if (rejected.has(kp)) { rejectedSkip++; continue; }
         if (String(k.pick_id ?? '0') !== '0' && String(k.pick_id ?? '') !== '') { notPickable++; continue; }
-        const itemOk = normId(k.item) === normId(st.material);
-        const sh = await env.DB.prepare('SELECT shade, lot FROM zcoment WHERE barcode = ? LIMIT 1').bind(pal).first<Row>();
-        addRoll(await korberBase(k, sh?.lot ? { ...lot0, lot: sh.lot } : lot0, { shade: (sh?.shade as string) ?? null, zroll: true,
-          checks: { item: itemOk, batch: true, bin: true, lot: null, hu: null, invoice: lot0.invoice && k.invoice ? invRoot(k.invoice) === invRoot(lot0.invoice) : null },
-          warnings: itemOk ? [] : [`Item ${k.item} ≠ ${st.material}`], needsConfirm: !itemOk,
-          qtyNote: `ZMMBE batch ${st.batch} = ZROLLMGT System Batch → Barcode ${pal} = Korber Pallet${gate.on ? ` (StorageBin ${gate.bin})` : ''}` }), sh?.lot ? { ...lot0, lot: sh.lot } : lot0);
+        const sh = await env.DB.prepare('SELECT shade, lot FROM zcoment WHERE barcode IN (?, ?) LIMIT 1').bind(pal, kp).first<Row>();
+        const l1 = sh?.lot ? { ...lot0, lot: sh.lot } : lot0;
+        addRoll(await korberBase(k, l1, { shade: (sh?.shade as string) ?? null, zroll: true, via: kp !== pal ? kp : null,
+          checks: { item: true, batch: true, bin: true, lot: null, hu: null, invoice: lot0.invoice && k.invoice ? invRoot(k.invoice) === invRoot(lot0.invoice) : null },
+          qtyNote: `ZMMBE batch ${st.batch} = ZROLLMGT System Batch → Barcode ${pal}${kp !== pal ? ` (Korber pallet ${kp})` : ''} = Korber Pallet${gate.on ? ` · StorageBin ${gate.bin}${gate.hasStatus ? ' · Status UR' : ''}` : ''}` }), l1);
         added++;
       }
-      steps.push(`Batch ${st.batch}: ZROLLMGT has ${zr.length} roll${zr.length === 1 ? '' : 's'} (System Batch)${added ? ` — ${added} more matched straight to Korber` : ''}${known ? `, ${known} already matched by ZCOMENT` : ''}${off ? `, ${off} not at ${gate.bin}` : ''}${noK ? `, ${noK} not in Korber` : ''}.`);
+      steps.push(`Batch ${st.batch}: ZROLLMGT has ${zr.length} roll${zr.length === 1 ? '' : 's'} with this System Batch${added ? ` — ${added} matched straight to Korber` : ''}${known ? `, ${known} already matched` : ''}${off ? `, ${off} not pickable (bin / status)` : ''}${noK ? `, ${noK} not in this Pick's Korber` : ''}${other ? `, ${other} another item in Korber` : ''}.`);
     }
-  }
+  } else if (gate.on) steps.push('ZMMBE batch → ZROLLMGT System Batch: no ZROLLMGT uploaded for this Pick.');
   // the Invoice + Item category offers only rolls not matched already (a matched roll is ticked in Matched rolls)
   for (let i = nobarcode.length - 1; i >= 0; i--) {
     const m = nobarcode[i];
@@ -2654,7 +2705,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
   if (batchSkip) steps.push(`${batchSkip} ZCOMENT VIEW roll${batchSkip === 1 ? '' : 's'} of a batch that is not this line's ZMMBE batch with UR (${Array.from(urBatches).join(', ')}) — left out.`);
   if (blocked.length) {
     const why = new Map<string, number>();
-    for (const b0 of blocked) { const w = String(b0.why).replace(/^Barcode \S+ is not in Korber Inventory$/, 'Barcode not in Korber Inventory').replace(/^ZROLLMGT StorageBin .*/, `ZROLLMGT StorageBin not ${gate.bin}`).replace(/^ZROLLMGT System Batch .*/, 'ZROLLMGT System Batch not the ZMMBE batch'); why.set(w, (why.get(w) || 0) + 1); }
+    for (const b0 of blocked) { const w = String(b0.why).replace(/^Barcode \S+ is not in Korber Inventory$/, 'Barcode not in Korber Inventory').replace(/^ZROLLMGT StorageBin .*/, `ZROLLMGT StorageBin not ${gate.bin}`).replace(/^ZROLLMGT System Batch .*/, 'ZROLLMGT System Batch not the ZMMBE batch').replace(/^ZROLLMGT Status .*/, 'ZROLLMGT Status not UR'); why.set(w, (why.get(w) || 0) + 1); }
     steps.push(`${blocked.length} roll${blocked.length === 1 ? '' : 's'} not pickable (ZROLLMGT check): ${Array.from(why).map(([w, n]) => `${n} × ${w}`).join(' · ')}.`);
   }
   if (notPickable) steps.push(`${notPickable} roll${notPickable === 1 ? ' is' : 's are'} already on a Korber (WMS) pick — Pick Id not 0 — and left out.`);

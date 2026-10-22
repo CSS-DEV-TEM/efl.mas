@@ -177,10 +177,20 @@ function rollBatches(r: PickReq, m: Match, p: PickRoll): { batch: string; qty: n
   return fit(rollBatches0(r, m, p));
 }
 function rollBatches0(r: PickReq, m: Match, p: PickRoll): { batch: string; qty: number }[] {
+  const zs = [...(m.zmmbe || []), ...(r.zstock || [])] as Record<string, unknown>[];
+  const zb = new Set(zs.map((z) => String(z.batch ?? '').replace(/^0+(?=\d)/, '')));
+  const topB = () => String((zs.filter((z) => Number(z.ur) > 0).sort((a, b) => Number(b.ur) - Number(a.ur))[0] ?? zs[0])?.batch ?? '');
   const own = (m.alloc || []).filter((a) => a.pallet === p.pallet);
-  if (own.length) return own.map((a) => ({ batch: a.batch, qty: Number(a.qty) }));
+  // a batch that is not one of the line's ZMMBE batches (a roll picked by hand) goes on the line's batch
+  if (own.length) return own.map((a) => ({ batch: zb.size && !zb.has(String(a.batch).replace(/^0+(?=\d)/, '')) ? topB() || a.batch : a.batch, qty: Number(a.qty) }));
   const bts = String(p.batch ?? '').split(',').map((x) => x.trim()).filter(Boolean);
-  if (bts.length <= 1) return [{ batch: bts[0] ?? '', qty: Number(p.qty) }];
+  if (!bts.length || (zb.size && !bts.some((b) => zb.has(b.replace(/^0+(?=\d)/, ''))))) {
+    // a roll picked by hand with no batch / a batch that is not the line's: the line's ZMMBE batch with the most UR (its SAP line)
+    const top = zs.filter((z) => Number(z.ur) > 0).sort((a, b) => Number(b.ur) - Number(a.ur))[0] ?? zs[0];
+    if (!top) return [{ batch: bts[0] ?? '', qty: Number(p.qty) }];
+    return [{ batch: String(top?.batch ?? ''), qty: Number(p.qty) }];
+  }
+  if (bts.length === 1) return [{ batch: bts[0], qty: Number(p.qty) }];
   const ur = new Map<string, number>();
   for (const z of m.zmmbe?.length ? m.zmmbe : m.zinr || []) { const bt = String(z.batch ?? '').replace(/^0+/, ''); ur.set(bt, (ur.get(bt) ?? 0) + (Number(m.zmmbe?.length ? z.ur : z.qty) || 0)); }
   let q = Number(p.qty); const out: { batch: string; qty: number }[] = [];
