@@ -4,10 +4,10 @@ import { PageLoading } from '@/components/Loader';
 import Link from 'next/link';
 import Shell, { useShell } from '@/components/Shell';
 import CompleteLine from '@/components/CompleteLine';
-import { PickModal } from '@/components/PickWorkspace';
+import { HoldDialog, PickModal } from '@/components/PickWorkspace';
 import { api, userParam } from '@/lib/api';
 import { useRefreshOnActivity } from '@/lib/freshness';
-import { avail, fmt, fmtDate, fmtQty, isDone, need, type Line } from '@/lib/calc';
+import { avail, fmt, fmtDate, fmtQty, isDone, need, periodOf, type Line } from '@/lib/calc';
 import { action, due, todayLocal, type Due } from '@/lib/smart';
 
 export default function Page() {
@@ -21,6 +21,8 @@ const isPrio = (l: L) => /1\s*st|priority|urgent|last\s*pallet/i.test(`${l.remar
 /** What to do with the line now, best first. */
 function nextStep(l: L): { step: string; tone: string; rank: number } {
   const a = action(l);
+  // a line on Pick Hold waits for the hold to be released: it goes last
+  if (l.hold) return { step: 'On hold', tone: 'bad', rank: 7 };
   if ((l.picked ?? 0) > 0 && avail(l) > 0) return { step: 'Finish picking', tone: 'accent', rank: 0 };
   if (a === 'Ready to pull') return { step: 'Pick now', tone: 'ok', rank: 1 };
   if (a === 'Partial pull') return { step: 'Pick what is there', tone: 'info', rank: 2 };
@@ -37,6 +39,18 @@ function MyWork() {
   const [week, setWeek] = useState<PP | null>(null);
   const [day, setDay] = useState<PP | null>(null);
   const [picking, setPicking] = useState<L | null>(null);
+  // Pick Hold, as on Pick & Dispatch → Plan → Pick: a line that cannot be picked is put on hold (with a reason) until released
+  const [holding, setHolding] = useState<L | null>(null);
+  const setHold = async (l: L, reason: string | null) => {
+    try {
+      await api('/api/status', { method: 'PATCH', body: { key: l.key, week: periodOf(l), date: l.date ?? null, hold: reason } });
+      toast(reason ? `${l.so} / ${l.li} is on hold — ${reason}` : `Hold released: ${l.so} / ${l.li} can be picked`);
+      load();
+    } catch (e) { toast(e instanceof Error ? e.message : 'Could not change the hold.'); }
+  };
+  const holdBtns = (l: L, pick: boolean) => l.hold
+    ? <><span className="pill bad" title={`On hold${l.hold_by ? ` by ${l.hold_by}` : ''}${l.hold_at ? ` · ${new Date(l.hold_at).toLocaleString()}` : ''}`}>On hold · {l.hold}</span> <button className="btn sm" onClick={() => setHold(l, null)} title="Release the hold — the line can be picked again">Release hold</button></>
+    : <>{pick && <button className="btn sm primary" onClick={() => setPicking(l)}>{(l.picked ?? 0) > 0 ? 'Pick more' : 'Pick'}</button>} <button className="btn sm" onClick={() => setHolding(l)} title="Put this line on Pick Hold — nobody can pick it until it is released">Hold</button></>;
   const [err, setErr] = useState('');
   const today = todayLocal();
   const load = useCallback(async () => {
@@ -97,7 +111,7 @@ function MyWork() {
                       <b>{l.so} / {l.li}</b><span className="muted">{l.item} · {l.plant || '–'} · {l.plan_type === 'day' ? (/~(\d+)$/.exec(l.week || '') ? `Pick ${/~(\d+)$/.exec(l.week || '')![1]}` : 'day plan') : 'week plan'}</span>
                       <span className={`pill ${d === 'Overdue' ? 'bad' : d === 'Today' ? 'warn' : 'mute'}`}>{d}{l.date ? ` · ${fmtDate(l.date)}` : ''}</span>
                       <span className="n"><b>{fmtQty(need(l))}</b> to send · UR {fmtQty(avail(l))}</span>
-                      {canEdit && (l.hold ? <span className="pill bad" title={l.hold}>On hold</span> : <button className="btn sm primary" onClick={() => setPicking(l)}>Pick</button>)}
+                      {canEdit && <span style={{ whiteSpace: 'nowrap' }}>{holdBtns(l, true)}</span>}
                     </li>
                   );
                 })}
@@ -118,7 +132,7 @@ function MyWork() {
                         <td><span className={`pill ${n.tone}`}>{n.step}</span>{isPrio(l) && <span className="pill warn" style={{ marginLeft: 4 }}>priority</span>}</td>
                         <td>{l.so}</td><td>{l.li}</td><td>{l.item}</td><td>{l.plan_type === 'day' ? 'Day' : 'Week'}</td><td>{fmtDate(l.date)}</td><td>{l.plant}</td>
                         <td className="n">{fmtQty(l.qty)}</td><td className="n">{l.picked ? fmtQty(l.picked) : '–'}</td><td className="n"><b>{fmtQty(need(l))}</b></td><td className="n">{fmtQty(avail(l))}</td>
-                        <td style={{ whiteSpace: 'nowrap' }}>{canEdit && n.rank <= 2 && (l.hold ? <span className="pill bad" title={l.hold}>On hold</span> : <button className="btn sm primary" onClick={() => setPicking(l)}>Pick</button>)}
+                        <td style={{ whiteSpace: 'nowrap' }}>{canEdit && holdBtns(l, n.rank <= 2)}
                           {canEdit && <> <CompleteLine line={l} onDone={(m) => { toast(m); load(); }} /></>}</td>
                       </tr>
                     );
@@ -129,6 +143,7 @@ function MyWork() {
           ))}
         </>
       )}
+      {holding && <HoldDialog line={holding} onClose={() => setHolding(null)} onSave={(r) => { const l = holding; setHolding(null); void setHold(l, r); }} />}
       {picking && <PickModal week={picking.week} line={picking} onClose={() => setPicking(null)} onDone={(m) => { setPicking(null); toast(m); load(); }} />}
     </main>
   );

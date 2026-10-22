@@ -309,7 +309,7 @@ function autoPlan(c: Candidates, withPool = false): { sel: Sel; last: LastRoll |
 
 const HOLD_REASONS = ['Customer asked to hold', 'Shade issue', 'Quality check', 'Plant not ready', 'Wrong roll / label', 'Waiting for approval'];
 /** Asks the reason for a Pick Hold (a list of usual reasons, or typed). */
-function HoldDialog({ line, onClose, onSave }: { line: LineP; onClose: () => void; onSave: (reason: string) => void }) {
+export function HoldDialog({ line, onClose, onSave }: { line: LineP; onClose: () => void; onSave: (reason: string) => void }) {
   const [r, setR] = useState('');
   return (
     <div className="modal-back">
