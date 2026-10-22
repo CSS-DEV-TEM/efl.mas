@@ -153,6 +153,19 @@ function Uploads() {
     }
   }
 
+  // a Pick with its whole pick history (picks, packing lists, rejected rolls, balances) — Admin / Head
+  async function deleteWithHistory(w: string) {
+    const t = prompt(`Delete ${roundName(w, plantNames)} WITH its pick history?\n\nThe plan, its reports, every pick saved for it, its packing lists, rejected rolls and balance follow-up are deleted. This cannot be undone.\n\nType DELETE to confirm.`);
+    if (t === null) return;
+    if (t.trim().toUpperCase() !== 'DELETE') { toast('Not deleted — type DELETE to confirm.'); return; }
+    try {
+      const x = await api<{ picks: number; rolls: number }>(`/api/rounds?rid=${encodeURIComponent(w)}&history=1`, { method: 'DELETE' });
+      toast(`${roundName(w, plantNames)} deleted with its history (${x.picks} pick${x.picks === 1 ? '' : 's'}, ${x.rolls} roll${x.rolls === 1 ? '' : 's'})`); setBarKey((k) => k + 1); loadStatus();
+    } catch (e) { toast(e instanceof Error ? e.message : 'Could not delete.'); }
+  }
+  const [tab, setTabS] = useState<'upload' | 'plans'>(() => { try { return location.hash === '#plans' ? 'plans' : 'upload'; } catch { return 'upload'; } });
+  const setTab = (t: 'upload' | 'plans') => { setTabS(t); try { window.history.replaceState(null, '', t === 'plans' ? '#plans' : location.pathname); } catch { /* ignore */ } };
+
   async function deleteWeek(w: string) {
     if (!window.confirm(`Delete the plan ${roundName(w, plantNames)}? Stock reports and the other Picks stay.`)) return;
     try { await api('/api/data/plan?week=' + encodeURIComponent(w), { method: 'DELETE' }); toast(`${roundName(w, plantNames)} deleted`); loadStatus(); }
@@ -184,6 +197,33 @@ function Uploads() {
 
       <DayPickBar day={day} setDay={setDay} rid={rid} setRid={setRid} toast={toast} refreshKey={barKey} onUploaded={() => { void loadStatus(); }} />
 
+      <div className="tabs" role="tablist" style={{ margin: '4px 0 2px' }}>
+        <button role="tab" aria-selected={tab === 'upload'} className={tab === 'upload' ? 'on' : ''} onClick={() => setTab('upload')}>Upload reports</button>
+        <button role="tab" aria-selected={tab === 'plans'} className={tab === 'plans' ? 'on' : ''} onClick={() => setTab('plans')}>Day plans in the system{weeks.length ? ` (${weeks.length})` : ''}</button>
+      </div>
+
+      {tab === 'plans' && (weeks.length > 0 ? <>
+      {weeks.length > 0 && (
+        <section className="card" aria-labelledby="wk-title">
+          <h2 id="wk-title">Day plans in the system</h2>
+          <p className="sub">One plan per day, plant and Pick No. Uploading a Pick again replaces only that Pick; the others stay.</p>
+          <div className="wk-list">
+            {weeks.slice(0, 30).map((w, i) => (
+              <div key={w.week} className="wk-row">
+                <b>{roundName(w.week, plantNames)}</b>{i === 0 && <span className="pill accent">Latest</span>}
+                <span className="muted">{w.start ? fmtDate(w.start) : 'no date'}</span>
+                <span className="num">{fmt(w.lines)} lines · {fmt(w.done)} done</span>
+                {user.role === 'admin' && <button className="btn sm danger" onClick={() => deleteWeek(w.week)}>Delete</button>}
+                {isBossRole(user.role) && /^\d{4}-\d{2}-\d{2}~[^~]*~\d+$/.test(w.week) && <button className="btn sm danger" onClick={() => deleteWithHistory(w.week)} title="Delete this Pick with its plan, reports AND its pick history">Delete + history</button>}
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+      </> : <div className="card empty"><strong>No day plans yet</strong><span>Upload a Pick&apos;s plan on the Upload reports tab.</span></div>)}
+
+      {tab === 'upload' && <>
+
       <section className="card" aria-labelledby="tpl-title">
         <h2 id="tpl-title">Sample formats</h2>
         <p className="sub">Download a format, paste your data under the headers and upload it here. Each file has a "How to use" sheet.</p>
@@ -198,34 +238,7 @@ function Uploads() {
         </div>
       </section>
 
-      {weeks.length > 0 && (
-        <section className="card" aria-labelledby="wk-title">
-          <h2 id="wk-title">Day plans in the system</h2>
-          <p className="sub">One plan per day, plant and Pick No. Uploading a Pick again replaces only that Pick; the others stay.</p>
-          <div className="wk-list">
-            {weeks.slice(0, 30).map((w, i) => (
-              <div key={w.week} className="wk-row">
-                <b>{roundName(w.week, plantNames)}</b>{i === 0 && <span className="pill accent">Latest</span>}
-                <span className="muted">{w.start ? fmtDate(w.start) : 'no date'}</span>
-                <span className="num">{fmt(w.lines)} lines · {fmt(w.done)} done</span>
-                {user.role === 'admin' && <button className="btn sm danger" onClick={() => deleteWeek(w.week)}>Delete</button>}
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
 
-      {history.length > 0 && (
-        <section className="card" aria-labelledby="hist-title">
-          <h2 id="hist-title">Recent uploads</h2>
-          <p className="sub">Last {history.length} uploads, newest first.</p>
-          <div className="wk-list">
-            {history.map((h, i) => (
-              <div key={i} className="wk-row"><span>{h.detail}</span><span className="num muted">{h.username} · {ago(h.at)}</span></div>
-            ))}
-          </div>
-        </section>
-      )}
 
       {!canEdit ? <div className="notice info">Your account can view the dashboard. Ask an admin for editor access to upload.</div> : (
         <>
@@ -260,6 +273,18 @@ function Uploads() {
           {jobs.map((j) => <SheetCard key={j.id} job={j} rid={rid} ridLabel={rid ? roundName(rid, plantNames) : ''} owners={owners} me={user.username} onChange={(p) => setJob(j.id, p)} onSend={() => send(j)} onRemove={() => setJobs((js) => js.filter((x) => x.id !== j.id))} />)}
         </>
       )}
+      {history.length > 0 && (
+        <section className="card" aria-labelledby="hist-title">
+          <h2 id="hist-title">Recent uploads</h2>
+          <p className="sub">Last {history.length} uploads, newest first.</p>
+          <div className="wk-list">
+            {history.map((h, i) => (
+              <div key={i} className="wk-row"><span>{h.detail}</span><span className="num muted">{h.username} · {ago(h.at)}</span></div>
+            ))}
+          </div>
+        </section>
+      )}
+      </>}
     </main>
   );
 }

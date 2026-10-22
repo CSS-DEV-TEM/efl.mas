@@ -69,6 +69,18 @@ export default function DayPickBar({ day, setDay, rid, setRid, toast, refreshKey
     try { await api(`/api/rounds?rid=${encodeURIComponent(rid)}`, { method: 'DELETE' }); setRid(''); toast('Pick deleted'); await loadRounds(); onUploaded?.(); }
     catch (e) { toast(e instanceof Error ? e.message : 'Could not delete.'); }
   };
+  // the Pick with everything of it: plan, reports and its pick history (picks, packing lists, rejected rolls, balances)
+  const deleteWithHistory = async () => {
+    const r = rounds.find((x) => x.id === rid);
+    if (!r) return;
+    const t = prompt(`Delete ${pickLabel(r, names)} of ${fmtDate(day)} WITH its pick history?\n\nThe plan, its reports, every pick saved for it, its packing lists, rejected rolls and balance follow-up are deleted. This cannot be undone.\n\nType DELETE to confirm.`);
+    if (t === null) return;
+    if (t.trim().toUpperCase() !== 'DELETE') { toast('Not deleted — type DELETE to confirm.'); return; }
+    try {
+      const x = await api<{ picks: number; rolls: number }>(`/api/rounds?rid=${encodeURIComponent(rid)}&history=1`, { method: 'DELETE' });
+      setRid(''); toast(`Pick deleted with its history (${x.picks} pick${x.picks === 1 ? '' : 's'}, ${x.rolls} roll${x.rolls === 1 ? '' : 's'})`); await loadRounds(); onUploaded?.();
+    } catch (e) { toast(e instanceof Error ? e.message : 'Could not delete.'); }
+  };
   const inputs = useRef<Record<string, HTMLInputElement | null>>({});
   const upload = async (src: PickSrc, f: File) => {
     setBusy(src);
@@ -111,6 +123,7 @@ export default function DayPickBar({ day, setDay, rid, setRid, toast, refreshKey
           <button className="btn sm primary" onClick={createPick} disabled={!day}>+ Create Pick</button>
         </span>}
         {boss && cur && <button className="btn sm danger" onClick={deletePick} title="Delete this Pick with its plan and its own reports">Delete Pick</button>}
+        {boss && cur && <button className="btn sm danger" onClick={deleteWithHistory} title="Delete this Pick with its plan, reports AND its pick history (picks, packing lists, rejected rolls, balances)">Delete Pick + history</button>}
       </div>
       {!rid ? <div className="notice warn" style={{ marginTop: 10 }}>Choose or create a Pick — the plan and the reports are uploaded to a Pick.</div> : (
         <div className="dpb-reports">

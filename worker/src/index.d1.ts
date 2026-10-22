@@ -404,7 +404,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 54; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 55; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1118,17 +1118,29 @@ async function handleRounds(env: Env, req: Request) {
     const rid = String(sp.get('rid') || '');
     if (!parseRound(rid)) throw new HttpError(400, 'Unknown Pick.');
     const n = Number((await env.DB.prepare('SELECT COUNT(*) n FROM pick_req WHERE week = ? AND cancelled_at IS NULL').bind(rid).first<{ n: number }>())?.n ?? 0);
-    if (n) throw new HttpError(409, `${periodLabel(rid)} has ${n} saved pick${n === 1 ? '' : 's'} — cancel them in the pick history first.`);
+    // ?history=1: the Pick's pick history goes too (its picks, packing lists, rejected rolls, balance follow-up) — Admin / Head
+    const withHistory = sp.get('history') === '1';
+    if (n && !withHistory) throw new HttpError(409, `${periodLabel(rid)} has ${n} saved pick${n === 1 ? '' : 's'} — cancel them in the pick history first, or delete the Pick with its history.`);
+    const rolls = withHistory ? Number((await env.DB.prepare('SELECT COUNT(*) n FROM picks WHERE week = ?').bind(rid).first<{ n: number }>())?.n ?? 0) : 0;
     await env.DB.batch([
+      ...(withHistory ? [
+        env.DB.prepare('DELETE FROM picks WHERE week = ?').bind(rid),
+        env.DB.prepare('DELETE FROM pick_req WHERE week = ?').bind(rid),
+        env.DB.prepare('DELETE FROM pick_reject WHERE week = ?').bind(rid),
+        env.DB.prepare("DELETE FROM follow_close WHERE ref LIKE ? || '|%'").bind(rid),
+        // balance lines of this Pick's lines in other Picks: they stay as lines of their own
+        env.DB.prepare("UPDATE plan SET follow_of = NULL WHERE follow_of LIKE ? || '|%'").bind(rid),
+      ] : []),
       ...['stock', 'zinr', 'zcoment', 'korber', 'zroll', 'uploads'].map((t) => env.DB.prepare(`DELETE FROM ${t} WHERE rid = ?`).bind(rid)),
       env.DB.prepare("DELETE FROM line_status WHERE key LIKE ? || '#%'").bind(rid),
       env.DB.prepare('DELETE FROM plan WHERE week = ?').bind(rid),
       env.DB.prepare('DELETE FROM pick_round WHERE rid = ?').bind(rid),
-      env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'pick-round', `Deleted ${periodLabel(rid)} with its plan and reports`),
+      env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'pick-round', `Deleted ${periodLabel(rid)} with its plan and reports${withHistory ? ` and its pick history (${n} pick${n === 1 ? '' : 's'}, ${rolls} roll${rolls === 1 ? '' : 's'})` : ''}`),
       env.DB.prepare("DELETE FROM config WHERE k IN ('c_counts', 'c_pick_counts', 'c_weeks') OR k LIKE 'c_weeks:%'"),
     ]);
     await broadcast(env, { type: 'data', src: 'plan', by: s.u, rows: 0 });
-    return json({ ok: true });
+    if (withHistory) await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: 0 });
+    return json({ ok: true, picks: n, rolls });
   }
   // GET ?day=yyyy-mm-dd[&plant=]: the Picks of the day — created ones (no plan yet too) and the ones with a plan; which reports each has
   const { owner } = await viewScope(env, req);
