@@ -36,8 +36,8 @@ const STOCK_FIELDS: FieldDef[] = [
   { id: 'material', label: 'Material', required: true, aliases: ['material', 'item code', 'material number', 'fabric code'], keyed: 'H' },
   { id: 'batch', label: 'Batch', aliases: ['batch'], keyed: 'I' },
   { id: 'style', label: 'Style', aliases: ['style'], keyed: 'J' },
-  { id: 'qi', label: 'QI', numeric: true, aliases: ['qi', 'quality inspection', 'so qi stock', 'in quality insp', 'qi stock'], keyed: 'L' },
-  { id: 'block', label: 'Block', numeric: true, aliases: ['block', 'blocked', 'blocked stock', 'so blocked stock stock', 'so blocked stock'], keyed: 'M' },
+  { id: 'qi', label: 'QI', numeric: true, aliases: ['so qi stock', 'qi', 'quality inspection', 'in quality insp', 'qi stock'], keyed: 'L' },
+  { id: 'block', label: 'Block', numeric: true, aliases: ['so blocked stock stock', 'so blocked stock', 'block', 'blocked', 'blocked stock'], keyed: 'M' },
   { id: 'assigned', label: 'Assigned', numeric: true, aliases: ['assigned', 'assigned qty', 'assigned quantity'], keyed: 'N' },
   { id: 'total', label: 'Total', numeric: true, aliases: ['total', 'total stock', 'total qty'], keyed: 'O' },
 ];
@@ -162,6 +162,8 @@ export function detectMapping(src: Src, grid: Grid): Mapping {
       const cands: number[] = [];
       row.forEach((v, c) => { if (!used.has(c) && al.includes(norm(v))) cands.push(c); });
       if (!cands.length) continue;
+      // two matching columns (ZMMBE "SO QI stock" and "QI stock"): the earlier alias wins — the SO column
+      cands.sort((a, b) => al.indexOf(norm(row[a])) - al.indexOf(norm(row[b])) || a - b);
       // prefer a column whose data matches the type (numbers vs text) in the rows below
       const pick = cands.find((c) => typeMatches(grid, r + 1, c, f)) ?? cands[0];
       cols[f.id] = pick; used.add(pick); hits++;

@@ -63,7 +63,7 @@ export interface Candidates {
   /** what is still needed from each batch (its UR less what was picked), trimmed to the line balance */
   batchNeed?: { batch: string; lots: string[]; ur: number; picked: number; need: number }[];
   line: { so: string; li: string; item: string; qty: number; plant: string | null; key: string; week: string; date: string };
-  /** plan QTY and the UR (Total − SO Blocked − Assigned); need = what to pick = the smaller of the two */
+  /** plan QTY and the UR (Total − SO QI − SO Blocked − Assigned); need = what to pick = the smaller of the two */
   planQty?: number; ur?: number;
   need: number; picked: number; stock: { batch: string; ur: number; sloc: string }[]; lots: LotInfo[]; rolls: Candidate[]; steps: string[];
   /** ZROLLMGT check: rolls of this line that cannot be picked, and why */

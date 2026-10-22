@@ -147,7 +147,7 @@ const thisWeek = () => weekId(new Date(Date.now() + 5.5 * 3600 * 1000).toISOStri
  * adds plan.week, fills it from the dates, and moves dashboard edits to week-scoped keys ("2026-W42#SO|LI|Item").
  */
 let schemaReady = false;
-const SCHEMA_V = '26';
+const SCHEMA_V = '27';
 async function ensureSchema(env: Env) {
   if (schemaReady || !env.DB) return;
   try {
@@ -272,6 +272,11 @@ async function ensureSchema(env: Env) {
       FROM plan WHERE plan_type = 'day' AND instr(week, '~') > 0 GROUP BY week`),
     env.DB.prepare("INSERT OR IGNORE INTO plan_day (day, created_by, created_at) SELECT DISTINCT day, created_by, created_at FROM pick_round"),
   ]);
+  // v27: UR never holds QI stock: UR = Total − QI − Block − Assigned (the rows saved before counted QI as UR)
+  await env.DB.batch([
+    env.DB.prepare('UPDATE stock SET ur = MAX(0, ROUND(total - COALESCE(qi, 0) - COALESCE(block, 0) - COALESCE(assigned, 0), 3)) WHERE COALESCE(qi, 0) > 0 AND total IS NOT NULL AND ur > MAX(0, ROUND(total - COALESCE(qi, 0) - COALESCE(block, 0) - COALESCE(assigned, 0), 3))'),
+    env.DB.prepare("DELETE FROM config WHERE k IN ('c_counts', 'c_pick_counts', 'c_weeks') OR k LIKE 'c_weeks:%' OR k LIKE 'c_counts:%' OR k LIKE 'c_pick_counts:%'"),
+  ]);
   // v26: SAP ZROLLMGT (roll management): a roll is picked only when its Barcode Number is there at StorageBin EXPO-FIX
   await env.DB.batch([
     env.DB.prepare(`CREATE TABLE IF NOT EXISTS zroll (barcode TEXT NOT NULL, bin TEXT, material TEXT, batch TEXT, qty REAL, uom TEXT, sloc TEXT, plant TEXT,
@@ -395,7 +400,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 46; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 47; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -421,8 +426,9 @@ function mapStock(src: string, rows: Row[]) {
     if (!so || !li || !mat) continue; // SAP subtotal lines have no SO
     const qi = num(r.qi), block = num(r.block), assigned = num(r.assigned);
     const hasTotal = !(r.total === undefined || r.total === null || r.total === '');
-    // UR = Total stock − SO Blocked stock − Assigned Qty (the SAP "Sales order UR Stock" column is not used when Total is there)
-    const ur = hasTotal ? Math.max(0, Math.round((num(r.total) - block - assigned) * 1000) / 1000) : num(r.ur);
+    // UR = Total stock − SO QI stock − SO Blocked stock − Assigned Qty (Total = SO UR + SO QI + SO Blocked): QI and Block are
+    // never UR (the SAP "Sales order UR Stock" column is not used when Total is there)
+    const ur = hasTotal ? Math.max(0, Math.round((num(r.total) - qi - block - assigned) * 1000) / 1000) : num(r.ur);
     out.push({
       src, key: lineKey(so, li, mat), plant: txt(r.plant), sloc: txt(normId(r.sloc)), so_plant: txt(r.so_plant), so, li,
       material: mat, batch: txt(normId(r.batch)), style: txt(r.style), ur, qi, block, assigned,
@@ -2367,7 +2373,7 @@ async function makeGate(env: Env) {
 
 /**
  * The match chain for one plan line (the rules agreed with the warehouse):
- *  1. ZMMBE — SO + Material (= Plan Item Code) + LI: UR = Total stock − SO Blocked stock − Assigned Qty, per batch.
+ *  1. ZMMBE — SO + Material (= Plan Item Code) + LI: UR = Total stock − SO QI stock − SO Blocked stock − Assigned Qty, per batch.
  *     What to pick = the plan QTY, but never more than the UR (QTY > UR → the UR; QTY < UR → the QTY).
  *  2. ZINSR — Sales Order + Material + Line Item + Batch (the ZMMBE batches): the inspection lots and how much of each.
  *  3. ZCOMENT VIEW — Inspection # = the lot: its rolls (Vendor Batch, Vendor Roll No, Barcode Number).
@@ -2390,7 +2396,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
   // 1. what to pick: the plan QTY, at most the UR
   const need = r3(Math.min(planQty, urTotal));
   if (!stock.length) steps.push('ZMMBE has no row for this SO / Material / LI — nothing can be picked.');
-  else if (planQty > urTotal + 1e-9) steps.push(`Plan QTY ${planQty} is more than the UR ${urTotal} (Total − SO Blocked − Assigned): the UR ${urTotal} is picked.`);
+  else if (planQty > urTotal + 1e-9) steps.push(`Plan QTY ${planQty} is more than the UR ${urTotal} (Total − SO QI − SO Blocked − Assigned): the UR ${urTotal} is picked.`);
   // the plan QTY taken batch by batch (UR order: the bigger batch first), then lot by lot (2. ZINSR)
   const rejected = new Set((await env.DB.prepare('SELECT DISTINCT pallet FROM pick_reject').all<{ pallet: string }>()).results.map((x) => up(x.pallet)));
   const gate = await makeGate(env);

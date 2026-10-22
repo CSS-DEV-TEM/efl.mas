@@ -167,7 +167,7 @@ let xTable: HTMLTableElement | null = null;
 const TABLES = 'main table, .modal table';
 const wrapOf = (t: HTMLTableElement) => (t.closest('.table-wrap') as HTMLElement | null) ?? t;
 /** a cell's text as it reads on screen: inline pieces run together, block pieces (a second line) get a space; buttons are left out */
-function exportText(td: Element | undefined | null): string {
+function exportText(td: Element | undefined | null, header = false, grp = false): string {
   if (!td) return '';
   const inp = td.querySelector('input:not([type=checkbox]):not([type=radio]), select') as HTMLInputElement | HTMLSelectElement | null;
   if (inp) return inp.value.replace(/\s+/g, ' ').trim();
@@ -175,20 +175,24 @@ function exportText(td: Element | undefined | null): string {
   let out = '', prev: Element | null | undefined;
   const w = document.createTreeWalker(td, NodeFilter.SHOW_TEXT);
   for (let n = w.nextNode(); n; n = w.nextNode()) {
-    if (n.parentElement?.closest('button, .tx-skip, svg')) continue;
+    // a header's label is often a sort button: keep its text there (not the group label above it)
+    if (n.parentElement?.closest(header ? (grp ? '.tx-skip, svg' : '.grp, .tx-skip, svg') : 'button, .tx-skip, svg')) continue;
     const t = n.nodeValue || '';
     if (!t.trim()) { if (t && out && !out.endsWith(' ')) out += ' '; continue; }
     const b = blockOf(n);
     if (prev !== undefined && b !== prev && out && !out.endsWith(' ')) out += ' ';
     out += t; prev = b;
   }
-  return out.replace(/\s+/g, ' ').trim();
+  out = out.replace(/\s+/g, ' ').trim();
+  return header ? out.replace(/\s*[↑↓▲▼]$/, '').trim() : out;
 }
 function titleOf(t: HTMLTableElement) {
   const box = t.closest('details, section, .modal, .card');
   const h0 = box?.querySelector('h2, h3, summary h3, .modal-head h2');
   // the heading without its badges (counts, totals)
-  const h = h0 ? (() => { const c = h0.cloneNode(true) as Element; c.querySelectorAll('.pill, .muted, button').forEach((x) => x.remove()); return c; })() : null;
+  // its own words only (not the badges, live labels or counts inside it)
+  const own = h0 ? Array.from(h0.childNodes).filter((n) => n.nodeType === Node.TEXT_NODE).map((n) => n.nodeValue || '').join(' ').trim() : '';
+  const h = h0 ? (own ? { textContent: own } : (() => { const c = h0.cloneNode(true) as Element; c.querySelectorAll('.pill, .muted, button').forEach((x) => x.remove()); return c; })()) : null;
   return ((h?.textContent || document.title || 'Table').replace(/\s+/g, ' ').trim().replace(/[\\/:*?"<>|[\]]+/g, ' ').slice(0, 60).trim()) || 'Table';
 }
 const asNum = (v: string) => {
@@ -203,8 +207,24 @@ async function exportTable(t: HTMLTableElement) {
   const hr = head[head.length - 1];
   const width = Math.max(hr ? Array.from(hr.cells).reduce((n, c) => n + (c.colSpan || 1), 0) : 0, ...rows.map((r) => Array.from(r.cells).reduce((n, c) => n + (c.colSpan || 1), 0)));
   const cols = Array.from({ length: width }, (_, i) => i);
-  const hdr = cols.map((c) => (hr ? exportText(cellAt(hr, c)) : ''));
-  const keep = cols.filter((c) => hdr[c] !== '' || rows.some((r) => exportText(cellAt(r, c)) !== ''));
+  // the header row's label; blank there → the row above it (a group header); no thead → a first body row of th cells
+  const firstTh = !hr && rows[0] && Array.from(rows[0].cells).every((c) => c.tagName === 'TH') ? rows.shift()! : null;
+  const hdr = cols.map((c) => {
+    for (const row of [...(hr ? head.slice().reverse() : []), ...(firstTh ? [firstTh] : [])]) { const v = exportText(cellAt(row, c), true); if (v) return v; }
+    return '';
+  });
+  const keep = cols.filter((c) => rows.some((r) => exportText(cellAt(r, c)) !== '') || (!rows.length && hdr[c] !== ''));
+  // the same name twice (UR of Full / KFC / PFC): with its group label, else numbered
+  const seen = new Map<string, number>(); keep.forEach((c) => seen.set(hdr[c], (seen.get(hdr[c]) ?? 0) + 1));
+  const orig = [...hdr];
+  keep.forEach((c, i) => {
+    if ((seen.get(orig[c]) ?? 0) < 2) return;
+    const g = hr ? exportText(cellAt(hr, c), true, true) : '';
+    if (g && g !== orig[c]) hdr[c] = g;
+    else if (i > 0 && (seen.get(orig[keep[i - 1]]) ?? 0) < 2) hdr[c] = `${orig[keep[i - 1]]} ${orig[c]}`; // "UR SOLI": the column it counts
+  });
+  const seen2 = new Map<string, number>();
+  for (const c of keep) { const n = (seen2.get(hdr[c]) ?? 0) + 1; seen2.set(hdr[c], n); if (n > 1) hdr[c] = `${hdr[c]} (${n})`; }
   const aoa: (string | number)[][] = [keep.map((c) => hdr[c] || `Column ${c + 1}`)];
   for (const r of rows) {
     if (r.cells.length === 1 && (r.cells[0].colSpan || 1) > 1) { aoa.push([exportText(r.cells[0])]); continue; } // a group row

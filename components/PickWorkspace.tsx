@@ -146,7 +146,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
           <button className={byView === 'lines' ? 'on' : ''} onClick={() => setByView('lines')}>All lines</button>
         </div>
         {byView === 'so' && list.length > 0 && (() => {
-          // what to pick = the plan QTY, at most the UR (Total − SO Blocked − Assigned)
+          // what to pick = the plan QTY, at most the UR (Total − SO QI − SO Blocked − Assigned)
           const pickQty = (l: LineP) => Math.max(0, Math.min(Number(l.qty), Number(l.ur) || 0));
           const sos = Array.from(new Set(list.map((l) => l.so)));
           return (
