@@ -44,7 +44,7 @@ export interface Candidate {
 }
 export interface LotInfo { via?: string | null; noShade?: boolean; /** rolls found straight from ZINR to Korber */ direct?: number; lot: string; batch: string; qty: number; ur: number; qty_ok: boolean; invoice: string | null; vendor_batch: string | null; sloc: string | null; rolls: number; roll_sum: number }
 /** A shade-report roll whose Korber pallet does not agree on Pallet, Lot, Supplier Hu, Invoice and Po: the Korber roll is chosen by hand. */
-export interface ManualRoll { lot: string; batch: string; material: string; vendor_batch: string | null; roll_no: string | null; barcode: string | null; roll_qty: number; shade: string | null; invoice: string | null; po?: string | null; reason: string;
+export interface ManualRoll { /** a Korber pallet added by hand for a shortage of the pick */ free?: boolean; lot: string; batch: string; material: string; vendor_batch: string | null; roll_no: string | null; barcode: string | null; roll_qty: number; shade: string | null; invoice: string | null; po?: string | null; reason: string;
   /** Korber rolls with the same item, Lot Number, Supplier Hu, Invoice and Po (another pallet). */
   suggest?: KorberRow[] }
 export interface KorberRow { /** not pickable: Korber Pick Id not 0, or rejected */ blocked?: string; pick_id?: string | null; pallet: string; item: string; lot: string | null; qty: number; uom: string | null; invoice: string | null; location: string | null; supplier_hu: string | null; status: string | null; available: number; picked_before: number; picks?: PalletPick[] }

@@ -400,7 +400,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 50; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 51; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1795,13 +1795,25 @@ async function handlePick(env: Env, req: Request, p: string) {
       for (const m of [...mine, ...all]) { const o = (m.options as Row[]).find((x) => up(x.pallet) === up(pallet)); if (o) return { m, o }; }
       return null;
     };
-    const manualQty = r3(b.rolls.filter((x) => x.manual && !byPallet.has(up(x.pallet)) && !(x.nobarcode && nbOption(x.pallet, x.manual))).reduce((t, x) => t + num(x.qty), 0));
-    if (manualQty > 0 && cand.shortfall <= 0) throw new HttpError(400, 'Manual pick is only for a balance: the matched rolls already cover this line. Pick those rolls.');
-    if (manualQty > cand.shortfall + 1e-6) throw new HttpError(400, `Manual pick is only for the balance of ${cand.shortfall} that the matched rolls cannot cover.`);
+    const isManual = (x: { pallet: string; manual?: ManualFor; nobarcode?: boolean }) => !!x.manual && !byPallet.has(up(x.pallet)) && !(x.nobarcode && nbOption(x.pallet, x.manual));
+    const manualQty = r3(b.rolls.filter(isManual).reduce((t, x) => t + num(x.qty), 0));
+    // a pallet added by hand fills only the shortage of this pick: what the line still needs after the other rolls chosen
+    const otherQty = r3(b.rolls.filter((x) => !isManual(x)).reduce((t, x) => t + num(x.qty), 0));
+    const room = Math.max(0, r3(Number(cand.need) - Number(cand.picked) - otherQty));
+    if (manualQty > 0 && room <= 1e-9) throw new HttpError(400, 'Manual pallet is only for a shortage: the other rolls of this pick already cover the line.');
+    if (manualQty > room + 1e-6) throw new HttpError(400, `Manual pallets can fill only the shortage of ${room} (the line still needs ${r3(Number(cand.need) - Number(cand.picked))}, the other rolls give ${otherQty}).`);
     for (const x of b.rolls) {
       let r = byPallet.get(up(x.pallet));
       const nb = !r && x.nobarcode ? nbOption(x.pallet, x.manual) : null;
       if (!r && x.nobarcode && !nb) throw new HttpError(400, `Roll ${x.pallet} is not one of the Korber rolls offered for a roll with no barcode (refresh and try again).`);
+      if (!r && x.manual?.free && !nb) {
+        // a manual pallet: its batch = the ZROLLMGT System Batch, else its ZCOMENT roll's batch, else the line's ZMMBE batch with the most UR
+        const zb = await gate.batchOf(x.pallet);
+        const zc = await senv.DB.prepare('SELECT lot, batch, shade FROM zcoment WHERE barcode = ? LIMIT 1').bind(up(x.pallet)).first<Row>();
+        const top = [...cand.stock].sort((a, c) => Number(c.ur) - Number(a.ur))[0];
+        x.manual = { free: true, lot: (zc?.lot as string) ?? null, batch: normId(zb || zc?.batch || top?.batch || '') || null, shade: (zc?.shade as string) ?? null };
+        if (!(await senv.DB.prepare('SELECT 1 FROM korber WHERE pallet = ?').bind(up(x.pallet)).first())) throw new HttpError(400, `Pallet ${x.pallet} is not in this Pick's Korber Inventory.`);
+      }
       if (!r && (x.manual || nb)) r = await manualCandidate(senv, x.pallet, nb ? { ...nb.m, ...(x.manual || {}), barcode: null } as ManualFor : x.manual!, String(line.item));
       if (r && nb) {
         // chosen by the user from the matching rolls: confirmation is needed only when a field did not match
@@ -1827,7 +1839,7 @@ async function handlePick(env: Env, req: Request, p: string) {
       if (r.needsConfirm && !x.confirmed) throw new HttpError(400, `Roll ${x.pallet}: ${r.warnings.join('; ')} — tick "Confirmed" for it.`);
       picks.push({ day, week: b.week, line: lineId, so: line.so, li: line.li, item: line.item, pallet: r.pallet, qty: q, roll_qty: r.base_qty,
         partial: q < left - 1e-6 || r.picked_before > 0 || inThis > 0 ? 1 : 0, shade: r.shade || (await zcomentShade(senv, { pallet: r.pallet, item: r.item, lot: r.lot, supplier_hu: r.supplier_hu }, r.insp_lots)), lot: r.lot, insp_lot: r.insp_lots.join(','), batch: r.batches.join(','),
-        note: [nb ? '' : x.manual ? `Manual pick for roll ${x.manual.roll_no || '?'}${x.manual.barcode ? ' (barcode ' + x.manual.barcode + ')' : ''}` : '', r.warnings.length ? `${nb && !r.needsConfirm ? '' : 'Confirmed: '}${r.warnings.join('; ')}` : ''].filter(Boolean).join(' · ') || null,
+        note: [nb ? '' : x.manual?.free ? `Manual pallet for a shortage — added by ${s.u}` : x.manual ? `Manual pick for roll ${x.manual.roll_no || '?'}${x.manual.barcode ? ' (barcode ' + x.manual.barcode + ')' : ''}` : '', r.warnings.length ? `${nb && !r.needsConfirm ? '' : 'Confirmed: '}${r.warnings.join('; ')}` : ''].filter(Boolean).join(' · ') || null,
         by_user: s.u, at, korber: r.raw });
     }
     // each user's picks are numbered 1st, 2nd … per day (their own packing list)
@@ -2275,7 +2287,7 @@ async function noBarcodeOptions(env: Env, sh: Row, lot: Row, skip: Set<string>) 
   return (used.length ? used : out).sort((a, b) => Number(b.score) - Number(a.score)).slice(0, 12);
 }
 
-interface ManualFor { roll_no?: string | null; barcode?: string | null; lot?: string | null; batch?: string | null; vendor_batch?: string | null; shade?: string | null; roll_qty?: number | null; invoice?: string | null; po?: string | null }
+interface ManualFor { /** a Korber pallet added by hand for a shortage of the pick (not for a ZCOMENT roll) */ free?: boolean; roll_no?: string | null; barcode?: string | null; lot?: string | null; batch?: string | null; vendor_batch?: string | null; shade?: string | null; roll_qty?: number | null; invoice?: string | null; po?: string | null }
 
 /**
  * A pallet's earlier picks (not cancelled): QTY, the roll's QTY when first picked, and the plan each went to
