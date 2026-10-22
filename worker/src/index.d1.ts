@@ -400,7 +400,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 49; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 50; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -2480,13 +2480,32 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
       const owned: Row[] = [];
       for (const k of byLot) if (await ownedBy(String(k.pallet))) owned.push(k);
       const free = byLot.filter((k) => !owned.includes(k));
+      // the separate category: Korber rolls of the same Invoice + Item (Po first) with another Lot Number — not the barcode of a
+      // ZCOMENT roll — that the user may tick for this lot (several), each confirmed ("I checked") as its Lot Number differs
+      {
+        const inv: Row[] = [];
+        const zcOf = new Map<string, string>();
+        for (const k of base) {
+          if (up(k.lot) === vb || !usable(k)) continue;
+          // the barcode of a ZCOMENT roll: only when that roll is of this line's ZMMBE batch (the same SAP batch, another lot)
+          const own = (await env.DB.prepare('SELECT lot, batch FROM zcoment WHERE barcode = ?').bind(up(k.pallet)).all<Row>()).results;
+          if (own.length && !own.some((o) => urBatches.has(normId(o.batch)))) continue;
+          if (own.length) zcOf.set(up(k.pallet), own.map((o) => o.lot).join(', '));
+          inv.push(k);
+        }
+        if (inv.length) {
+          const opts = await nbOptions(env, inv, lot, null, 80);
+          for (const o of opts) if (zcOf.has(up(o.pallet))) o.zcLots = zcOf.get(up(o.pallet));
+          nobarcode.push({ lot: lot.lot, batch: lot.batch, material: lot.material, vendor_batch: lot.vendor_batch, roll_no: null, barcode: null, roll_qty: lot.lot_need, shade: null, invoice: lot.invoice, po: lot.po, noShade: true, invChoice: true,
+            options: opts });
+          steps.push(`Inspection lot ${lot.lot}: ${inv.length} Korber roll${inv.length === 1 ? '' : 's'} of invoice ${lot.invoice ?? '–'} + item${lot.po ? ' (Po first)' : ''} with another Lot Number — under “Invoice + Item match”: tick the ones to pick.`);
+        }
+      }
       if (!free.length) {
         // Lot Number not found: offered by Lot Number (the invoice's other lots of the item)
         const other = base.filter((k) => up(k.lot) !== vb && usable(k));
-        steps.push(`Inspection lot ${lot.lot}: no Korber roll with Lot Number ${lot.vendor_batch ?? '–'} on invoice ${lot.invoice ?? '–'}${gate.on && offBin ? ` in ZROLLMGT at ${gate.bin} (${offBin} roll${offBin === 1 ? '' : 's'} of the invoice + item are not)` : ''}${other.length ? ' — choose the rolls by Lot Number' : ''}.`);
-        if (other.length) nobarcode.push({ lot: lot.lot, batch: lot.batch, material: lot.material, vendor_batch: lot.vendor_batch, roll_no: null, barcode: null, roll_qty: lot.lot_need, shade: null, invoice: lot.invoice, po: lot.po, noShade: true, lotChoice: true,
-          options: await nbOptions(env, other, lot, null) });
-        else manual.push({ lot: lot.lot, batch: lot.batch, material: lot.material, vendor_batch: lot.vendor_batch, roll_no: null, barcode: null, roll_qty: lot.lot_need, shade: null, invoice: lot.invoice, po: lot.po,
+        steps.push(`Inspection lot ${lot.lot}: no Korber roll with Lot Number ${lot.vendor_batch ?? '–'} on invoice ${lot.invoice ?? '–'}${gate.on && offBin ? ` in ZROLLMGT at ${gate.bin} (${offBin} roll${offBin === 1 ? '' : 's'} of the invoice + item are not)` : ''}${other.length ? ' — choose the rolls under “Invoice + Item match”' : ''}.`);
+        if (!other.length) manual.push({ lot: lot.lot, batch: lot.batch, material: lot.material, vendor_batch: lot.vendor_batch, roll_no: null, barcode: null, roll_qty: lot.lot_need, shade: null, invoice: lot.invoice, po: lot.po,
           reason: `No Korber roll of item ${lot.material} on invoice ${lot.invoice ?? '–'} (Pick Id 0${gate.on ? `, in ZROLLMGT at ${gate.bin}` : ''})`, suggest: [] });
         continue;
       }
@@ -2613,6 +2632,13 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
       steps.push(`Batch ${st.batch}: ZROLLMGT has ${zr.length} roll${zr.length === 1 ? '' : 's'} (System Batch)${added ? ` — ${added} more matched straight to Korber` : ''}${known ? `, ${known} already matched by ZCOMENT` : ''}${off ? `, ${off} not at ${gate.bin}` : ''}${noK ? `, ${noK} not in Korber` : ''}.`);
     }
   }
+  // the Invoice + Item category offers only rolls not matched already (a matched roll is ticked in Matched rolls)
+  for (let i = nobarcode.length - 1; i >= 0; i--) {
+    const m = nobarcode[i];
+    if (!m.invChoice) continue;
+    m.options = (m.options as Row[]).filter((o) => !rolls.has(up(o.pallet)));
+    if (!(m.options as Row[]).length) nobarcode.splice(i, 1);
+  }
   if (batchSkip) steps.push(`${batchSkip} ZCOMENT VIEW roll${batchSkip === 1 ? '' : 's'} of a batch that is not this line's ZMMBE batch with UR (${Array.from(urBatches).join(', ')}) — left out.`);
   if (blocked.length) {
     const why = new Map<string, number>();
@@ -2621,7 +2647,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
   }
   if (notPickable) steps.push(`${notPickable} roll${notPickable === 1 ? ' is' : 's are'} already on a Korber (WMS) pick — Pick Id not 0 — and left out.`);
   if (rejectedSkip) steps.push(`${rejectedSkip} rejected roll${rejectedSkip === 1 ? ' is' : 's are'} left out.`);
-  const nLot = nobarcode.filter((m) => m.lotChoice).length, nNb = nobarcode.length - nLot;
+  const nLot = nobarcode.filter((m) => m.lotChoice).length, nNb = nobarcode.filter((m) => !m.invChoice).length - nLot;
   if (nNb) steps.push(`${nNb} roll${nNb === 1 ? '' : 's'} without a Korber barcode: choose the Korber roll under “No Barcode — choose the roll” (Invoice, Item and Lot agree; Po / Supplier Hu matches first).`);
   if (nLot) steps.push(`${nLot} roll${nLot === 1 ? '' : 's'} / lot${nLot === 1 ? '' : 's'} whose Lot Number is not in Korber: choose a roll of the invoice's other lots (Pick by Lot Number).`);
   // the master pick history: a pallet picked in full is gone, a cut roll keeps its balance
@@ -2635,7 +2661,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
   }
   const list = Array.from(rolls.values()).sort((a, b) => Number(b.available > 0) - Number(a.available > 0) || Number(!!b.suggested) - Number(!!a.suggested) || String(a.lot).localeCompare(String(b.lot)) || String(a.supplier_hu).localeCompare(String(b.supplier_hu), undefined, { numeric: true }));
   const matchedAvail = r3(list.filter((r) => !r.pool || r.suggested).reduce((t, r) => t + r.available, 0));
-  const nbAvail = r3(nobarcode.filter((m) => !m.done).reduce((t, m) => {
+  const nbAvail = r3(nobarcode.filter((m) => !m.done && !m.invChoice).reduce((t, m) => {
     const best = Math.max(0, ...(m.options as Row[]).map((o) => Number(o.available)));
     return t + (Number(m.roll_qty) > 0 ? Math.min(best, Number(m.roll_qty)) : best);
   }, 0));
@@ -2659,7 +2685,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
 }
 
 /** Korber rolls offered for one roll / lot (best first): checks against the lot (Invoice, Lot, Po) and the roll (Supplier Hu = Vendor Roll No). */
-async function nbOptions(env: Env, ks: Row[], lot: Row, sh: Row | null) {
+async function nbOptions(env: Env, ks: Row[], lot: Row, sh: Row | null, limit = 30) {
   const vb = up(sh?.vendor_batch || lot.vendor_batch), hu = up(sh?.roll_no);
   const out: Row[] = [];
   for (const k of ks) {
@@ -2676,7 +2702,7 @@ async function nbOptions(env: Env, ks: Row[], lot: Row, sh: Row | null) {
       picked_before: before, available: Math.max(0, r3(base - before)), checks, exact: !!(checks.lot && checks.hu), score, picks: pp.picks });
   }
   const used = out.filter((o) => Number(o.picked_before) > 0 && Number(o.available) > 1e-9);
-  return (used.length && sh ? used : out).sort((a, b) => Number(b.score) - Number(a.score) || Number(b.available) - Number(a.available)).slice(0, 30);
+  return (used.length && sh ? used : out).sort((a, b) => Number(b.score) - Number(a.score) || Number(b.available) - Number(a.available)).slice(0, limit);
 }
 
 /** The rolls whose QTY adds up closest to `target` without going far over (rolls in the order given: Po first). */

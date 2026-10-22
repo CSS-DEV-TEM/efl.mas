@@ -55,7 +55,7 @@ export const pickNote = (p: PalletPick) => [String(p.qty), p.plan || p.day, p.so
 /** A Korber roll offered for a shade-report roll with no Barcode Number (same item; Lot / Supplier Hu agree). */
 export interface NbOption extends KorberRow { checks: Record<string, boolean | null>; exact: boolean }
 /** A shade-report roll with no Barcode Number: the user chooses its Korber roll from `options`. */
-export interface NoBarcodeRoll extends Omit<ManualRoll, 'reason' | 'suggest'> { /** its Lot Number is not in Korber: the invoice's other lots are offered */ lotChoice?: boolean; options: NbOption[]; /** its Korber roll was picked in full already */ done?: boolean; /** an inspection lot with no Shade Report in ZCOMENT: roll_qty = the lot QTY */ noShade?: boolean; /** its ZCOMENT barcode is not a Korber pallet */ zcBarcode?: string }
+export interface NoBarcodeRoll extends Omit<ManualRoll, 'reason' | 'suggest'> { /** its Lot Number is not in Korber: the invoice's other lots are offered */ lotChoice?: boolean; /** a lot with no ZCOMENT rolls: the Korber rolls of its Invoice + Item (Po first) with another Lot Number, to tick (several) */ invChoice?: boolean; options: NbOption[]; /** its Korber roll was picked in full already */ done?: boolean; /** an inspection lot with no Shade Report in ZCOMENT: roll_qty = the lot QTY */ noShade?: boolean; /** its ZCOMENT barcode is not a Korber pallet */ zcBarcode?: string }
 export interface Candidates {
   manual?: ManualRoll[];
   /** rolls without a Barcode Number, each with the Korber rolls that match its other fields */

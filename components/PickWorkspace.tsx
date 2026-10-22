@@ -414,6 +414,15 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
     n[o.pallet] = { qty: String(r3(left > 1e-9 ? Math.min(want, left) : want)), manual: m, korber: o, nb: m };
     return n;
   });
+  // Invoice + Item match (a lot with no ZCOMENT rolls): tick several Korber rolls of the invoice + item for the lot
+  const toggleInv = (m: NoBarcodeRoll, o: NbOption) => setSel((s) => {
+    const n = { ...s };
+    if (n[o.pallet]?.nb === m) { delete n[o.pallet]; return n; }
+    if (n[o.pallet] || o.available <= 1e-9) return n;
+    const left = r3(remaining - Object.values(n).reduce((t, x) => t + (Number(x.qty) || 0), 0));
+    n[o.pallet] = { qty: String(r3(left > 1e-9 ? Math.min(o.available, left) : o.available)), manual: m, korber: o, nb: m };
+    return n;
+  });
   // Qty only counts for a lot without Shade Report (otherwise Korber's Actual Qty is simply the roll's QTY)
   const nbMiss = (o: NbOption, m?: NoBarcodeRoll) => (['lot', 'hu', 'qty'] as const).filter((k) => o.checks[k] === false && (k !== 'qty' || !!m?.noShade));
   // what is already chosen by hand for one shade-report roll (several Korber rolls can make up one roll / lot QTY)
@@ -431,7 +440,8 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
   const flagged = c ? [
     ...c.rolls.filter((r) => sel[r.pallet] && r.needsConfirm).map((r) => ({ pallet: r.pallet, why: `${r.supplier_hu ?? ''} ${r.warnings.join('; ')}`.trim() })),
     ...manualSel.map(([pallet, x]) => ({ pallet, why: `chosen by hand for roll ${x.manual!.roll_no || '?'}` })),
-    ...nbSel.filter(([, x]) => x.korber && nbMiss(x.korber as NbOption, x.nb).length).map(([pallet, x]) => ({ pallet, why: `no barcode, roll ${x.nb!.roll_no || '?'}: ${nbMiss(x.korber as NbOption, x.nb).map((k) => ({ lot: 'Lot', hu: 'Supplier Hu', qty: 'Qty' })[k]).join(', ')} not the same` })),
+    ...nbSel.filter(([, x]) => x.nb?.invChoice).map(([pallet, x]) => ({ pallet, why: `Invoice + Item match for lot ${x.nb!.lot}: Lot Number ${(x.korber as NbOption).lot ?? '–'} ≠ ${x.nb!.vendor_batch ?? '–'}${(x.korber as NbOption).checks.po === false ? ', Po not the same' : ''}` })),
+    ...nbSel.filter(([, x]) => !x.nb?.invChoice && x.korber && nbMiss(x.korber as NbOption, x.nb).length).map(([pallet, x]) => ({ pallet, why: `no barcode, roll ${x.nb!.roll_no || '?'}: ${nbMiss(x.korber as NbOption, x.nb).map((k) => ({ lot: 'Lot', hu: 'Supplier Hu', qty: 'Qty' })[k]).join(', ')} not the same` })),
   ] : [];
   const overByFullRoll = lastOn && lastMode === 'full';
   const offsiteOver = kind === 'offsite' && diff > 0.0005;
@@ -447,7 +457,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
         week, key: line.key, date: line.date, pickNo: pickNo.trim() || null, kind,
         overConfirmed: kind === 'normal' && diff > 0.0005 ? (overByFullRoll || overOk) : false,
         closeShort: kind === 'normal' && isShort && closeShort,
-        rolls: Object.entries(sel).map(([pallet, x]) => ({ pallet, qty: Number(x.qty), confirmed: checkedOk, ...(x.manual ? { manual: x.manual } : {}), ...(x.nb ? { nobarcode: true } : {}) })),
+        rolls: Object.entries(sel).map(([pallet, x]) => ({ pallet, qty: Number(x.qty), confirmed: checkedOk, ...(x.manual ? { manual: { ...x.manual, options: undefined, suggest: undefined } } : {}), ...(x.nb ? { nobarcode: true } : {}) })),
       } });
       onDone(`${kind === 'offsite' ? 'Offsite' : 'Normal'} ${r.label} pick of ${r.day}: ${r.rolls} roll${r.rolls === 1 ? '' : 's'}, ${fmt(r.qty, 2)} — ${line.so} / ${line.li}`);
     } catch (e) { setErr(e instanceof Error ? e.message : 'Pick failed.'); } finally { setBusy(false); }
@@ -511,7 +521,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
                 {open.some((r) => r.pool) && <button type="button" className="btn sm primary" title="The Lot Number is shared by several SO lines: select the suggested rolls (their Actual Qty adds up to this line's lot QTY) — check them" onClick={() => applyAuto(c, Object.fromEntries([...manualSel, ...nbSel]), true)}>{open.some((r) => r.suggested) ? `Select suggested rolls (${open.filter((r) => r.suggested && r.available > 1e-9).length})` : 'Select shared-lot rolls too'}</button>}
                 {nSel > 0 && <button type="button" className="btn sm" onClick={() => { setSel({}); setLast(null); }}>Clear</button>}
               </div>
-              {!c.rolls.length ? <p className="muted">No Korber roll matched on Barcode for this line.{c.nobarcode?.length ? ' Rolls without a barcode: choose them under “No Barcode” below.' : c.manual?.length ? ' See “Not matched” below.' : ' Check that ZINR, ZCOMENT VIEW and Korber are uploaded and current.'}</p> : (
+              {!c.rolls.length ? <p className="muted">No Korber roll matched on Barcode for this line.{c.nobarcode?.some((m) => m.invChoice) ? ' Choose rolls under “Invoice + Item match” below.' : c.nobarcode?.length ? ' Rolls without a barcode: choose them under “No Barcode” below.' : c.manual?.length ? ' See “Not matched” below.' : ' Check that ZINR, ZCOMENT VIEW and Korber are uploaded and current.'}</p> : (
                 <div className="table-wrap" style={{ maxHeight: 360 }}>
                   <table className="mini pk-table">
                     <thead><tr><th /><th>Supplier HU</th><th>Pallet</th><th>Location</th><th>Shade</th><th className="n">Available</th><th className="n">Pick qty</th><th>Match</th></tr></thead>
@@ -590,13 +600,41 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
               </div>
             ))}
 
-            {(c.nobarcode?.length ?? 0) > 0 && (
+            {(c.nobarcode || []).filter((m) => m.invChoice).map((m, gi) => {
+              const mine = nbSel.filter(([, x]) => x.nb === m);
+              const tot = r3(mine.reduce((t, [, x]) => t + (Number(x.qty) || 0), 0));
+              return (
+                <div key={`inv${gi}`} className="nb-pick inv-pick">
+                  <h3>Invoice + Item match <span className="pill info">{m.options.length}</span> <span className="muted small">lot {m.lot} · batch {m.batch} · Lot Number {m.vendor_batch || '–'} · invoice {m.invoice || '–'}{m.po ? ` · Po ${m.po}` : ''} · lot QTY {fmtQty(m.roll_qty)}{mine.length ? ` · ${mine.length} ticked = ${fmtQty(tot)}` : ''}</span></h3>
+                  <p className="sub" style={{ margin: '0 0 6px' }}>This inspection lot has no rolls in ZCOMENT VIEW. Korber rolls of the <b>same Invoice + Item</b> with <b>another Lot Number</b>{m.po ? <> — <b>Po</b> matches first</> : ''}{''} (in ZROLLMGT at the bin, not another roll&apos;s barcode). Tick the rolls to pick for this lot; each needs “I checked” because its Lot Number differs.</p>
+                  <div className="table-wrap pk-tbl" style={{ maxHeight: 280 }}><table className="mini">
+                    <thead><tr><th /><th>Pallet</th><th>Korber Lot Number</th><th>Supplier HU</th><th>Location</th><th>Po</th><th className="n">Available</th><th className="n">Pick qty</th></tr></thead>
+                    <tbody>{m.options.map((o) => {
+                      const s0 = sel[o.pallet], mineSel = s0?.nb === m, other = !!s0 && !mineSel, gone = o.available <= 1e-9;
+                      return (
+                        <tr key={o.pallet} className={`${mineSel ? 'picked' : ''} ${gone ? 'gone' : ''}`} onClick={(e) => { if (!gone && !other && (e.target as HTMLElement).tagName !== 'INPUT') toggleInv(m, o); }}>
+                          <td><input type="checkbox" checked={mineSel} disabled={gone || other} onChange={() => toggleInv(m, o)} aria-label={`Pick ${o.pallet}`} /></td>
+                          <td className="mono">{o.pallet}{o.picked_before > 0 && <div className="pk-prev">{gone ? 'Picked in full' : `Cut roll · ${fmtQty(o.available)} left`} — {(o.picks || []).map(pickNote).join(' | ')}</div>}</td>
+                          <td>{o.lot ?? '–'}</td><td>{o.supplier_hu ?? '–'}</td><td>{o.location ?? ''}</td>
+                          <td>{o.checks.po === null ? '–' : <span className={`pill ${o.checks.po ? 'ok' : 'warn'}`}>{o.checks.po ? '✓ Po' : '✗ Po'}</span>}</td>
+                          <td className="n">{gone ? <span className="pill mute">picked</span> : other ? <span className="pill mute">chosen elsewhere</span> : fmtQty(o.available)}</td>
+                          <td className="n">{mineSel ? <input className="as-search" type="number" step="0.001" min="0.001" max={o.available} style={{ width: 92 }} value={s0.qty} onClick={(e) => e.stopPropagation()}
+                            onChange={(e) => setSel((x) => ({ ...x, [o.pallet]: { ...x[o.pallet], qty: e.target.value } }))} aria-label="Pick qty" /> : ''}</td>
+                        </tr>
+                      );
+                    })}</tbody>
+                  </table></div>
+                </div>
+              );
+            })}
+
+            {(c.nobarcode || []).some((m) => !m.invChoice) && (
               <div className="nb-pick">
-                <h3>No Barcode — choose the roll <span className="pill info">{c.nobarcode!.length}</span>{nbSel.length > 0 && <span className="muted small"> · {nbSel.length} chosen</span>}</h3>
+                <h3>No Barcode — choose the roll <span className="pill info">{c.nobarcode!.filter((m) => !m.invChoice).length}</span>{nbSel.length > 0 && <span className="muted small"> · {nbSel.length} chosen</span>}</h3>
                 <p className="sub" style={{ margin: '0 0 6px' }}>These Shade Report rolls have no Barcode Number in ZCOMENT. Listed: Korber rolls of the same item with <b>Supplier Hu = Vendor Roll No</b> (only <b>Lot Number = Vendor Batch</b> when there is no roll no), Invoice and Po not different, and not the barcode of another roll. Choose the right one — a roll whose Lot or Qty differs needs “I checked”. An inspection lot with <b>no Shade Report</b> in ZCOMENT is listed here too: its Korber rolls with the same Lot Number, the one whose Actual Qty is the lot QTY first.</p>
                 <div className="table-wrap pk-tbl"><table className="mini">
                   <thead><tr><th>Vendor Roll No</th><th>Vendor Batch</th><th>Batch</th><th>Shade</th><th className="n">Roll / lot qty</th><th>Korber roll</th><th className="n">Pick qty</th></tr></thead>
-                  <tbody>{c.nobarcode!.map((m, i) => {
+                  <tbody>{c.nobarcode!.filter((m) => !m.invChoice).map((m, i) => {
                     const chosen = nbSel.find(([, x]) => x.nb === m);
                     const co = chosen?.[1].korber as NbOption | undefined;
                     const takenElsewhere = (p: string) => !!sel[p] && sel[p].nb !== m;
