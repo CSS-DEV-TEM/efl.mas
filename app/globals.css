@@ -869,3 +869,11 @@ tr.on-hold td { background: color-mix(in srgb, #ef4444 9%, transparent); }
 .tab-n.warn { background: #b7791f; color: #fff; }
 .tab-n.hot { background: #c05621; color: #fff; }
 @media (max-width: 640px) { .pick-tabs .seg { flex-wrap: wrap; } }
+
+/* Week plan tab */
+.week-mgr .wk-up { margin-top: 10px; padding: 10px; border: 1px dashed var(--line-strong); border-radius: 8px; }
+.week-mgr .wk-row { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 8px; }
+.week-mgr .wk-row label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--ink-2); }
+.week-mgr select { padding: 5px 8px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--panel); color: var(--ink); }
+.wk-bar { display: inline-block; width: 70px; height: 6px; border-radius: 3px; background: var(--line); vertical-align: middle; overflow: hidden; }
+.wk-bar i { display: block; height: 100%; background: var(--accent); }

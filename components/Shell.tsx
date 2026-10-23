@@ -91,8 +91,9 @@ export default function Shell({ children, admin, allowGuest }: { children: React
   if (!user) return null;
 
   // the week plan is retired: the home page is the day plan (Pick 1, 2 … per plant)
-  const nav = guest ? [{ href: '/', label: 'Day plan' }] : [
+  const nav = guest ? [{ href: '/', label: 'Day plan' }, { href: '/week/', label: 'Week plan' }] : [
     { href: '/', label: 'Day plan' },
+    { href: '/week/', label: 'Week plan' },
     { href: '/upload/', label: 'Uploads' },
     { href: '/dispatch/', label: 'Pick & Dispatch' },
     { href: '/data/', label: 'Data' },
