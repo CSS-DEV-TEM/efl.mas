@@ -107,7 +107,7 @@ export default function Shell({ children, admin, allowGuest }: { children: React
       <TableFilters />
       <header className="bar">
         <div className="bar-in">
-          <Link href="/" className="brand"><Logo size={30} /><span className="brand-text">MAS Weekly Plan <small>Tracker</small></span></Link>
+          <Link href="/" className="brand"><Logo size={30} /><span className="tpl-badge" aria-label="3PL"><span>3PL</span></span><span className="brand-text">MAS AUTOMATE PICK SYSTEM</span></Link>
           <nav className="nav">
             {nav.map((n) => (
               <Link key={n.href} href={n.href} className={(n.href === '/' ? path === '/' : path?.startsWith(n.href.replace(/\/$/, ''))) ? 'on' : ''}>{n.label}</Link>
@@ -145,7 +145,7 @@ export default function Shell({ children, admin, allowGuest }: { children: React
         </div>
       )}
       {children}
-      <footer className="site-foot"><Logo size={22} /><span>EFL · MAS Weekly Plan Tracker</span><Credit /></footer>
+      <footer className="site-foot"><Logo size={22} /><span>EFL 3PL · MAS AUTOMATE PICK SYSTEM</span><Credit /></footer>
       <div className="toasts" aria-live="polite">
         {toasts.map((t) => <div key={t.id} className="toast">{t.text}</div>)}
       </div>

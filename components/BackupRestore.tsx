@@ -51,7 +51,7 @@ export default function BackupRestore({ toast }: { toast: (m: string) => void })
     setErr(''); setFile(null); setConfirm('');
     try {
       const b = JSON.parse(await f.text()) as BackupFile;
-      if (b.app !== 'mas-weekly-plan-tracker' || !b.data) throw new Error('This is not a MAS Weekly Plan Tracker backup file.');
+      if (b.app !== 'mas-weekly-plan-tracker' || !b.data) throw new Error('This is not a MAS AUTOMATE PICK SYSTEM backup file.');
       setFile({ name: f.name, b });
     } catch (e) { setErr(e instanceof Error ? e.message : 'Could not read the file.'); }
   };

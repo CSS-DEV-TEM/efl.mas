@@ -338,8 +338,13 @@ async function ensureSchema(env: Env) {
 type ReportTable = 'stock' | 'zinr' | 'zcoment' | 'korber' | 'zroll' | 'ztrr' | 'stock_sent';
 type Scope = Record<ReportTable, string>;
 const SHARED: Scope = { stock: '', zinr: '', zcoment: '', korber: '', zroll: '', ztrr: '', stock_sent: '' };
-/** a scope of its own reports: a Pick (day plan round) or a week plan (2026-W43) */
-const scopeRid = (x: unknown) => (parseRound(x) || /^\d{4}-W\d{2}$/.test(String(x ?? '')) ? String(x) : '');
+/** a scope of its own reports: a Pick (day plan round), a week plan (2026-W43) or one plant of a week plan (2026-W43@ASIALLINE) */
+const scopeRid = (x: unknown) => (parseRound(x) || /^\d{4}-W\d{2}(@[A-Z0-9][A-Z0-9._&-]*)?$/i.test(String(x ?? '')) ? String(x) : '');
+/** the reports a plan line reads: a week plan line → its week + plant (each plant of a week has its own reports); a Pick → the Pick */
+const weekPlantRid = (week: unknown, plant: unknown) => {
+  const w = String(week ?? ''), p = String(plant ?? '').trim().toUpperCase().replace(/\s+/g, '');
+  return /^\d{4}-W\d{2}$/.test(w) && p ? `${w}@${p}` : w;
+};
 async function scopeOf(env: Env, rid: unknown): Promise<Scope> {
   if (!scopeRid(rid)) return SHARED;
   const own = new Set((await env.DB.prepare('SELECT DISTINCT src FROM uploads WHERE rid = ?').bind(String(rid)).all<{ src: string }>()).results.map((x) => x.src));
@@ -428,7 +433,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 60; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 61; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -975,7 +980,9 @@ async function reportStatus(env: Env, rid: string) {
     const table = src === 'zmmbe' ? 'stock' : src;
     const scope = src === 'plan' ? rid : src === 'zmmbe' ? sc.stock : sc[src as ReportTable];
     const rows = src === 'plan'
-      ? Number((await env.DB.prepare('SELECT COUNT(*) n FROM plan WHERE week = ?').bind(rid).first<{ n: number }>())?.n ?? 0)
+      ? Number((/^\d{4}-W\d{2}@/.test(rid)
+        ? await env.DB.prepare("SELECT COUNT(*) n FROM plan WHERE week = ? AND upper(replace(trim(COALESCE(plant, '')), ' ', '')) = ?").bind(rid.split('@')[0], up(rid.split('@')[1])).first<{ n: number }>()
+        : await env.DB.prepare('SELECT COUNT(*) n FROM plan WHERE week = ?').bind(rid).first<{ n: number }>())?.n ?? 0)
       : Number((await env.DB.prepare(`SELECT COUNT(*) n FROM ${table} WHERE rid = ?${src === 'zmmbe' ? " AND src = 'zmmbe'" : ''}`).bind(scope).first<{ n: number }>())?.n ?? 0);
     // a Pick's own Korber keeps only its plan's items: items added to the plan after it was uploaded have no rolls in it
     let missing: string[] | undefined;
@@ -1130,7 +1137,6 @@ async function handlePlanReport(env: Env, req: Request) {
   const wPlant = isWeek ? String(sp0.get('plant') || '').trim().toUpperCase() : '';
   const rnd = isWeek ? null : parseRound(rid);
   if (!rnd && !isWeek) throw new HttpError(400, 'Choose a Pick or a week.');
-  const senv = await envFor(env, rid);
   const lines = (await env.DB.prepare(`SELECT key, so, li, item, date, COALESCE(plan_date, date) AS plan_date, qty, row_no, plant, remarks FROM plan WHERE week = ?1
     ${isWeek ? "AND plan_type = 'week' AND (?2 = '' OR upper(COALESCE(plant, '')) = ?2)" : ''} ORDER BY ${isWeek ? 'date, ' : ''}row_no`).bind(...(isWeek ? [rid, wPlant] : [rid])).all<Row>()).results;
   // ALRADY SEND is shared out over the plan's lines of the same SO / LI / Item in date order (every plant of a week)
@@ -1141,19 +1147,29 @@ async function handlePlanReport(env: Env, req: Request) {
   const name = rnd ? `${plantName || 'PLAN'}-${rnd.day.slice(8, 10)}` : `${plantName ? plantName + '-' : 'WEEK-'}${rid.slice(5)}`;
   const firstDay = rnd ? rnd.day : lines.map((l) => String(l.date ?? '')).filter(Boolean).sort()[0] ?? '';
   const SO_UR = "COALESCE(total - COALESCE(qi, 0) - COALESCE(block, 0), ur)";
-  const st = new Map((await senv.DB.prepare(`SELECT key, ROUND(SUM(${SO_UR}), 3) avail, ROUND(SUM(CASE WHEN src = 'sent' THEN ${SO_UR} ELSE 0 END), 3) sent,
-      ROUND(SUM(COALESCE(qi, 0)), 3) qi, ROUND(SUM(COALESCE(block, 0)), 3) block, ROUND(SUM(CASE WHEN src = 'zmmbe' THEN ur ELSE 0 END), 3) wh_ur
-    FROM (SELECT src, key, total, qi, block, ur FROM stock WHERE src = 'zmmbe' UNION ALL SELECT src, key, total, qi, block, ur FROM stock_sent) WHERE key IN (SELECT key FROM plan WHERE week = ?) GROUP BY key`).bind(rid).all<Row>()).results.map((x) => [String(x.key), x]));
-  const tn = new Map<string, Row>();
-  for (const x of (await senv.DB.prepare(`SELECT to_so, to_li, material, GROUP_CONCAT(DISTINCT tn) tn, ROUND(SUM(qty), 3) tn_qty, ROUND(SUM(tqty), 3) tn_tqty, GROUP_CONCAT(DISTINCT status) tn_status FROM ztrr GROUP BY to_so, to_li, material`).all<Row>()).results)
-    tn.set(`${x.to_so}|${x.to_li}|${x.material}`, x);
-  // picks after the latest ZMMBE upload are not in its ALRADY SEND yet (the same rule as the pick's "to pick")
-  const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(rid).first<{ at: string | null }>())?.at ?? '';
-  const pk = new Map((await env.DB.prepare('SELECT line, ROUND(SUM(qty), 3) q, ROUND(SUM(CASE WHEN at > ?2 THEN qty ELSE 0 END), 3) qa, COUNT(*) n FROM picks WHERE week = ?1 AND cancelled_at IS NULL GROUP BY line').bind(rid, zAt).all<Row>()).results.map((x) => [String(x.line), x]));
-  const hasSent = !!(await senv.DB.prepare("SELECT 1 FROM stock_sent LIMIT 1").first());
-  const zm = !!(await senv.DB.prepare("SELECT 1 FROM stock WHERE src = 'zmmbe' LIMIT 1").first());
+  // each scope of reports: a Pick's own; a week plan: each plant's own (2026-W43@ASIALLINE), else the shared ones
+  const ridOf = (l: Row) => (isWeek ? weekPlantRid(rid, l.plant) : rid);
+  type Sc = { st: Map<string, Row>; tn: Map<string, Row>; pk: Map<string, Row>; hasSent: boolean; zm: boolean };
+  const scs = new Map<string, Sc>();
+  for (const sr of Array.from(new Set(lines.map(ridOf)))) {
+    const senv = await envFor(env, sr);
+    const keys = JSON.stringify(Array.from(new Set(lines.filter((l) => ridOf(l) === sr).map((l) => String(l.key)))));
+    const st = new Map((await senv.DB.prepare(`SELECT key, ROUND(SUM(${SO_UR}), 3) avail, ROUND(SUM(CASE WHEN src = 'sent' THEN ${SO_UR} ELSE 0 END), 3) sent,
+        ROUND(SUM(COALESCE(qi, 0)), 3) qi, ROUND(SUM(COALESCE(block, 0)), 3) block, ROUND(SUM(CASE WHEN src = 'zmmbe' THEN ur ELSE 0 END), 3) wh_ur
+      FROM (SELECT src, key, total, qi, block, ur FROM stock WHERE src = 'zmmbe' UNION ALL SELECT src, key, total, qi, block, ur FROM stock_sent) WHERE key IN (SELECT value FROM json_each(?)) GROUP BY key`).bind(keys).all<Row>()).results.map((x) => [String(x.key), x]));
+    const tn = new Map<string, Row>();
+    for (const x of (await senv.DB.prepare(`SELECT to_so, to_li, material, GROUP_CONCAT(DISTINCT tn) tn, ROUND(SUM(qty), 3) tn_qty, ROUND(SUM(tqty), 3) tn_tqty, GROUP_CONCAT(DISTINCT status) tn_status FROM ztrr GROUP BY to_so, to_li, material`).all<Row>()).results)
+      tn.set(`${x.to_so}|${x.to_li}|${x.material}`, x);
+    // picks after the latest ZMMBE upload are not in its ALRADY SEND yet (the same rule as the pick's "to pick")
+    const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(sr).first<{ at: string | null }>())?.at ?? '';
+    const pk = new Map((await env.DB.prepare('SELECT line, ROUND(SUM(qty), 3) q, ROUND(SUM(CASE WHEN at > ?2 THEN qty ELSE 0 END), 3) qa, COUNT(*) n FROM picks WHERE week = ?1 AND cancelled_at IS NULL GROUP BY line').bind(rid, zAt).all<Row>()).results.map((x) => [String(x.line), x]));
+    scs.set(sr, { st, tn, pk, hasSent: !!(await senv.DB.prepare('SELECT 1 FROM stock_sent LIMIT 1').first()), zm: !!(await senv.DB.prepare("SELECT 1 FROM stock WHERE src = 'zmmbe' LIMIT 1").first()) });
+  }
+  const scList = Array.from(scs.values());
+  const hasSent = scList.some((x) => x.hasSent), zm = scList.some((x) => x.zm), hasTrr = scList.some((x) => x.tn.size > 0);
   const rows = lines.map((l) => {
-    const x = st.get(String(l.key)), t = tn.get(String(l.key)), p0 = pk.get(`${l.key}|${l.date ?? ''}`);
+    const S = scs.get(ridOf(l))!;
+    const x = S.st.get(String(l.key)), t = S.tn.get(String(l.key)), p0 = S.pk.get(`${l.key}|${l.date ?? ''}`);
     const avail = Number(x?.avail ?? 0), sent = Number(x?.sent ?? 0), qty = Number(l.qty);
     const pending = r3(qty - sent);
     const possible = pending > 1e-4 && avail - sent > 1e-4 ? pending : null;
@@ -1169,7 +1185,7 @@ async function handlePlanReport(env: Env, req: Request) {
   });
   const sum = (f: (r: typeof rows[number]) => number) => r3(rows.reduce((t0, r) => t0 + f(r), 0));
   const weekPlants = isWeek ? (await env.DB.prepare("SELECT DISTINCT upper(COALESCE(plant, '')) p FROM plan WHERE week = ? AND plan_type = 'week' ORDER BY 1").bind(rid).all<{ p: string }>()).results.map((x) => x.p).filter(Boolean) : [];
-  return json({ rid, name, day: firstDay, plant: plantCode || null, week: isWeek, plants: weekPlants, hasZmmbe: zm, hasSent, hasTrr: tn.size > 0, rows,
+  return json({ rid, name, day: firstDay, plant: plantCode || null, week: isWeek, plants: weekPlants, hasZmmbe: zm, hasSent, hasTrr, rows,
     totals: { lines: rows.length, qty: sum((r) => r.qty), avail: sum((r) => r.avail), sent: sum((r) => r.sent), pending: sum((r) => Math.max(0, r.pending)), possible: sum((r) => r.possible ?? 0),
       possibleLines: rows.filter((r) => r.possible).length, qi: sum((r) => r.qi), block: sum((r) => r.block), tnLines: rows.filter((r) => r.tn).length, picked: sum((r) => r.picked) } });
 }
@@ -1331,17 +1347,22 @@ async function handlePullPlan(env: Env, req: Request) {
   // a day plan: every Pick reads its own reports (ZMMBE, ZINR, ZCOMENT VIEW, Korber; else the shared ones), so the lines are
   // worked out Pick by Pick; a week plan reads the shared reports
   const periods = ptype === 'day' ? (week ? [week] : rounds.map((r) => String(r.id))) : week ? [week] : [];
-  const groups: { period: string | null; sc: Scope; env: Env; zAt?: string }[] = [];
-  for (const per of ptype === 'day' ? periods : [week]) {
-    const sc = await scopeOf(env, per); // a Pick's or a week plan's own reports (else the shared ones)
+  // a week plan: each plant reads its own reports (uploaded to that week + plant), else the shared ones; ?plant= shows one plant
+  const pnorm = (v: unknown) => String(v ?? '').trim().toUpperCase().replace(/\s+/g, '');
+  const wPlant = ptype === 'week' ? pnorm(sp.get('plant')) : '';
+  const weekPlants = ptype === 'week' && week ? (await env.DB.prepare("SELECT DISTINCT upper(replace(trim(COALESCE(plant, '')), ' ', '')) p FROM plan WHERE week = ? AND plan_type = 'week' AND (?2 IS NULL OR owner = ?2) ORDER BY 1").bind(week, owner).all<{ p: string }>()).results.map((x) => x.p) : [];
+  const groups: { period: string | null; sc: Scope; env: Env; zAt?: string; plant?: string }[] = [];
+  const pers: { per: string | null; plant?: string }[] = ptype === 'day' ? periods.map((per) => ({ per })) : (wPlant ? [wPlant] : weekPlants.length ? weekPlants : ['']).map((plant) => ({ per: week, plant }));
+  for (const { per, plant } of pers) {
+    const sc = await scopeOf(env, plant !== undefined ? weekPlantRid(per, plant) : per); // a Pick's or a week plant's own reports (else the shared ones)
     // stock "as of": the latest FULL ZMMBE upload of that scope (a part file added to it does not refresh the other rows)
     const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid = ? AND COALESCE(mode, '') <> 'add'").bind(sc.stock).first<{ at: string | null }>())?.at ?? undefined;
-    groups.push({ period: per, sc, env: scopedEnv(env, sc), zAt });
+    groups.push({ period: per, sc, env: scopedEnv(env, sc), zAt, plant });
   }
   // the latest upload of each report this view reads: a Pick's own (else the shared one); the whole day / a week: the shared ones
   // (the whole day, all its Picks: the Pick with the latest ZMMBE — not the old shared uploads)
   const latestG = [...groups].sort((a, b) => String(b.zAt ?? '').localeCompare(String(a.zAt ?? '')))[0];
-  const vsc = week ? groups[0]?.sc ?? SHARED : ptype === 'day' && latestG ? latestG.sc : SHARED;
+  const vsc = week && groups.length === 1 ? groups[0]?.sc ?? SHARED : ptype === 'day' && latestG ? latestG.sc : SHARED;
   const uploads = await env.DB.prepare(`SELECT u.src, u.file_name, u.sheet_name, u.row_count, u.uploaded_by, u.uploaded_at, u.rid FROM uploads u
                     JOIN (SELECT src, MAX(id) id FROM uploads WHERE (src IN ('zmmbe', 'kfc', 'pfc', 'plant') AND rid = ?1) OR (src = 'zinr' AND rid = ?2) OR (src = 'zcoment' AND rid = ?3)
                       OR (src = 'korber' AND rid = ?4) OR (src = 'plan' AND rid IN (?5, '')) OR (src NOT IN ('zmmbe', 'kfc', 'pfc', 'plant', 'zinr', 'zcoment', 'korber', 'plan') AND rid = '') GROUP BY src) m ON m.id = u.id`)
@@ -1349,7 +1370,8 @@ async function handlePullPlan(env: Env, req: Request) {
   const counts = { results: await cached(env, 'c_counts', async () => (await env.DB.prepare(`SELECT 'plan' src, COUNT(*) n FROM plan UNION ALL SELECT src, COUNT(*) FROM stock GROUP BY src UNION ALL SELECT 'trr', COUNT(*) FROM trr`).all()).results) };
   const plan: Row[] = [];
   for (const g of groups) {
-    const rs = (await g.env.DB.prepare(PULL_PLAN_SQL).bind(g.period, prevWeek, owner, ptype, ptype === 'day' ? day ?? '~none~' : day).all<Row>()).results;
+    let rs = (await g.env.DB.prepare(PULL_PLAN_SQL).bind(g.period, prevWeek, owner, ptype, ptype === 'day' ? day ?? '~none~' : day).all<Row>()).results;
+    if (g.plant !== undefined) rs = rs.filter((r) => pnorm(r.plant) === g.plant);
     for (const r of rs) r._zat = g.zAt ?? null;
     // Korber: what is on the shelf for each line — rolls of its ZINR lots (Item + Lot Number = Vendor Batch, same invoice) or
     // its Shade Report barcodes, less what was picked from them (all Picks). "Ready to pull" needs this too (null = no Korber).
@@ -1469,7 +1491,7 @@ async function handlePullPlan(env: Env, req: Request) {
   let rev: string | null = null;
   try { rev = (await env.DB.prepare("SELECT v FROM config WHERE k = 'rev'").first<{ v: string }>())?.v ?? null; } catch { /* none yet */ }
   const st = await getSettings(env);
-  return json({ type: ptype, day, days, rounds, week, prevWeek, owner, weeks, rev, time: { soliPerHour: st.soliPerHour, lateGraceMin: st.lateGraceMin, defaultTarget: st.defaultTarget }, rows: plan, dispatch, stockAt: zAt ?? null, releases, plants, received, uploads: uploads.results, counts: counts.results, generatedAt: now() });
+  return json({ type: ptype, day, days, rounds, week, prevWeek, owner, weeks, rev, time: { soliPerHour: st.soliPerHour, lateGraceMin: st.lateGraceMin, defaultTarget: st.defaultTarget }, rows: plan, weekPlants, weekPlant: wPlant || null, dispatch, stockAt: zAt ?? null, releases, plants, received, uploads: uploads.results, counts: counts.results, generatedAt: now() });
 }
 
 /**
@@ -1782,7 +1804,9 @@ async function handlePick(env: Env, req: Request, p: string) {
     // a Pick's Korber: only the items of that Pick's plan (a Korber file per Pick stays small); no plan yet / shared: every plan item
     const krid = url.searchParams.get('rid');
     if (krid && scopeRid(krid)) {
-      const own = (await env.DB.prepare('SELECT DISTINCT item FROM plan WHERE week = ?').bind(krid).all<Row>()).results;
+      const wp = /^(\d{4}-W\d{2})@(.+)$/.exec(krid);
+      const own = (wp ? await env.DB.prepare("SELECT DISTINCT item FROM plan WHERE week = ? AND upper(replace(trim(COALESCE(plant, '')), ' ', '')) = ?").bind(wp[1], up(wp[2])).all<Row>()
+        : await env.DB.prepare('SELECT DISTINCT item FROM plan WHERE week = ?').bind(krid).all<Row>()).results;
       if (own.length) return json({ items: Array.from(new Set(own.map((r) => normId(r.item)))).filter(Boolean), rid: krid });
     }
     const [a, b] = await env.DB.batch([env.DB.prepare('SELECT DISTINCT item FROM plan'), env.DB.prepare('SELECT DISTINCT material item FROM zcoment')]);
@@ -1902,7 +1926,8 @@ async function handlePick(env: Env, req: Request, p: string) {
     const line = await env.DB.prepare('SELECT so, li, item, qty, plant, date FROM plan WHERE week = ? AND key = ? AND COALESCE(date, \'\') = ?').bind(week, key, date).first<Row>();
     if (!line) throw new HttpError(404, 'That plan line is not in this week.');
     // the Pick's own ZMMBE / ZINR / ZCOMENT VIEW / Korber (else the shared ones); the pick history is shared by all
-    return json(await pickCandidates(await envFor(env, week), week, key, date, line));
+    const lrid = weekPlantRid(week, line.plant);
+    return json(await pickCandidates(await envFor(env, lrid), week, key, date, line, lrid));
   }
 
   // Korber rolls to choose by hand: same item first; search by pallet, lot or supplier HU; with what is left of each
@@ -1972,8 +1997,9 @@ async function handlePick(env: Env, req: Request, p: string) {
       const h = await env.DB.prepare('SELECT hold, hold_by, hold_at FROM line_status WHERE key = ? AND hold IS NOT NULL').bind(sk).first<Row>();
       if (h) throw new HttpError(409, `This line is on hold (${h.hold}${h.hold_by ? ` — ${h.hold_by}` : ''}). Release the hold first.`);
     }
-    const senv = await envFor(env, b.week); // this Pick's reports
-    const cand = await pickCandidates(senv, b.week, b.key, b.date ?? '', line);
+    const lrid = weekPlantRid(b.week, line.plant);
+    const senv = await envFor(env, lrid); // this Pick's reports (a week plan line: its week + plant's)
+    const cand = await pickCandidates(senv, b.week, b.key, b.date ?? '', line, lrid);
     const gate = await makeGate(senv);
     const byPallet = new Map(cand.rolls.map((r) => [r.pallet, r]));
     const lineId = `${b.key}|${b.date ?? ''}`;
@@ -2149,7 +2175,7 @@ async function handlePick(env: Env, req: Request, p: string) {
       const have = new Set((m.zmmbe || []).map((z) => normId(z.batch)));
       const need = String(((rolls.results as Row[]).filter((x) => x.req_id === r.id).map((x) => x.batch)).join(',')).split(',').map((b) => normId(b)).filter(Boolean);
       if (need.every((b) => have.has(b))) continue;
-      const wk = String(r.week ?? ''), key = String(r.line ?? '').split('|').slice(0, 3).join('|');
+      const wk = weekPlantRid(r.week, r.plant), key = String(r.line ?? '').split('|').slice(0, 3).join('|');
       const zk = `${wk}#${key}`;
       if (!zs.has(zk)) {
         if (!envs.has(wk)) envs.set(wk, await envFor(env, wk));
@@ -2160,7 +2186,7 @@ async function handlePick(env: Env, req: Request, p: string) {
     // a pick saved without a shade (a roll matched straight from ZINR to Korber): the ZCOMENT Shade, for the Packing List
     for (const x of rolls.results as Row[]) {
       if (x.shade) continue;
-      const wk = String(x.week ?? '');
+      const wk = weekPlantRid(x.week, (reqs.results as Row[]).find((r) => r.id === x.req_id)?.plant);
       if (!envs.has(wk)) envs.set(wk, await envFor(env, wk));
       const env2 = envs.get(wk)!;
       let kk: { pallet: unknown; item: unknown; lot: unknown; supplier_hu: unknown } = { pallet: x.pallet, item: x.item, lot: x.lot, supplier_hu: null };
@@ -2209,7 +2235,7 @@ async function handlePick(env: Env, req: Request, p: string) {
     const reqRow = await env.DB.prepare('SELECT * FROM pick_req WHERE id = ?').bind(rj.req_id).first<Row>();
     if (!reqRow) throw new HttpError(404, 'The pick of that roll was cancelled.');
     // a Korber roll of the same Material (Item Number), Pick Id 0, not rejected, not picked in full (master history)
-    const senv = await envFor(env, rj.week);
+    const senv = await envFor(env, weekPlantRid(rj.week, reqRow.plant));
     const pallet = up(b.pallet);
     const k = await senv.DB.prepare('SELECT * FROM korber WHERE pallet = ?').bind(pallet).first<Row>();
     if (!k) throw new HttpError(404, `Pallet ${pallet} is not in this Pick's Korber Inventory.`);
@@ -2725,7 +2751,7 @@ async function makeGate(env: Env) {
  *     c. A lot with no rolls in ZCOMENT: the rolls of its invoice + item + Lot Number (+ Po); when other SO lines share that
  *        Lot Number the system suggests the rolls whose Actual Qty adds up to the lot's QTY (the user ticks them).
  */
-async function pickCandidates(env: Env, week: string, key: string, date: string, line: Row) {
+async function pickCandidates(env: Env, week: string, key: string, date: string, line: Row, srid: string = week) {
   const steps: string[] = [];
   const lineId = `${key}|${date}`;
   const stock = (await env.DB.prepare("SELECT plant, sloc, so_plant, so, li, material, batch, style, ur, qi, block, assigned, total FROM stock WHERE src = 'zmmbe' AND key = ? ORDER BY batch").bind(key).all<Row>()).results;
@@ -2734,7 +2760,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
   const planQty = r3(Number(line.qty));
   // the same SO / LI / Item on other lines of this plan (a week plan has it on several days): what they picked since the ZMMBE
   // upload is not in its UR yet — taken off this line's UR, so the UR is never picked twice
-  const zAt0 = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(week).first<{ at: string | null }>())?.at ?? '';
+  const zAt0 = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(srid).first<{ at: string | null }>())?.at ?? '';
   const otherAfter = r3(Number((await env.DB.prepare("SELECT COALESCE(SUM(qty), 0) q FROM picks WHERE week = ?1 AND substr(line, 1, length(?2) + 1) = ?2 || '|' AND line <> ?3 AND cancelled_at IS NULL AND at > ?4").bind(week, key, lineId, zAt0).first<{ q: number }>())?.q ?? 0));
   const urFree = Math.max(0, r3(urTotal - otherAfter));
   if (otherAfter > 1e-9) steps.push(`${otherAfter} of this SO / LI / Item was picked for its other plan line(s) since the ZMMBE upload: UR ${urTotal} − ${otherAfter} = ${urFree} for this line.`);
@@ -2748,7 +2774,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
     // the same SO / LI / Item on earlier days of the plan takes its share of ALRADY SEND first (date order)
     const earlier = r3(Number((await env.DB.prepare("SELECT COALESCE(SUM(qty), 0) q FROM plan WHERE week = ?1 AND key = ?2 AND COALESCE(date, '') < ?3").bind(week, key, date || '').first<{ q: number }>())?.q ?? 0));
     if (earlier > 1e-9) { const mine = Math.max(0, r3(Math.min(planQty, sentQ - earlier))); steps.push(`ALRADY SEND ${sentQ} of this SO / LI / Item: ${r3(Math.min(sentQ, earlier))} to its earlier plan line(s) (QTY ${earlier}), ${mine} to this line.`); sentQ = mine; }
-    const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(week).first<{ at: string | null }>())?.at ?? null;
+    const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(srid).first<{ at: string | null }>())?.at ?? null;
     const after = zAt ? Number((await env.DB.prepare('SELECT COALESCE(SUM(qty), 0) q FROM picks WHERE week = ? AND line = ? AND cancelled_at IS NULL AND at > ?').bind(week, lineId, zAt).first<{ q: number }>())?.q ?? 0) : pickedLine;
     const before = Math.max(0, r3(pickedLine - after));
     const left2 = Math.max(0, r3(Math.min(planQty - Math.max(sentQ, before) - after, urFree - after)));
@@ -3640,6 +3666,19 @@ export default {
       else if (p === '/api/follow') res = await handleFollow(env, req);
       else if (p === '/api/zroll' && req.method === 'GET') res = await handleZroll(env, req);
       else if (p === '/api/plan-report' && req.method === 'GET') res = await handlePlanReport(env, req);
+      else if (p === '/api/week-plants' && req.method === 'GET') {
+        // the plants of a week plan: lines, QTY and which reports each has uploaded for that week + plant
+        await requireUser(env, req);
+        const w = String(new URL(req.url).searchParams.get('week') || '');
+        if (!/^\d{4}-W\d{2}$/.test(w)) throw new HttpError(400, 'Choose a week.');
+        const ps = (await env.DB.prepare("SELECT upper(replace(trim(COALESCE(plant, '')), ' ', '')) plant, COUNT(*) lines, ROUND(SUM(qty), 3) qty FROM plan WHERE week = ? AND plan_type = 'week' GROUP BY 1 ORDER BY 1").bind(w).all<Row>()).results;
+        const out: Row[] = [];
+        for (const x of ps) {
+          const r0 = weekPlantRid(w, x.plant);
+          out.push({ ...x, rid: r0, reports: (await env.DB.prepare('SELECT src, MAX(uploaded_at) at FROM uploads WHERE rid = ? GROUP BY src').bind(r0).all<Row>()).results });
+        }
+        res = json({ week: w, plants: out });
+      }
       else if (p === '/api/zmmbe-pairs' && req.method === 'GET') {
         await requireUser(env, req, 'admin');
         res = json({ pairs: (await env.DB.prepare("SELECT upper(COALESCE(plant, '')) plant, upper(COALESCE(so_plant, '')) soPlant, COUNT(*) n, ROUND(SUM(ur), 3) ur FROM stock WHERE src = 'zmmbe' GROUP BY 1, 2 ORDER BY ur DESC").all()).results });

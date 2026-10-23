@@ -6,6 +6,7 @@ import { applyMapping, detectMapping, guessSrc, isHelpSheet, readWorkbook, type 
 import { PICK_SRCS, PLAN_SHEET, pickSrcOf, squash, uploadPickSheets, type PickSrc } from '@/lib/pick';
 import { todayLocal, weekDays, weekIdOf, weekOptions } from '@/lib/smart';
 import PlanReport from '@/components/PlanReport';
+import { useShell } from '@/components/Shell';
 
 type Mode = 'replace-week' | 'merge' | 'replace-plant';
 interface Preview { weeks?: string[]; added: number; updated: number; removed: number; kept: number; inFileDups: number; lines: number; plant: string | null; mode: string }
@@ -37,10 +38,24 @@ export default function WeekPlanManager({ toast, onChanged }: { toast: (m: strin
     api<{ weeks: WeekInfo[] }>('/api/pullplan' + userParam(true)).then((r) => { setWeeks(r.weeks || []); setSel((s) => s || r.weeks?.[0]?.week || weekIdOf(todayLocal())); }).catch(() => setWeeks([]));
   }, []);
   useEffect(() => { load(); }, [load]);
-  // the reports of the chosen week: its own upload, else the shared one
+  // the plants of the chosen week: each has its own reports (week + plant)
+  const [wPlants, setWPlants] = useState<{ plant: string; lines: number; rid: string }[]>([]);
+  const [selPlant, setSelPlant] = useState('');
+  const loadPlants = useCallback(() => {
+    if (!sel) return;
+    api<{ plants: { plant: string; lines: number; rid: string }[] }>('/api/week-plants?week=' + encodeURIComponent(sel)).then((r) => {
+      setWPlants(r.plants); setSelPlant((p) => (r.plants.some((x) => x.plant === p) ? p : r.plants.find((x) => x.plant)?.plant ?? ''));
+    }).catch(() => setWPlants([]));
+  }, [sel]);
+  useEffect(() => { loadPlants(); }, [loadPlants]);
+  const repRid = sel && selPlant ? `${sel}@${selPlant}` : '';
+  // the reports of the chosen week + plant: its own upload, else the shared one
   const [reps, setReps] = useState<RepStatus[] | null>(null);
-  const loadReps = useCallback(() => { if (sel) api<{ reports: RepStatus[] }>('/api/pick/status?rid=' + encodeURIComponent(sel)).then((r) => setReps(r.reports || [])).catch(() => setReps(null)); }, [sel]);
+  const loadReps = useCallback(() => { if (repRid) api<{ reports: RepStatus[] }>('/api/pick/status?rid=' + encodeURIComponent(repRid)).then((r) => setReps(r.reports || [])).catch(() => setReps(null)); else setReps(null); }, [repRid]);
   useEffect(() => { loadReps(); }, [loadReps]);
+  // someone uploaded a plan / report (this page or another): the weeks, plants and report status refresh by themselves
+  const { subscribe } = useShell();
+  useEffect(() => subscribe((m) => { if (m.type === 'data') { load(); loadPlants(); loadReps(); } }), [subscribe, load, loadPlants, loadReps]);
   const [plants, setPlants] = useState<{ code: string; name: string | null }[]>([]);
   useEffect(() => { api<{ plants: { code: string; name: string | null }[] }>('/api/plants').then((r) => setPlants(r.plants)).catch(() => {}); }, []);
   const [report, setReport] = useState<string | null>(null);
@@ -104,15 +119,19 @@ export default function WeekPlanManager({ toast, onChanged }: { toast: (m: strin
   };
   // the plan first (its week), then ZMMBE, then the pick reports (Korber keeps the week plan's items)
   const upload = async () => {
+    const pnorm = (v: string) => v.trim().toUpperCase().replace(/\s+/g, '');
+    if (planJob && repJobs.length && !pnorm(plant)) { setErr('Type the plant: the reports are linked to the week + plant.'); return; }
+    if (!planJob && !repRid) { setErr('Choose the week and the plant the reports are for.'); return; }
     setBusy('up'); setErr('');
-    let target = planJob ? '' : sel;
+    // the reports go to the week + plant only (2026-W43@ASIALLINE)
+    let target = planJob ? '' : repRid;
     try {
       if (planJob) {
         setJob(planJob.name, { state: 'busy' });
         const r = await api<Preview>('/api/upload', { method: 'POST', body: planBody(false) });
         const ws = r.weeks || [];
         setJob(planJob.name, { state: 'ok', msg: `${fmt(r.added)} new, ${fmt(r.updated)} updated${r.removed ? `, ${fmt(r.removed)} removed` : ''}${r.inFileDups ? `, ${fmt(r.inFileDups)} repeated rows (last kept)` : ''} → ${ws.join(', ')}` });
-        if (ws.length === 1) target = ws[0];
+        if (ws.length === 1) target = `${ws[0]}@${pnorm(plant)}`;
         else if (repJobs.length) throw new Error(`The plan has lines in ${ws.join(', ')}: the reports need one week — choose the week above and upload again.`);
       }
       const order = [...repJobs].sort((a, b) => (a.kind === 'zmmbe' ? 0 : a.pick === 'korber' ? 2 : 1) - (b.kind === 'zmmbe' ? 0 : b.pick === 'korber' ? 2 : 1));
@@ -130,8 +149,11 @@ export default function WeekPlanManager({ toast, onChanged }: { toast: (m: strin
           }
         } catch (e) { setJob(j.name, { state: 'err', msg: e instanceof Error ? e.message : 'failed' }); }
       }
-      toast(`Week plan ${target}: ${planJob ? 'plan' : ''}${planJob && repJobs.length ? ' + ' : ''}${repJobs.length ? `${repJobs.length} report${repJobs.length === 1 ? '' : 's'}` : ''} uploaded`);
-      setPreview(null); setSel(target); load(); loadReps(); onChanged();
+      toast(`Week plan ${target.replace('@', ' · ')}: ${planJob ? 'plan' : ''}${planJob && repJobs.length ? ' + ' : ''}${repJobs.length ? `${repJobs.length} report${repJobs.length === 1 ? '' : 's'}` : ''} uploaded`);
+      setPreview(null);
+      const [tw, tp] = target.split('@');
+      if (tw) setSel(tw); if (tp) setSelPlant(tp);
+      load(); loadPlants(); loadReps(); onChanged();
     } catch (e) { setErr(e instanceof Error ? e.message : 'Upload failed.'); }
     finally { setBusy(''); }
   };
@@ -168,6 +190,11 @@ export default function WeekPlanManager({ toast, onChanged }: { toast: (m: strin
                 {Array.from(new Set([...(weeks || []).map((w) => w.week), sel])).filter(Boolean).map((w) => <option key={w} value={w}>{weekLabel(w)}</option>)}
               </select>
             </label>}
+            {!planJob && <label>Plant
+              <select value={selPlant} onChange={(e) => setSelPlant(e.target.value)}>
+                {wPlants.filter((x) => x.plant).map((x) => <option key={x.plant} value={x.plant}>{x.plant} · {x.lines} lines</option>)}
+              </select>
+            </label>}
             {planJob && <label>Plant<input className="as-search" style={{ width: 130 }} placeholder="e.g. ASIALLINE" value={plant} onChange={(e) => { setPlant(e.target.value); setPreview(null); }} /></label>}
           </div>
           <table className="mini wk-jobs" data-noexport>
@@ -190,7 +217,7 @@ export default function WeekPlanManager({ toast, onChanged }: { toast: (m: strin
           <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
             {planJob && <button className="btn" aria-busy={busy === 'check' || undefined} disabled={!!busy || done} onClick={check}>Check</button>}
             <button className="btn primary" aria-busy={busy === 'up' || undefined} disabled={!!busy || done || (!!planJob && !preview)} title={planJob && !preview ? 'Check the plan first' : ''} onClick={upload}>
-              {planJob ? `Upload plan${repJobs.length ? ` + ${repJobs.length} report${repJobs.length === 1 ? '' : 's'}` : ''}` : `Upload ${repJobs.length} report${repJobs.length === 1 ? '' : 's'} to ${sel}`}
+              {planJob ? `Upload plan${repJobs.length ? ` + ${repJobs.length} report${repJobs.length === 1 ? '' : 's'}` : ''}` : `Upload ${repJobs.length} report${repJobs.length === 1 ? '' : 's'} to ${sel} · ${selPlant || '?'}`}
             </button>
             <button className="btn" disabled={!!busy} onClick={() => { setJobs([]); setFile(null); setPreview(null); }}>{done ? 'Close' : 'Cancel'}</button>
           </div>
@@ -219,9 +246,17 @@ export default function WeekPlanManager({ toast, onChanged }: { toast: (m: strin
           </table>
         </div>
       )}
-      {sel && reps && (
-        <div className="wk-reps" aria-label={`Reports of ${sel}`}>
-          <span className="pick-tab-label">Reports of {sel}</span>
+      {sel && wPlants.length > 0 && (
+        <div className="wk-reps" aria-label={`Plants of ${sel}`}>
+          <span className="pick-tab-label">Plants of {sel}</span>
+          <div className="seg" role="group">
+            {wPlants.filter((x) => x.plant).map((x) => <button key={x.plant} className={selPlant === x.plant ? 'on' : ''} onClick={() => setSelPlant(x.plant)}>{x.plant} <span className="tab-n">{fmt(x.lines)}</span></button>)}
+          </div>
+        </div>
+      )}
+      {repRid && reps && (
+        <div className="wk-reps" aria-label={`Reports of ${repRid}`}>
+          <span className="pick-tab-label">Reports of {sel} · {selPlant}</span>
           {reps.filter((r) => r.src !== 'plan').map((r) => (
             <span key={r.src} className={`pill ${r.uses === 'own' ? 'ok' : r.uses === 'shared' ? 'warn' : 'bad'}`} title={r.own ? `${r.own.file_name || ''} · ${r.own.uploaded_by} · ${ago(r.own.uploaded_at)}` : r.uses === 'shared' ? 'No upload for this week: the shared report is used' : 'Not uploaded'}>
               {REP_NAME[r.src] || r.src} · {r.uses === 'own' ? `${fmt(r.rows)} rows · ${r.own ? ago(r.own.uploaded_at) : ''}` : r.uses === 'shared' ? 'shared' : 'missing'}

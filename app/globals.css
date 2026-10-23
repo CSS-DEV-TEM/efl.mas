@@ -889,3 +889,13 @@ tr.on-hold td { background: color-mix(in srgb, #ef4444 9%, transparent); }
 .bl-add label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--ink-2); }
 
 .plan-kind { margin-top: 8px; }
+
+/* 3PL badge beside the EFL logo: a slow turn */
+.tpl-badge { display: inline-grid; place-items: center; perspective: 120px; }
+.tpl-badge > span { display: inline-block; padding: 2px 6px; border-radius: 6px; border: 1.5px solid var(--brand-a); color: var(--brand-a); font-family: var(--font-cond); font-weight: 700; font-size: 12px; letter-spacing: .08em; line-height: 1.2;
+  background: color-mix(in srgb, var(--brand-a) 10%, transparent); animation: tpl-turn 6s linear infinite; transform-style: preserve-3d; backface-visibility: visible; }
+@keyframes tpl-turn { from { transform: rotateY(0deg); } to { transform: rotateY(360deg); } }
+@media (prefers-reduced-motion: reduce) { .tpl-badge > span { animation: none; } }
+@media (max-width: 640px) { .brand-text { font-size: 14px; } }
+.brand .brand-text { font-size: 14px; letter-spacing: .01em; }
+.brand { gap: 8px; }

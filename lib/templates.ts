@@ -64,7 +64,7 @@ export function downloadTemplate(src: Src) {
     [`${t.title} — upload format`], [], [t.note], [],
     ['Keep the header names in row 1. Column order can change; the upload screen finds the columns by name.'],
     ['Delete the sample rows before pasting your data.'],
-    ['Upload it on the Uploads page of MAS Weekly Plan Tracker. The calculation runs as soon as it is saved.'],
+    ['Upload it on the Uploads page of MAS AUTOMATE PICK SYSTEM. The calculation runs as soon as it is saved.'],
   ]);
   help['!cols'] = [{ wch: 100 }];
   const wb = XLSX.utils.book_new();

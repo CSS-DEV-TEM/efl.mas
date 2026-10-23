@@ -31,7 +31,7 @@ export default function LoginPage() {
       <form className="login card" onSubmit={submit}>
         <div className="login-logo"><Logo size={56} /></div>
         <div>
-          <h1>MAS Weekly Plan Tracker</h1>
+          <h1>MAS AUTOMATE PICK SYSTEM</h1>
           <p>Sign in to track this week's plan lines against ZMMBE, KFC, PFC, PLANT and TRR stock.</p>
         </div>
         <div className="form">

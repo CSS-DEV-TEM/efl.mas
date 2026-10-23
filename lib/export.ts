@@ -23,7 +23,7 @@ export function exportPullPlan(rows: Line[], name = 'MAS_Weekly_Plan') {
   const q = (f: (l: Line) => boolean) => Math.round(rows.filter(f).reduce((s, l) => s + l.qty, 0) * 1000) / 1000;
   const dates = Array.from(new Set(rows.map((l) => l.date || ''))).sort();
   const summary: (string | number)[][] = [
-    ['MAS Weekly Plan Tracker — summary'], ['Week', rows[0]?.week || ''], ['Exported', new Date().toLocaleString('en-GB', { timeZone: 'Asia/Colombo' })], ['Lines in this export', rows.length], [],
+    ['MAS AUTOMATE PICK SYSTEM — summary'], ['Week', rows[0]?.week || ''], ['Exported', new Date().toLocaleString('en-GB', { timeZone: 'Asia/Colombo' })], ['Lines in this export', rows.length], [],
     ['Next action', 'Lines', 'QTY'], ...ACTIONS.map((a) => [a, n((l) => action(l) === a), q((l) => action(l) === a)]), [],
     ['Date', 'Lines', 'Done', 'Open', 'QTY', 'Short vs UR'],
     ...dates.map((d) => [d || 'No date', n((l) => (l.date || '') === d), n((l) => (l.date || '') === d && isDone(l)), n((l) => (l.date || '') === d && !isDone(l)), q((l) => (l.date || '') === d),

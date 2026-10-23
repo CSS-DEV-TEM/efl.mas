@@ -21,7 +21,7 @@ import { ACTION_HELP, insights, matchView, todayLocal, type Action, type Insight
 
 
 export interface RoundInfo { id: string; plant: string | null; round: number; lines: number; qty: number; done: number; src_at: string | null; src_user: string | null }
-interface PullPlan { type?: 'week' | 'day'; day?: string | null; days?: { day: string; week: string; lines: number; done: number; qty: number }[]; rounds?: RoundInfo[]; week: string | null; prevWeek?: string | null; rev?: string | null; weeks: WeekInfo[]; rows: Line[]; dispatch?: DispatchSummary; plants?: PlantInfo[]; received?: { period?: string; code: string; received: string | null }[]; releases?: { key: string; qi: number; block: number; by_user: string; at: string; active: boolean }[]; uploads: Upload[]; counts: { src: string; n: number }[]; generatedAt: string; time?: { soliPerHour?: number; lateGraceMin?: number; defaultTarget?: string } }
+interface PullPlan { weekPlants?: string[]; weekPlant?: string | null; type?: 'week' | 'day'; day?: string | null; days?: { day: string; week: string; lines: number; done: number; qty: number }[]; rounds?: RoundInfo[]; week: string | null; prevWeek?: string | null; rev?: string | null; weeks: WeekInfo[]; rows: Line[]; dispatch?: DispatchSummary; plants?: PlantInfo[]; received?: { period?: string; code: string; received: string | null }[]; releases?: { key: string; qi: number; block: number; by_user: string; at: string; active: boolean }[]; uploads: Upload[]; counts: { src: string; n: number }[]; generatedAt: string; time?: { soliPerHour?: number; lateGraceMin?: number; defaultTarget?: string } }
 
 /** "2026-W42" → "Week 42" */
 const weekLabel = (w: string | null | undefined) => (w ? `Week ${Number(w.slice(-2))}` : '');
@@ -50,6 +50,10 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
   useEffect(() => { setRound(null); }, [pickedWeek]);
   const weekRef = useRef<string | null>(null);
   weekRef.current = pickedWeek;
+  // week plan: one plant (its own reports) or every plant ('')
+  const [wPlant, setWPlant] = useState('');
+  const wPlantRef = useRef(wPlant); wPlantRef.current = wPlant;
+  useEffect(() => { setWPlant(''); }, [pickedWeek]);
 
   // filters
   const [date, setDate] = useState<string | null>(null);
@@ -85,13 +89,14 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
   const load = useCallback(async () => {
     try {
       const w = weekRef.current, rd = roundRef.current;
-      const qs = isDay ? `?type=day${w ? '&day=' + encodeURIComponent(w) : ''}${rd ? '&round=' + encodeURIComponent(rd) : ''}` : w ? '?week=' + encodeURIComponent(w) : '';
+      const wp = wPlantRef.current;
+      const qs = isDay ? `?type=day${w ? '&day=' + encodeURIComponent(w) : ''}${rd ? '&round=' + encodeURIComponent(rd) : ''}` : w || wp ? `?${w ? 'week=' + encodeURIComponent(w) : ''}${wp ? `${w ? '&' : ''}plant=${encodeURIComponent(wp)}` : ''}` : '';
       const p = await api<PullPlan>('/api/pullplan' + qs + (qs ? userParam() : userParam(true)));
       if (w && (isDay ? p.day : p.week) !== w) setPickedWeek(null); // that plan was deleted: back to the latest
       setData(p); setErr('');
     } catch (e) { setErr(e instanceof Error ? e.message : 'Could not load data.'); }
   }, [isDay]);
-  useEffect(() => { load(); }, [load, pickedWeek, round]);
+  useEffect(() => { load(); }, [load, pickedWeek, round, wPlant]);
   // no timer: when someone uses the page, check if anything changed and reload only then
   // without realtime: on activity, and once a minute while the summary / picks are open (a reload only when something changed)
   useRefreshOnActivity(load, data ? data.rev ?? null : undefined, live !== 'live', tab === 'details' ? 0 : 60000);
@@ -216,6 +221,16 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
             <nav className="weeks" aria-label="Ongoing week plans"><span className="weeks-label">Ongoing</span>{ongoing.length ? ongoing.map(chip) : <span className="muted small">none</span>}</nav>
             {complete.length > 0 && <nav className="weeks done-group" aria-label="Completed week plans"><span className="weeks-label">Completed</span>{complete.map(chip)}</nav>}
             {pickedWeek && <button type="button" className="btn sm" onClick={() => setPickedWeek(null)}>Back to latest week</button>}
+            {(data.weekPlants || []).length > 0 && (
+              <nav className="weeks plant-chips" aria-label="Plant">
+                <span className="weeks-label">Plant</span>
+                <button type="button" className={`day-chip ${!wPlant ? 'on' : ''}`} aria-pressed={!wPlant} onClick={() => { setWPlant(''); setView({ kind: 'all' }); }}><b>All plants</b><span>{(data.weekPlants || []).length} plants</span></button>
+                {(data.weekPlants || []).map((p) => (
+                  <button key={p || '-'} type="button" className={`day-chip ${wPlant === p ? 'on' : ''}`} aria-pressed={wPlant === p} onClick={() => { setWPlant(p); setView({ kind: 'all' }); }}
+                    title={`${plantLabel(p) || 'No plant'} — this plant's lines with the reports uploaded for ${data.week} + this plant`}><b>{plantLabel(p) || p || 'No plant'}</b><span>{p && plantLabel(p) !== p ? p : 'own reports'}</span></button>
+                ))}
+              </nav>
+            )}
           </div>
         );
       })()}

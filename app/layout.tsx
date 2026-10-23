@@ -2,7 +2,7 @@ import type { Metadata, Viewport } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'MAS Weekly Plan Tracker',
+  title: 'MAS AUTOMATE PICK SYSTEM',
   description: 'EFL · MAS weekly plan tracking from ZMMBE, KFC, PFC, PLANT and TRR reports',
 };
 export const viewport: Viewport = { width: 'device-width', initialScale: 1, viewportFit: 'cover' };

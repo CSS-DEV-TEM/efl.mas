@@ -43,7 +43,11 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
 
   // the reports of the Pick on screen (a day plan round); the whole day / a week: the shared reports
   // a Pick (day plan round) or a week plan (2026-W43): their own reports
-  const rid = /^\d{4}-\d{2}-\d{2}~[^~]*~\d+$/.test(week) || /^\d{4}-W\d{2}$/.test(week) ? week : '';
+  // a week plan's reports belong to one plant of it (2026-W43@ASIALLINE): choose the plant to upload / see them
+  const isWk = /^\d{4}-W\d{2}$/.test(week);
+  const rid = /^\d{4}-\d{2}-\d{2}~[^~]*~\d+$/.test(week) ? week : isWk && plant ? `${week}@${plant.trim().toUpperCase().replace(/\s+/g, '')}` : '';
+  // the plan report: the Pick, or the week (one plant of it)
+  const repRid = isWk ? week : rid;
   const loadStatus = useCallback(() => { api<NonNullable<typeof status>>('/api/pick/status' + (rid ? '?rid=' + encodeURIComponent(rid) : '')).then(setStatus).catch(() => {}); }, [rid]);
   useEffect(() => { loadStatus(); }, [loadStatus]);
 
@@ -60,7 +64,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
   // the Pick's plan report: POSIBAL PENDING = the lines the warehouse can send now (Pending, and UR in the warehouse ZMMBE)
   const [report, setReport] = useState<PlanReportRes | null>(null);
   const [showReport, setShowReport] = useState(false);
-  useEffect(() => { if (!rid) { setReport(null); return; } api<PlanReportRes>('/api/plan-report?rid=' + encodeURIComponent(rid) + (plant ? '&plant=' + encodeURIComponent(plant) : '')).then(setReport).catch(() => setReport(null)); }, [rid, rows, plant]);
+  useEffect(() => { if (!repRid) { setReport(null); return; } api<PlanReportRes>('/api/plan-report?rid=' + encodeURIComponent(repRid) + (plant ? '&plant=' + encodeURIComponent(plant) : '')).then(setReport).catch(() => setReport(null)); }, [repRid, rows, plant]);
   const possible = useMemo(() => new Map((report?.rows || []).filter((x) => x.possible).map((x) => [`${x.key}|${x.pick_date ?? ''}`, x])), [report]);
   // the plan report's ALRADY SEND (ZMMBE at the plant storage locations): the balance is QTY − ALRADY SEND − picked
   const repRow = useMemo(() => new Map((report?.hasSent ? report.rows : []).map((x) => [`${x.key}|${x.pick_date ?? ''}`, x])), [report]);
@@ -212,7 +216,8 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
 
       <section className="card" aria-labelledby="pd-title">
         <h2 id="pd-title">Pick data {rid ? <span className="pill accent" style={{ marginLeft: 6 }}>{label || rid}</span> : null}</h2>
-        {!rid && <div className="notice warn" style={{ margin: '6px 0' }}>Choose a Pick at the top: every Pick has its own ZINSR, ZCOMENT VIEW and Korber Inventory. (All picks of the day: the reports shown are the shared ones.)</div>}
+        {!rid && isWk && <div className="notice warn" style={{ margin: '6px 0' }}>Week plan: choose the <b>Plant</b> at the top — each plant of a week has its own reports (ZMMBE, ZINSR, SHADE, ZROLLMGT, KORBER, ZMM_TRR). Every plant&apos;s lines are still picked from that plant&apos;s reports.</div>}
+        {!rid && !isWk && <div className="notice warn" style={{ margin: '6px 0' }}>Choose a Pick at the top: every Pick has its own ZINSR, ZCOMENT VIEW and Korber Inventory. (All picks of the day: the reports shown are the shared ones.)</div>}
         <p className="sub">Upload in any order; each upload replaces that Pick&apos;s previous one. Matching: ZMMBE → ZINR (SO, LI, Material, Batch, UR = Insp. Lot Qty) → ZCOMENT VIEW Shade Report (Inspection lot) → Korber — a roll is matched only when all agree: Barcode Number = Pallet, Vendor Batch = Lot Number, Vendor Roll No = Supplier Hu (ZCOMENT), Vendor Invoice No = Invoice Number and Purchasing Document = Po Number (ZINR). Qty differences need “Confirmed”.</p>
         <div className="pick-ups">
           {PICK_SRCS.map((p) => {
@@ -223,7 +228,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
                   {(() => { const u0 = status?.reports?.find((x) => x.src === p.src)?.uses; return rid && u0 ? <span className={`pill ${u0 === 'own' ? 'ok' : u0 === 'shared' ? 'warn' : 'bad'}`}>{u0 === 'own' ? 'this Pick' : u0 === 'shared' ? 'shared' : 'missing'}</span> : null; })()}</div>
                 <span className="muted small">{u ? `${u.file_name || ''} · ${u.uploaded_by} · ${ago(u.uploaded_at)}` : p.hint}</span>
                 {canEdit && <>
-                  <button className="btn sm primary" aria-busy={busy === p.src || undefined} disabled={!!busy || !rid} title={rid ? `Upload to ${label || rid}` : 'Choose a Pick first'} onClick={() => inputs.current[p.src]?.click()}>{busy === p.src ? 'Uploading…' : `Upload ${p.title}`}</button>
+                  <button className="btn sm primary" aria-busy={busy === p.src || undefined} disabled={!!busy || !rid} title={rid ? `Upload to ${label || rid}` : isWk ? 'Choose the plant first: a week plan\'s reports belong to one plant' : 'Choose a Pick first'} onClick={() => inputs.current[p.src]?.click()}>{busy === p.src ? 'Uploading…' : `Upload ${p.title}`}</button>
                   <input ref={(el) => { inputs.current[p.src] = el; }} type="file" hidden accept=".xlsx,.xls,.xlsm,.csv" onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(p.src, f); e.target.value = ''; }} />
                 </>}
               </div>
@@ -240,8 +245,8 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
             <input type="search" className="as-search" placeholder="Search SO, item…" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search lines" />
-            {rid && <button className="btn" onClick={() => setShowReport(true)} title="The plan report of this Pick — on screen and as Excel">📋 {report?.name || 'Plan report'}</button>}
-            {showReport && rid && <PlanReport rid={rid} onClose={() => setShowReport(false)} />}
+            {repRid && <button className="btn" onClick={() => setShowReport(true)} title="The plan report of this Pick — on screen and as Excel">📋 {report?.name || 'Plan report'}</button>}
+            {showReport && repRid && <PlanReport rid={repRid} onClose={() => setShowReport(false)} />}
             {canEdit && <button className="btn primary run-all" disabled={!!run && !run.finished} onClick={runAll} title="Pick every roll where everything matches, line by line">⚡ Pick all matched</button>}
           </div>
         </div>
@@ -410,6 +415,8 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
 const CHECK_LABELS: [string, string][] = [['barcode', 'Barcode = Pallet'], ['lot', 'Vendor Batch = Lot Number'], ['hu', 'Vendor Roll No = Supplier Hu'], ['invoice', 'Invoice'], ['po', 'Purchasing Document = Po Number'], ['item', 'Item'], ['qty', 'ZCOMENT Roll qty = Korber Actual Qty (Korber is used)']];
 const checkText = (c: Record<string, boolean | null>) => CHECK_LABELS.map(([k, l]) => `${c[k] === true ? '✓' : c[k] === false ? '✗' : '–'} ${l}`).join('\n');
 const r3 = (n: number) => Math.round(n * 1000) / 1000;
+/** the reports a line reads: a week plan line → its week + plant; a Pick → the Pick */
+const lineScope = (week: string, plant: string | null | undefined) => (/^\d{4}-W\d{2}$/.test(week) && (plant || '').trim() ? `${week}@${(plant || '').trim().toUpperCase().replace(/\s+/g, '')}` : week);
 
 /** nb = chosen for a shade-report roll with no Barcode Number (one of its offered Korber rolls) */
 type SelV = { qty: string; manual?: ManualRoll | NoBarcodeRoll; korber?: KorberRow; nb?: NoBarcodeRoll };
@@ -906,7 +913,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
             {(c.manual?.length ?? 0) > 0 && shortfall <= 1e-9 && (
               <p className="muted small" style={{ margin: 0 }}>{c.manual!.length} shade-report roll{c.manual!.length === 1 ? ' does' : 's do'} not match a Korber roll, but the matched rolls cover the line — nothing to pick by hand.</p>
             )}
-            {choosing && <KorberChooser item={line.item} rid={week} roll={choosing} taken={Object.keys(sel).filter((p) => sel[p].manual !== choosing)} mine={chosenFor(choosing).map(([p]) => p)}
+            {choosing && <KorberChooser item={line.item} rid={lineScope(week, line.plant)} roll={choosing} taken={Object.keys(sel).filter((p) => sel[p].manual !== choosing)} mine={chosenFor(choosing).map(([p]) => p)}
               chosenQty={chosenFor(choosing).reduce((t, [, x]) => t + (Number(x.qty) || 0), 0)} open={manualLeft} rollOpen={rollLeft(choosing)} onUse={(k) => useKorber(choosing, k)} onClose={() => setChoosing(null)} />}
 
             {(freeOpen || freeSel.length > 0) && (
@@ -925,7 +932,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
                     </tr>
                   ))}</tbody>
                 </table></div>}
-                {freeOpen ? <KorberChooser item={line.item} rid={week} roll={FREE} title="Manual pallet for the shortage" taken={Object.keys(sel).filter((p) => sel[p].manual !== FREE)} mine={freeSel.map(([p]) => p)}
+                {freeOpen ? <KorberChooser item={line.item} rid={lineScope(week, line.plant)} roll={FREE} title="Manual pallet for the shortage" taken={Object.keys(sel).filter((p) => sel[p].manual !== FREE)} mine={freeSel.map(([p]) => p)}
                   chosenQty={freeSel.reduce((t, [, x]) => t + (Number(x.qty) || 0), 0)} open={short} onUse={useFree} onClose={() => setFreeOpen(false)} />
                   : short > 1e-9 && <button className="btn sm" onClick={() => setFreeOpen(true)}>+ Add another pallet</button>}
               </div>
