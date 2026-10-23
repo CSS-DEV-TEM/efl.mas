@@ -27,7 +27,7 @@ function pendingWhy(l: LineP): string {
 }
 
 /** Pick tab of the Dispatch page: the three pick reports, Ready-to-pull lines with Pick, and the pick history / Packing List. */
-export default function PickWorkspace({ week, rows, canEdit, toast, reload, label }: { week: string; rows: LineP[]; canEdit: boolean; toast: (m: string) => void; reload: () => void; /** what is on screen, e.g. "20 Oct · ASIALINE Pick 2" */ label?: string }) {
+export default function PickWorkspace({ week, rows, canEdit, toast, reload, label, plant }: { week: string; rows: LineP[]; canEdit: boolean; toast: (m: string) => void; reload: () => void; /** what is on screen, e.g. "20 Oct · ASIALINE Pick 2" */ label?: string; /** a week plan: one plant of it */ plant?: string }) {
   const [status, setStatus] = useState<{ counts: { src: string; n: number }[]; uploads: { src: string; file_name: string | null; row_count: number; uploaded_by: string; uploaded_at: string }[]; reports?: { src: string; uses: 'own' | 'shared' | 'none' }[] } | null>(null);
   const [busy, setBusy] = useState<PickSrc | null>(null);
   const [scope, setScope] = useState<'pending' | 'ready' | 'open' | 'picked' | 'done' | 'hold' | 'manual' | 'possible'>('pending');
@@ -42,7 +42,8 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
   const inputs = useRef<Record<string, HTMLInputElement | null>>({});
 
   // the reports of the Pick on screen (a day plan round); the whole day / a week: the shared reports
-  const rid = /^\d{4}-\d{2}-\d{2}~[^~]*~\d+$/.test(week) ? week : '';
+  // a Pick (day plan round) or a week plan (2026-W43): their own reports
+  const rid = /^\d{4}-\d{2}-\d{2}~[^~]*~\d+$/.test(week) || /^\d{4}-W\d{2}$/.test(week) ? week : '';
   const loadStatus = useCallback(() => { api<NonNullable<typeof status>>('/api/pick/status' + (rid ? '?rid=' + encodeURIComponent(rid) : '')).then(setStatus).catch(() => {}); }, [rid]);
   useEffect(() => { loadStatus(); }, [loadStatus]);
 
@@ -59,7 +60,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
   // the Pick's plan report: POSIBAL PENDING = the lines the warehouse can send now (Pending, and UR in the warehouse ZMMBE)
   const [report, setReport] = useState<PlanReportRes | null>(null);
   const [showReport, setShowReport] = useState(false);
-  useEffect(() => { if (!rid) { setReport(null); return; } api<PlanReportRes>('/api/plan-report?rid=' + encodeURIComponent(rid)).then(setReport).catch(() => setReport(null)); }, [rid, rows]);
+  useEffect(() => { if (!rid) { setReport(null); return; } api<PlanReportRes>('/api/plan-report?rid=' + encodeURIComponent(rid) + (plant ? '&plant=' + encodeURIComponent(plant) : '')).then(setReport).catch(() => setReport(null)); }, [rid, rows, plant]);
   const possible = useMemo(() => new Map((report?.rows || []).filter((x) => x.possible).map((x) => [`${x.key}|${x.pick_date ?? ''}`, x])), [report]);
   // the plan report's ALRADY SEND (ZMMBE at the plant storage locations): the balance is QTY − ALRADY SEND − picked
   const repRow = useMemo(() => new Map((report?.hasSent ? report.rows : []).map((x) => [`${x.key}|${x.pick_date ?? ''}`, x])), [report]);
@@ -1043,11 +1044,11 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
   // the Picks of the day (day plan rounds): the history and the Packing List of one Pick
   const [pickId, setPickId] = useState('');
   useEffect(() => { setPickId(''); }, [day]);
-  const pickIds = Array.from(new Set((h?.requests || []).map((r) => r.week).filter((w) => /~\d+$/.test(w || ''))));
+  const pickIds = Array.from(new Set((h?.requests || []).map((r) => r.week).filter((w) => /~\d+$|^\d{4}-W\d{2}$/.test(w || ''))));
   // plant names (Settings → Plants) for the Pick No list
   const [plantNames, setPlantNames] = useState<Record<string, string>>({});
   useEffect(() => { api<{ plants: { code: string; name: string | null }[] }>('/api/plants').then((r) => setPlantNames(Object.fromEntries(r.plants.map((x) => [x.code.toUpperCase(), x.name || x.code])))).catch(() => {}); }, []);
-  const pickName = (w: string) => { const m = /^\d{4}-\d{2}-\d{2}~([^~]*)~(\d+)$/.exec(w); return m ? `${w.slice(8, 10)}-${w.slice(5, 7)} · ${m[1] === '-' ? 'No plant' : plantNames[m[1]] || m[1]} · Pick ${m[2]}` : w; };
+  const pickName = (w: string) => { const m = /^\d{4}-\d{2}-\d{2}~([^~]*)~(\d+)$/.exec(w); return m ? `${w.slice(8, 10)}-${w.slice(5, 7)} · ${m[1] === '-' ? 'No plant' : plantNames[m[1]] || m[1]} · Pick ${m[2]}` : /^\d{4}-W\d{2}$/.test(w) ? `Week plan ${w}` : w; };
   const shownReqs = (h?.requests || []).filter((r) => !pickId || r.week === pickId);
   const live = shownReqs.filter((r) => !r.cancelled_at);
   // the picks marked for the download (none marked = all of the day)
@@ -1075,6 +1076,11 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
       let plan: LineP[] = [];
       for (const d of days) { try { plan.push(...(await api<{ rows: LineP[] }>(`/api/pullplan?type=day&day=${d}`)).rows); } catch { /* plan not available */ } }
       plan = plan.filter((l) => weeks.includes(l.week));
+      // a week plan: its lines that were picked (the line = SO / LI / Item key + its day)
+      const lineIds = new Set(target.map((r) => r.line));
+      for (const w of weeks.filter((x) => /^\d{4}-W\d{2}$/.test(x))) {
+        try { plan.push(...(await api<{ rows: LineP[] }>(`/api/pullplan?week=${encodeURIComponent(w)}`)).rows.filter((l) => lineIds.has(`${l.key}|${l.date ?? ''}`))); } catch { /* plan not available */ }
+      }
       saveWorkbook(packingListWorkbook(h!, { ids: new Set(target.map((r) => r.id)), combined: oneSheet, pfcSlocs, plan, planTitle: `Plan · ${weeks.map(pickName).join(', ')}` }), `Packing_List_${day}${ptag}${tag}.xlsx`);
     } finally { setPlBusy(false); }
   };
