@@ -877,3 +877,8 @@ tr.on-hold td { background: color-mix(in srgb, #ef4444 9%, transparent); }
 .week-mgr select { padding: 5px 8px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--panel); color: var(--ink); }
 .wk-bar { display: inline-block; width: 70px; height: 6px; border-radius: 3px; background: var(--line); vertical-align: middle; overflow: hidden; }
 .wk-bar i { display: block; height: 100%; background: var(--accent); }
+.week-mgr .wk-jobs { margin-top: 4px; }
+.week-mgr .wk-list tr.on td { background: var(--accent-soft); }
+.wk-reps { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 8px; }
+.ok-text { color: var(--ok, #2f9e44); }
+.bad-text { color: var(--bad, #e03131); }

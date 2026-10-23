@@ -331,8 +331,10 @@ async function ensureSchema(env: Env) {
 type ReportTable = 'stock' | 'zinr' | 'zcoment' | 'korber' | 'zroll' | 'ztrr' | 'stock_sent';
 type Scope = Record<ReportTable, string>;
 const SHARED: Scope = { stock: '', zinr: '', zcoment: '', korber: '', zroll: '', ztrr: '', stock_sent: '' };
+/** a scope of its own reports: a Pick (day plan round) or a week plan (2026-W43) */
+const scopeRid = (x: unknown) => (parseRound(x) || /^\d{4}-W\d{2}$/.test(String(x ?? '')) ? String(x) : '');
 async function scopeOf(env: Env, rid: unknown): Promise<Scope> {
-  if (!parseRound(rid)) return SHARED;
+  if (!scopeRid(rid)) return SHARED;
   const own = new Set((await env.DB.prepare('SELECT DISTINCT src FROM uploads WHERE rid = ?').bind(String(rid)).all<{ src: string }>()).results.map((x) => x.src));
   const r = String(rid);
   return { stock: own.has('zmmbe') ? r : '', stock_sent: own.has('zmmbe') ? r : '', zinr: own.has('zinr') ? r : '', zcoment: own.has('zcoment') ? r : '', korber: own.has('korber') ? r : '', zroll: own.has('zroll') ? r : '', ztrr: own.has('ztrr') ? r : '' };
@@ -419,7 +421,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 58; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 59; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -521,8 +523,8 @@ async function handleUpload(env: Env, req: Request) {
     /** the Pick (round id "<day>~<plant>~<n>") the report belongs to; none = the shared reports */
     rid?: string };
   // a Pick's upload: the plan and every report go to that Pick
-  const pickRid = parseRound(body.rid) ? String(body.rid) : null;
-  if (pickRid) {
+  const pickRid = scopeRid(body.rid) || null;
+  if (pickRid && parseRound(pickRid)) {
     const pr = parseRound(pickRid)!;
     if (body.src === 'plan') { body.planType = 'day'; body.day = pr.day; body.plant = pr.plant ?? '-'; body.round = pr.round; }
   }
@@ -1090,13 +1092,21 @@ async function handleFollow(env: Env, req: Request) {
  */
 async function handlePlanReport(env: Env, req: Request) {
   await requireUser(env, req);
-  const rid = String(new URL(req.url).searchParams.get('rid') || '');
-  const rnd = parseRound(rid);
-  if (!rnd) throw new HttpError(400, 'Choose a Pick.');
+  const sp0 = new URL(req.url).searchParams;
+  const rid = String(sp0.get('rid') || '');
+  // a Pick (day plan round) or a week plan (2026-W43, optionally one plant of it)
+  const isWeek = /^\d{4}-W\d{2}$/.test(rid);
+  const wPlant = isWeek ? String(sp0.get('plant') || '').trim().toUpperCase() : '';
+  const rnd = isWeek ? null : parseRound(rid);
+  if (!rnd && !isWeek) throw new HttpError(400, 'Choose a Pick or a week.');
   const senv = await envFor(env, rid);
-  const pi = rnd.plant ? await env.DB.prepare('SELECT name FROM plant_info WHERE upper(code) = ?').bind(rnd.plant.toUpperCase()).first<{ name: string | null }>() : null;
-  const name = `${(pi?.name || rnd.plant || 'PLAN').toUpperCase().replace(/\s+/g, '')}-${rnd.day.slice(8, 10)}`;
-  const lines = (await env.DB.prepare('SELECT key, so, li, item, date, COALESCE(plan_date, date) AS plan_date, qty, row_no, plant, remarks FROM plan WHERE week = ? ORDER BY row_no').bind(rid).all<Row>()).results;
+  const lines = (await env.DB.prepare(`SELECT key, so, li, item, date, COALESCE(plan_date, date) AS plan_date, qty, row_no, plant, remarks FROM plan WHERE week = ?1
+    ${isWeek ? "AND plan_type = 'week' AND (?2 = '' OR upper(COALESCE(plant, '')) = ?2)" : ''} ORDER BY ${isWeek ? 'date, ' : ''}row_no`).bind(...(isWeek ? [rid, wPlant] : [rid])).all<Row>()).results;
+  const plantCode = rnd ? rnd.plant : wPlant || (new Set(lines.map((l) => up(l.plant))).size === 1 ? up(lines[0]?.plant) : '');
+  const pi = plantCode ? await env.DB.prepare('SELECT name FROM plant_info WHERE upper(code) = ?').bind(plantCode.toUpperCase()).first<{ name: string | null }>() : null;
+  const plantName = (pi?.name || plantCode || '').toUpperCase().replace(/\s+/g, '');
+  const name = rnd ? `${plantName || 'PLAN'}-${rnd.day.slice(8, 10)}` : `${plantName ? plantName + '-' : 'WEEK-'}${rid.slice(5)}`;
+  const firstDay = rnd ? rnd.day : lines.map((l) => String(l.date ?? '')).filter(Boolean).sort()[0] ?? '';
   const SO_UR = "COALESCE(total - COALESCE(qi, 0) - COALESCE(block, 0), ur)";
   const st = new Map((await senv.DB.prepare(`SELECT key, ROUND(SUM(${SO_UR}), 3) avail, ROUND(SUM(CASE WHEN src = 'sent' THEN ${SO_UR} ELSE 0 END), 3) sent,
       ROUND(SUM(COALESCE(qi, 0)), 3) qi, ROUND(SUM(COALESCE(block, 0)), 3) block, ROUND(SUM(CASE WHEN src = 'zmmbe' THEN ur ELSE 0 END), 3) wh_ur
@@ -1122,7 +1132,8 @@ async function handlePlanReport(env: Env, req: Request) {
       wh: r3(avail - sent), wh_ur: r3(Number(x?.wh_ur ?? 0)), picked: p0 ? Number(p0.q) : 0, rolls: p0 ? Number(p0.n) : 0, key: l.key, plant: l.plant, remarks: l.remarks };
   });
   const sum = (f: (r: typeof rows[number]) => number) => r3(rows.reduce((t0, r) => t0 + f(r), 0));
-  return json({ rid, name, day: rnd.day, plant: rnd.plant, hasZmmbe: zm, hasSent, hasTrr: tn.size > 0, rows,
+  const weekPlants = isWeek ? (await env.DB.prepare("SELECT DISTINCT upper(COALESCE(plant, '')) p FROM plan WHERE week = ? AND plan_type = 'week' ORDER BY 1").bind(rid).all<{ p: string }>()).results.map((x) => x.p).filter(Boolean) : [];
+  return json({ rid, name, day: firstDay, plant: plantCode || null, week: isWeek, plants: weekPlants, hasZmmbe: zm, hasSent, hasTrr: tn.size > 0, rows,
     totals: { lines: rows.length, qty: sum((r) => r.qty), avail: sum((r) => r.avail), sent: sum((r) => r.sent), pending: sum((r) => Math.max(0, r.pending)), possible: sum((r) => r.possible ?? 0),
       possibleLines: rows.filter((r) => r.possible).length, qi: sum((r) => r.qi), block: sum((r) => r.block), tnLines: rows.filter((r) => r.tn).length, picked: sum((r) => r.picked) } });
 }
@@ -1130,7 +1141,7 @@ async function handlePlanReport(env: Env, req: Request) {
 async function handleZroll(env: Env, req: Request) {
   await requireUser(env, req);
   const sp = new URL(req.url).searchParams;
-  const rid = parseRound(sp.get('rid')) ? String(sp.get('rid')) : '';
+  const rid = scopeRid(sp.get('rid'));
   const senv = await envFor(env, rid);
   const st = await getSettings(env);
   const bin = up(st.pickBin || 'EXPO-FIX').replace(/\s+/g, '');
@@ -1286,7 +1297,7 @@ async function handlePullPlan(env: Env, req: Request) {
   const periods = ptype === 'day' ? (week ? [week] : rounds.map((r) => String(r.id))) : week ? [week] : [];
   const groups: { period: string | null; sc: Scope; env: Env; zAt?: string }[] = [];
   for (const per of ptype === 'day' ? periods : [week]) {
-    const sc = ptype === 'day' ? await scopeOf(env, per) : SHARED;
+    const sc = await scopeOf(env, per); // a Pick's or a week plan's own reports (else the shared ones)
     // stock "as of": the latest FULL ZMMBE upload of that scope (a part file added to it does not refresh the other rows)
     const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid = ? AND COALESCE(mode, '') <> 'add'").bind(sc.stock).first<{ at: string | null }>())?.at ?? undefined;
     groups.push({ period: per, sc, env: scopedEnv(env, sc), zAt });
@@ -1294,7 +1305,7 @@ async function handlePullPlan(env: Env, req: Request) {
   // the latest upload of each report this view reads: a Pick's own (else the shared one); the whole day / a week: the shared ones
   // (the whole day, all its Picks: the Pick with the latest ZMMBE — not the old shared uploads)
   const latestG = [...groups].sort((a, b) => String(b.zAt ?? '').localeCompare(String(a.zAt ?? '')))[0];
-  const vsc = ptype === 'day' && week ? groups[0]?.sc ?? SHARED : ptype === 'day' && latestG ? latestG.sc : SHARED;
+  const vsc = week ? groups[0]?.sc ?? SHARED : ptype === 'day' && latestG ? latestG.sc : SHARED;
   const uploads = await env.DB.prepare(`SELECT u.src, u.file_name, u.sheet_name, u.row_count, u.uploaded_by, u.uploaded_at, u.rid FROM uploads u
                     JOIN (SELECT src, MAX(id) id FROM uploads WHERE (src IN ('zmmbe', 'kfc', 'pfc', 'plant') AND rid = ?1) OR (src = 'zinr' AND rid = ?2) OR (src = 'zcoment' AND rid = ?3)
                       OR (src = 'korber' AND rid = ?4) OR (src = 'plan' AND rid IN (?5, '')) OR (src NOT IN ('zmmbe', 'kfc', 'pfc', 'plant', 'zinr', 'zcoment', 'korber', 'plan') AND rid = '') GROUP BY src) m ON m.id = u.id`)
@@ -1734,7 +1745,7 @@ async function handlePick(env: Env, req: Request, p: string) {
     await requireUser(env, req, 'editor');
     // a Pick's Korber: only the items of that Pick's plan (a Korber file per Pick stays small); no plan yet / shared: every plan item
     const krid = url.searchParams.get('rid');
-    if (krid && parseRound(krid)) {
+    if (krid && scopeRid(krid)) {
       const own = (await env.DB.prepare('SELECT DISTINCT item FROM plan WHERE week = ?').bind(krid).all<Row>()).results;
       if (own.length) return json({ items: Array.from(new Set(own.map((r) => normId(r.item)))).filter(Boolean), rid: krid });
     }
@@ -1745,7 +1756,7 @@ async function handlePick(env: Env, req: Request, p: string) {
   // what is loaded
   // GET /api/pick/status?rid= — each report of a Pick: its own upload (rows, file, who, when) or the shared one it falls back to
   if (part === 'status' && req.method === 'GET') {
-    const rid = parseRound(url.searchParams.get('rid')) ? String(url.searchParams.get('rid')) : '';
+    const rid = scopeRid(url.searchParams.get('rid'));
     const reports = await reportStatus(env, rid);
     // the older shape (counts / uploads of the reports this Pick reads) for the Pick data card
     const counts = reports.filter((r) => r.src !== 'plan').map((r) => ({ src: r.src, n: r.rows }));
@@ -1759,8 +1770,8 @@ async function handlePick(env: Env, req: Request, p: string) {
     const b = (await req.json()) as { src: 'zinr' | 'zcoment' | 'korber' | 'zroll' | 'ztrr'; header: unknown[]; rows: unknown[][]; fileName?: string; total?: number; rid?: string };
     if (!PICK_COLS[b.src]) throw new HttpError(400, 'Unknown report.');
     // the Pick this report belongs to ('' = the shared report)
-    const rid = parseRound(b.rid) ? String(b.rid) : '';
-    if (rid) { const pr = parseRound(rid)!; await env.DB.batch([env.DB.prepare('INSERT OR IGNORE INTO plan_day (day, created_by, created_at) VALUES (?,?,?)').bind(pr.day, s.u, now()),
+    const rid = scopeRid(b.rid);
+    if (rid && parseRound(rid)) { const pr = parseRound(rid)!; await env.DB.batch([env.DB.prepare('INSERT OR IGNORE INTO plan_day (day, created_by, created_at) VALUES (?,?,?)').bind(pr.day, s.u, now()),
       env.DB.prepare('INSERT OR IGNORE INTO pick_round (rid, day, plant, round, created_by, created_at) VALUES (?,?,?,?,?,?)').bind(rid, pr.day, pr.plant, pr.round, s.u, now())]); }
     if (!Array.isArray(b.header) || !Array.isArray(b.rows)) throw new HttpError(400, 'No rows in the upload.');
     const ix = headerIndex(b.header, PICK_COLS[b.src]);
@@ -2204,7 +2215,7 @@ async function handlePick(env: Env, req: Request, p: string) {
   // whether the Pick's Korber still has them
   if (part === 'cutrolls' && req.method === 'GET') {
     await requireUser(env, req);
-    const rid = parseRound(url.searchParams.get('rid')) ? String(url.searchParams.get('rid')) : '';
+    const rid = scopeRid(url.searchParams.get('rid'));
     const kenv = await envFor(env, rid);
     const rows = (await env.DB.prepare(`SELECT pallet, MAX(item) item, MAX(roll_qty) base, ROUND(SUM(qty), 3) picked, COUNT(*) picks, MAX(at) last_at, MAX(day) last_day,
         GROUP_CONCAT(DISTINCT so || '/' || li) lines FROM picks WHERE cancelled_at IS NULL GROUP BY pallet HAVING SUM(qty) < MAX(roll_qty) - 0.0005 ORDER BY MAX(at) DESC LIMIT 1000`).all<Row>()).results;
@@ -3341,7 +3352,7 @@ async function handleClear(env: Env, req: Request, src: string) {
   const s = await requireUser(env, req, 'admin');
   // ?rid=<Pick>: only that Pick's own upload of the report is removed (the Pick then reads the shared report again)
   const crid = new URL(req.url).searchParams.get('rid');
-  if (crid && parseRound(crid) && ['zmmbe', 'zinr', 'zcoment', 'korber', 'zroll', 'ztrr'].includes(src)) {
+  if (crid && scopeRid(crid) && ['zmmbe', 'zinr', 'zcoment', 'korber', 'zroll', 'ztrr'].includes(src)) {
     const t = src === 'zmmbe' ? 'stock' : src;
     await env.DB.batch([
       env.DB.prepare(`DELETE FROM ${t} WHERE rid = ?`).bind(crid),

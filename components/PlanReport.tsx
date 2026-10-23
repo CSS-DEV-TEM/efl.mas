@@ -10,7 +10,7 @@ export interface PlanReportRow {
   qi: number; block: number; tn: string | null; tn_qty: number | null; tn_status: string | null; wh: number; wh_ur: number; picked: number; /** QTY − ALRADY SEND − picks after the ZMMBE upload */ left?: number; rolls: number; key: string; plant: string | null; remarks: string | null;
 }
 export interface PlanReportRes {
-  rid: string; name: string; day: string; plant: string | null; hasZmmbe: boolean; hasSent: boolean; hasTrr: boolean; rows: PlanReportRow[];
+  rid: string; name: string; day: string; plant: string | null; week?: boolean; plants?: string[]; hasZmmbe: boolean; hasSent: boolean; hasTrr: boolean; rows: PlanReportRow[];
   totals: { lines: number; qty: number; avail: number; sent: number; pending: number; possible: number; possibleLines: number; qi: number; block: number; tnLines: number; picked: number };
 }
 type View = 'all' | 'pending' | 'possible' | 'tn' | 'qiblock';
@@ -58,7 +58,11 @@ export default function PlanReport({ rid, onClose }: { rid: string; onClose: () 
   const [err, setErr] = useState('');
   const [view, setView] = useState<View>('all');
   const [q, setQ] = useState('');
-  useEffect(() => { api<PlanReportRes>('/api/plan-report?rid=' + encodeURIComponent(rid)).then(setR).catch((e) => setErr(e instanceof Error ? e.message : 'Could not load.')); }, [rid]);
+  // a week plan: all its plants, or one (the workbook is one plant: ASIALLINE-W43)
+  const [plant, setPlant] = useState('');
+  useEffect(() => { setR(null); api<PlanReportRes>('/api/plan-report?rid=' + encodeURIComponent(rid) + (plant ? '&plant=' + encodeURIComponent(plant) : '')).then(setR).catch((e) => setErr(e instanceof Error ? e.message : 'Could not load.')); }, [rid, plant]);
+  const [plants, setPlants] = useState<string[]>([]);
+  useEffect(() => { if (r?.plants?.length) setPlants(r.plants); }, [r]);
   useEffect(() => { const k = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); }; window.addEventListener('keydown', k); return () => window.removeEventListener('keydown', k); }, [onClose]);
   const list = useMemo(() => {
     const s = q.trim().toLowerCase();
@@ -79,6 +83,12 @@ export default function PlanReport({ rid, onClose }: { rid: string; onClose: () 
             <button className="btn" onClick={onClose} aria-label="Close">✕</button>
           </div>
         </div>
+        {plants.length > 1 && (
+          <div className="seg" role="group" aria-label="Plant" style={{ marginBottom: 6, flexWrap: 'wrap' }}>
+            <button className={!plant ? 'on' : ''} onClick={() => setPlant('')}>All plants</button>
+            {plants.map((p) => <button key={p} className={plant === p ? 'on' : ''} onClick={() => setPlant(p)}>{p}</button>)}
+          </div>
+        )}
         {err && <div className="notice bad">{err}</div>}
         {!r && !err && <Loader label="Building the plan report…" />}
         {r && t && (

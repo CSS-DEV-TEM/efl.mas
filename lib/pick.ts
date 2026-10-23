@@ -501,3 +501,17 @@ export function korberWorkbook(h: PickHistory, ids?: Set<number> | number[]) {
   XLSXS.utils.book_append_sheet(wb, korberSheet(h.korberHeader || [], picks), 'Sheet1');
   return wb;
 }
+
+/** a "PLANT-DD" plan sheet (ASIALLINE-23) */
+export const PLAN_SHEET = /^\s*([A-Za-z][A-Za-z .&]*?)\s*[-_ ]\s*(\d{1,2})\s*$/;
+export const squash = (v: string) => v.toUpperCase().replace(/[^A-Z0-9]/g, '').replace(/(.)\1+/g, '$1');
+/** the other sheets of such a workbook → the pick report they are */
+export function pickSrcOf(name: string): PickSrc | null {
+  const n = name.toUpperCase().replace(/[^A-Z]/g, '');
+  if (/^ZINSR|^ZINR/.test(n)) return 'zinr';
+  if (/^SHADE|^ZCOMENT/.test(n)) return 'zcoment';
+  if (/^ZROLLMGT/.test(n)) return 'zroll';
+  if (/^KORBER|^INVENTORY/.test(n)) return 'korber';
+  if (/^ZMMTRR|^TRR/.test(n)) return 'ztrr';
+  return null;
+}

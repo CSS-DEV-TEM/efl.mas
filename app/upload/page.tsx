@@ -14,7 +14,7 @@ import { TEMPLATES, downloadTemplate } from '@/lib/templates';
 import DayPickBar, { useDayPick } from '@/components/DayPickBar';
 import PlanReport from '@/components/PlanReport';
 import { todayLocal, weekDays, weekIdOf, weekOptions } from '@/lib/smart';
-import { PICK_SRCS, uploadPickSheets, type PickSrc } from '@/lib/pick';
+import { PICK_SRCS, PLAN_SHEET, pickSrcOf, squash, uploadPickSheets, type PickSrc } from '@/lib/pick';
 import {
   FIELDS, SRC_INFO, SRC_ORDER, applyMapping, colLetter, detectMapping, guessSrc, guessSrcFromGrid, isHelpSheet, readWorkbook, usableCount,
   type Grid, type Mapping, type Src,
@@ -65,19 +65,6 @@ interface SheetJob {
 }
 
 /** "ASIALLINE-23", "ASIA LINE - 5" … → the plant text and the day of the month */
-const PLAN_SHEET = /^\s*([A-Za-z][A-Za-z .&]*?)\s*[-_ ]\s*(\d{1,2})\s*$/;
-const squash = (v: string) => v.toUpperCase().replace(/[^A-Z0-9]/g, '').replace(/(.)\1+/g, '$1');
-/** the other sheets of such a workbook → the pick report they are */
-function pickSrcOf(name: string): PickSrc | null {
-  const n = name.toUpperCase().replace(/[^A-Z]/g, '');
-  if (/^ZINSR|^ZINR/.test(n)) return 'zinr';
-  if (/^SHADE|^ZCOMENT/.test(n)) return 'zcoment';
-  if (/^ZROLLMGT/.test(n)) return 'zroll';
-  if (/^KORBER|^INVENTORY/.test(n)) return 'korber';
-  if (/^ZMMTRR|^TRR/.test(n)) return 'ztrr';
-  return null;
-}
-
 function Uploads() {
   const { user, subscribe, toast } = useShell();
   // 1 day → 2 Pick → 3 reports: everything uploaded here goes to the chosen Pick
