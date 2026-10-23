@@ -1876,6 +1876,14 @@ async function handlePick(env: Env, req: Request, p: string) {
       if (!r.blocked) { const why = await gate.check(String(r.pallet), null, false); if (why) { r.blocked = why; r.available = 0; } }
       r.picks = pp.picks;
     }
+    // the same cap as the save: ZROLLMGT Available Quantity (a roll with a Reserved part has less)
+    if (gate.on) {
+      const av = await gate.availOf(rows.filter((r) => !r.blocked).map((r) => String(r.pallet)));
+      for (const r of rows) {
+        const a = av.get(up(r.pallet));
+        if (!r.blocked && a !== undefined && a < Number(r.available) - 1e-6) { r.reserved = r3(Number(r.available) - Math.max(0, a)); r.available = Math.max(0, r3(a)); }
+      }
+    }
     return json({ rows });
   }
 

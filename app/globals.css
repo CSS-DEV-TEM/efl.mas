@@ -858,3 +858,14 @@ tr.on-hold td { background: color-mix(in srgb, #ef4444 9%, transparent); }
 /* Plan report (components/PlanReport) */
 .modal.plan-report { width: min(1500px, 96vw); max-width: none; }
 .plan-report-table tr.pr-possible td { background: color-mix(in srgb, #f5c542 14%, transparent); }
+
+/* Plan → Pick: the views by category */
+.pick-tabs { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: flex-end; margin: 10px 0 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2, var(--panel)); }
+.pick-tab-group { display: flex; flex-direction: column; gap: 4px; }
+.pick-tab-label { font-size: 10.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3, var(--ink-2)); }
+.pick-tabs .seg button { display: inline-flex; align-items: center; gap: 6px; }
+.tab-n { min-width: 20px; padding: 0 6px; border-radius: 9px; font-size: 11px; font-weight: 600; line-height: 18px; text-align: center; background: var(--line); color: var(--ink-2); }
+.seg button.on .tab-n { background: var(--accent); color: #fff; }
+.tab-n.warn { background: #b7791f; color: #fff; }
+.tab-n.hot { background: #c05621; color: #fff; }
+@media (max-width: 640px) { .pick-tabs .seg { flex-wrap: wrap; } }
