@@ -1908,6 +1908,8 @@ async function handlePick(env: Env, req: Request, p: string) {
     const s = await requireUser(env, req, 'editor');
     const b = (await req.json()) as { week: string; key: string; date: string | null; pickNo?: string; kind?: string; auto?: boolean; overConfirmed?: boolean; closeShort?: boolean; rolls: { pallet: string; qty: number; confirmed?: boolean; manual?: ManualFor; nobarcode?: boolean }[] };
     if (!b.week || !b.key || !Array.isArray(b.rolls) || !b.rolls.length) throw new HttpError(400, 'Choose at least one roll.');
+    // one pallet once per pick (two entries would each pass the roll's balance and pick it over)
+    { const seen = new Set<string>(); for (const x of b.rolls) { const k = up(x.pallet); if (seen.has(k)) throw new HttpError(400, `Pallet ${x.pallet} is twice in this pick — enter its QTY once.`); seen.add(k); } }
     const kind = b.kind === 'offsite' ? 'offsite' : 'normal';
     const rules = await getSettings(env);
     if (kind === 'offsite' && !rules.allowOffsite) throw new HttpError(400, 'Offsite picks are turned off in the settings.');
@@ -2640,7 +2642,14 @@ async function makeGate(env: Env) {
   const availOf = async (pallets: string[]) => {
     const out = new Map<string, number>();
     if (!loaded || !pallets.length) return out;
-    for (const z of (await env.DB.prepare('SELECT barcode, qty FROM zroll WHERE barcode IN (SELECT value FROM json_each(?)) AND qty IS NOT NULL').bind(JSON.stringify(Array.from(new Set(pallets.map(up))))).all<Row>()).results) out.set(up(z.barcode), Number(z.qty));
+    const zs = (await env.DB.prepare('SELECT barcode, qty, rid FROM zroll WHERE barcode IN (SELECT value FROM json_each(?)) AND qty IS NOT NULL').bind(JSON.stringify(Array.from(new Set(pallets.map(up))))).all<Row>()).results;
+    if (!zs.length) return out;
+    // the Available Quantity is as of the ZROLLMGT upload: what was picked from the roll since then is taken off
+    // (SAP does not show it yet), so a roll with a Reserved part is never picked over what SAP has available
+    const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zroll' AND rid = ?").bind(String(zs[0].rid ?? '')).first<{ at: string | null }>())?.at ?? '';
+    const after = new Map((await env.DB.prepare('SELECT upper(pallet) p, SUM(qty) q FROM picks WHERE cancelled_at IS NULL AND at > ? AND upper(pallet) IN (SELECT value FROM json_each(?)) GROUP BY upper(pallet)')
+      .bind(zAt, JSON.stringify(zs.map((z) => up(z.barcode)))).all<{ p: string; q: number }>()).results.map((x) => [x.p, Number(x.q) || 0]));
+    for (const z of zs) out.set(up(z.barcode), Math.max(0, r3(Number(z.qty) - (after.get(up(z.barcode)) ?? 0))));
     return out;
   };
   const batchOf = async (pallet: string) => loaded ? ((await rowsOf([up(pallet)])).map((z) => z.batch as string | null).find(Boolean) ?? null) : null;

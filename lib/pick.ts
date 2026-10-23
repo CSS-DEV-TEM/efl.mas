@@ -157,7 +157,7 @@ const PL_HEAD2 = ['Pallet', 'Location Id', 'Item Number', 'Description', 'Lot Nu
 /** Korber column (as uploaded, `hn` form) for each Packing List column; the first one present is used. */
 const PL_SRC: Record<string, string[]> = {
   Pallet: ['pallet'], 'Location Id': ['location id'], 'Item Number': ['item number'], Description: ['description', 'supplier desc'], 'Lot Number': ['lot number'],
-  'Supplier Hu': ['supplier hu'], Color: ['color'], Plant: ['plant'], 'Asn Number': ['asn number'], 'Po Number': ['po number'], 'Customer Ref Number': ['customer ref number'], 'Item Id': ['item id'],
+  'Pick Id': ['pick id'], 'Supplier Hu': ['supplier hu'], Color: ['color'], Plant: ['plant'], 'Asn Number': ['asn number'], 'Po Number': ['po number'], 'Customer Ref Number': ['customer ref number'], 'Item Id': ['item id'],
 };
 const QTY_COL = PL_HEAD2.indexOf('Actual Qty'), SHADE_COL = PL_HEAD2.indexOf('Shade'), PICKNO_COL = PL_HEAD2.indexOf('Pick No');
 
@@ -382,6 +382,18 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
       if (list.length) U.book_append_sheet(wb, plSheet(list), sheetName(`${reqName(r)} ${k}`));
     }
   }
+  // Cut Roll: every roll that is cut (its pieces add up to less than the roll), KFC and PFC on their own sheets — in the
+  // Cut_Roll format (Korber Inventory columns, Actual Qty = the roll in Korber), then the cut QTY and what stays on the shelf
+  const cutAll = mergeByPallet(entries).filter((m) => isCut(m.e.p.pallet));
+  for (const k of kinds) {
+    const list = cutAll.filter((m) => m.e.kind === k);
+    if (list.length) U.book_append_sheet(wb, cutSheet(list.map((m) => {
+      const v = (c: string) => { const i = col(PL_SRC[c] ?? []); return i >= 0 ? m.e.raw[i] : null; };
+      const full = palFull.get(m.e.p.pallet) ?? 0;
+      const nos = Array.from(new Set(m.parts.map((x) => pickNoOf(x.r)).filter((x) => x !== '')));
+      return { v, full, cut: m.qty, lines: Array.from(new Set(m.parts.map((x) => `${x.r.so} / ${x.r.li} / ${x.r.item}`))).join(', '), pickNo: nos.join(', '), day: Array.from(new Set(m.parts.map((x) => x.p.day))).join(', ') };
+    })), sheetName(`${k} Cut Roll`));
+  }
   // Summary: one line per pick, its KFC and PFC QTY
   const summary: (string | number | null)[][] = [['Req', 'Total Qty', 'KFC Qty', 'PFC Qty', 'Total Rolls', 'Pick No', 'Type', 'Remarks']];
   for (const r of reqs) {
@@ -440,6 +452,30 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
     U.book_append_sheet(wb, korberSheet(h.korberHeader, korberPicks), 'Korber Inventory');
   }
   return wb;
+}
+
+/** The Cut_Roll format: Pick Id … Actual Qty (Korber), then Cut Qty | Balance Qty | SO / LI / Item | HJ Pick No | Picked on. */
+const CUT_HEAD = ['Pick Id', 'Pallet', 'Location Id', 'Item Number', 'Description', 'Lot Number', 'Supplier Hu', 'Color', 'Plant', 'Asn Number', 'Po Number', 'Customer Ref Number', 'Item Id', 'Actual Qty'];
+const CUT_EXTRA = ['Cut Qty', 'Balance Qty', 'SO / LI / Item', 'HJ Pick No', 'Picked on'];
+function cutSheet(rows: { v: (c: string) => unknown; full: number; cut: number; lines: string; pickNo: string; day: string }[]) {
+  const U = XLSXS.utils;
+  const r3 = (x: number) => Math.round(x * 1000) / 1000;
+  const aoa: (string | number | null)[][] = [[...CUT_HEAD, ...CUT_EXTRA]];
+  for (const x of rows) {
+    aoa.push([
+      ...CUT_HEAD.map((c) => (c === 'Actual Qty' ? r3(x.full) : c === 'Pick Id' ? ((x.v('Pick Id') ?? 0) as string | number) : ((x.v(c) ?? '') as string | number))),
+      r3(x.cut), r3(Math.max(0, x.full - x.cut)), x.lines, num(x.pickNo), x.day.split(', ').map((d) => d.split('-').reverse().join('-')).join(', '),
+    ]);
+  }
+  const ws = U.aoa_to_sheet(aoa);
+  const head = { font: { bold: true, color: { rgb: 'FFFFFF' }, name: 'Calibri', sz: 11 }, fill: { patternType: 'solid', fgColor: { rgb: '000000' } }, alignment: { horizontal: 'center', vertical: 'center' }, border: BOX };
+  for (let c = 0; c < CUT_HEAD.length + CUT_EXTRA.length; c++) {
+    const ref = U.encode_cell({ r: 0, c }); (ws[ref] as { s?: unknown }).s = c < CUT_HEAD.length ? head : ST.cutHead;
+    for (let r = 1; r < aoa.length; r++) { const rf = U.encode_cell({ r, c }); ws[rf] = ws[rf] || { t: 's', v: '' }; (ws[rf] as { s?: unknown }).s = c === CUT_HEAD.length ? ST.cut : ST.cell; }
+  }
+  ws['!cols'] = [9, 17, 14, 15, 15, 14, 13, 11, 9, 13, 13, 21, 12, 11, 10, 11, 30, 12, 11].map((w) => ({ wch: w }));
+  ws['!autofilter'] = { ref: `A1:${U.encode_col(CUT_HEAD.length + CUT_EXTRA.length - 1)}${aoa.length}` };
+  return ws;
 }
 
 /** Writes a workbook with its cell styles (fills, borders) kept. */
