@@ -11,7 +11,8 @@ export default function Page() {
   return <Shell admin><Settings /></Shell>;
 }
 
-export interface SystemSettings { fullRollPct: number; defaultPickKind: 'normal' | 'offsite'; allowOffsite: boolean; allowNormalShort: boolean; allowNormalFull: boolean; deriveFromZmmbe: boolean; pfcSlocs: string[]; plantSlocs: string[]; soliPerHour: number; lateGraceMin: number; defaultTarget: string; zmmbePlants?: PlantPair[]; rollGate?: boolean; pickBin?: string; zrollNeedsZinsr?: boolean }
+export interface SystemSettings { fullRollPct: number; defaultPickKind: 'normal' | 'offsite'; allowOffsite: boolean; allowNormalShort: boolean; allowNormalFull: boolean; deriveFromZmmbe: boolean; pfcSlocs: string[]; plantSlocs: string[]; soliPerHour: number; lateGraceMin: number; defaultTarget: string; zmmbePlants?: PlantPair[]; rollGate?: boolean; pickBin?: string; zrollNeedsZinsr?: boolean; blockLocs?: BlockLoc[] }
+export interface BlockLoc { wh: string; loc: string; note?: string }
 export interface PlantPair { plant: string; soPlant: string; link: string }
 
 const TABS = [['plants', 'Plants'], ['zmmbe', 'ZMMBE plants'], ['reports', 'Locations'], ['time', 'Time setup'], ['plans', 'Plans (data change)'], ['pick', 'Pick rules'], ['users', 'Users & roles'], ['backup', 'Backup & Restore'], ['database', 'Database']] as const;
@@ -49,13 +50,14 @@ function Settings() {
 
 function PickRules({ toast }: { toast: (m: string) => void }) {
   const [s, setS] = useState<SystemSettings | null>(null);
+  const [ver, setVer] = useState(0);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   useEffect(() => { api<{ settings: SystemSettings }>('/api/settings').then((r) => setS(r.settings)).catch((e) => setErr(e instanceof Error ? e.message : 'Could not load.')); }, []);
   const save = async () => {
     if (!s) return;
     setBusy(true); setErr('');
-    try { const r = await api<{ settings: SystemSettings }>('/api/settings', { method: 'POST', body: s }); setS(r.settings); toast('Pick rules saved'); }
+    try { const r = await api<{ settings: SystemSettings }>('/api/settings', { method: 'POST', body: s }); setS(r.settings); setVer((v) => v + 1); toast('Pick rules saved'); }
     catch (e) { setErr(e instanceof Error ? e.message : 'Could not save.'); } finally { setBusy(false); }
   };
   if (!s) return <section className="card">{err ? <div className="notice bad">{err}</div> : <Loader />}</section>;
@@ -100,9 +102,52 @@ function PickRules({ toast }: { toast: (m: string) => void }) {
           <input type="checkbox" checked={s.zrollNeedsZinsr !== false} onChange={(e) => set('zrollNeedsZinsr', e.target.checked)} />
         </label>
       </div>
+      <BlockedLocations list={s.blockLocs || []} ver={ver} onChange={(l) => set('blockLocs', l)} />
       {err && <div className="notice bad">{err}</div>}
       <div style={{ marginTop: 12 }}><button className="btn primary" aria-busy={!!busy || undefined} disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save pick rules'}</button></div>
     </section>
+  );
+}
+
+/** Korber Wh Id + Location Id that no Pick may take a roll from (auto, manual, Pick all matched, rejected-roll replacement). */
+function BlockedLocations({ list, ver, onChange }: { list: BlockLoc[]; ver: number; onChange: (l: BlockLoc[]) => void }) {
+  const [wh, setWh] = useState('');
+  const [loc, setLoc] = useState('');
+  const [note, setNote] = useState('');
+  const [info, setInfo] = useState<{ whs: { wh: string; n: number }[]; rules: (BlockLoc & { n: number })[] } | null>(null);
+  useEffect(() => { api<NonNullable<typeof info>>('/api/pick/locs').then(setInfo).catch(() => setInfo(null)); }, [ver]);
+  const norm = (v: string) => v.trim().toUpperCase().replace(/\s+/g, '');
+  const add = () => {
+    const l = norm(loc); if (!l) return;
+    const w = norm(wh);
+    if (list.some((x) => x.wh === w && x.loc === l)) { setLoc(''); return; }
+    onChange([...list, { wh: w, loc: l, ...(note.trim() ? { note: note.trim() } : {}) }]); setLoc(''); setNote('');
+  };
+  const nOf = (x: BlockLoc) => info?.rules.find((r) => r.wh === x.wh && r.loc === x.loc)?.n;
+  return (
+    <div className="block-locs">
+      <h3>Blocked Korber locations</h3>
+      <p className="sub" style={{ marginTop: 0 }}>A roll whose Korber <b>Wh Id</b> + <b>Location Id</b> is in this list is never picked by any Pick — not offered, not selected by Pick all matched, and refused when saved by hand. Leave Wh Id empty for every Wh Id; end the Location Id with <b>*</b> for every location starting so (e.g. <code>STAGE*</code>). Click <b>Save pick rules</b> after a change.</p>
+      <div className="bl-add">
+        <label>Wh Id<input className="as-search" list="bl-whs" value={wh} onChange={(e) => setWh(e.target.value)} placeholder="any" style={{ width: 110 }} /></label>
+        <datalist id="bl-whs">{(info?.whs || []).filter((x) => x.wh).map((x) => <option key={x.wh} value={x.wh}>{x.n} rolls</option>)}</datalist>
+        <label>Location Id<input className="as-search" value={loc} onChange={(e) => setLoc(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } }} placeholder="e.g. W1G-08-03-03" style={{ width: 170 }} /></label>
+        <label>Note<input className="as-search" value={note} onChange={(e) => setNote(e.target.value)} placeholder="why (optional)" style={{ width: 200 }} /></label>
+        <button type="button" className="btn" disabled={!loc.trim()} onClick={add}>+ Add</button>
+      </div>
+      {list.length > 0 ? (
+        <table className="mini" data-noexport style={{ marginTop: 8 }}>
+          <thead><tr><th>Wh Id</th><th>Location Id</th><th>Note</th><th className="n">Korber rolls now</th><th /></tr></thead>
+          <tbody>{list.map((x, i) => (
+            <tr key={x.wh + '|' + x.loc}>
+              <td>{x.wh || <span className="muted">any</span>}</td><td className="mono"><b>{x.loc}</b></td><td>{x.note || ''}</td>
+              <td className="n">{nOf(x) === undefined ? <span className="muted" title="Save to count">–</span> : nOf(x)}</td>
+              <td><button type="button" className="btn sm" onClick={() => onChange(list.filter((_, j) => j !== i))} aria-label={`Remove ${x.loc}`}>✕</button></td>
+            </tr>
+          ))}</tbody>
+        </table>
+      ) : <p className="muted small">No location blocked.</p>}
+    </div>
   );
 }
 

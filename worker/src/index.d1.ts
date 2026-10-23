@@ -147,7 +147,7 @@ const thisWeek = () => weekId(new Date(Date.now() + 5.5 * 3600 * 1000).toISOStri
  * adds plan.week, fills it from the dates, and moves dashboard edits to week-scoped keys ("2026-W42#SO|LI|Item").
  */
 let schemaReady = false;
-const SCHEMA_V = '31';
+const SCHEMA_V = '32';
 async function ensureSchema(env: Env) {
   if (schemaReady || !env.DB) return;
   try {
@@ -272,6 +272,13 @@ async function ensureSchema(env: Env) {
       FROM plan WHERE plan_type = 'day' AND instr(week, '~') > 0 GROUP BY week`),
     env.DB.prepare("INSERT OR IGNORE INTO plan_day (day, created_by, created_at) SELECT DISTINCT day, created_by, created_at FROM pick_round"),
   ]);
+  // v32: Korber Wh Id (Settings → blocked Wh Id + Location Id); the rolls uploaded before get it from their raw row
+  try { await env.DB.prepare('ALTER TABLE korber ADD COLUMN wh TEXT').run(); } catch { /* already there */ }
+  try {
+    const kh = (await env.DB.prepare("SELECT v FROM config WHERE k = 'korber_header'").first<{ v: string }>())?.v;
+    const wi = kh ? (JSON.parse(kh) as unknown[]).findIndex((h) => String(h ?? '').trim().toLowerCase().replace(/\s+/g, ' ') === 'wh id') : -1;
+    if (wi >= 0) await env.DB.prepare(`UPDATE korber SET wh = upper(trim(CAST(json_extract(raw, '$[${wi}]') AS TEXT))) WHERE wh IS NULL AND json_valid(raw) AND json_type(raw) = 'array'`).run();
+  } catch { /* no Korber yet */ }
   // v30: SAP ZMM_TRR (transfer requests) per Pick — the plan report's TRANSFER NOTE; the plan file's own DATE of a Pick's line
   try { await env.DB.prepare('ALTER TABLE plan ADD COLUMN plan_date TEXT').run(); } catch { /* already there */ }
   // "Already sent": the ZMMBE rows at the plant storage locations, per Pick (stock's own src list cannot hold them)
@@ -421,7 +428,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 59; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 60; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -809,9 +816,11 @@ interface Settings {
   rollGate: boolean; pickBin: string;
   /** ZMMBE batch → ZROLLMGT System Batch rolls only when ZINSR has the SO + LI + Material + Batch too */
   zrollNeedsZinsr: boolean;
+  /** Korber Wh Id + Location Id no Pick may take a roll from (wh '' = any Wh Id; a location ending in * = every location starting so) */
+  blockLocs: { wh: string; loc: string; note?: string }[];
 }
 const DEFAULT_SETTINGS: Settings = { fullRollPct: 10, defaultPickKind: 'normal', allowOffsite: true, allowNormalShort: true, allowNormalFull: true,
-  deriveFromZmmbe: true, pfcSlocs: ['41', 'COMF'], plantSlocs: ['40', '70', '75'], soliPerHour: 12, lateGraceMin: 0, defaultTarget: '', zmmbePlants: [], rollGate: true, pickBin: 'EXPO-FIX', zrollNeedsZinsr: true };
+  deriveFromZmmbe: true, pfcSlocs: ['41', 'COMF'], plantSlocs: ['40', '70', '75'], soliPerHour: 12, lateGraceMin: 0, defaultTarget: '', zmmbePlants: [], rollGate: true, pickBin: 'EXPO-FIX', zrollNeedsZinsr: true, blockLocs: [] };
 const slocList = (v: unknown, def: string[]) => Array.isArray(v) || typeof v === 'string'
   ? Array.from(new Set((Array.isArray(v) ? v : String(v).split(/[,\s]+/)).map((x) => normId(String(x).trim()).toUpperCase()).filter(Boolean))).slice(0, 30) : def;
 /** ZMMBE Plant + SO Plant pairs: upper case, no blanks, each pair once ("*" = any SO Plant) */
@@ -823,6 +832,28 @@ function plantPairs(v: unknown): Settings['zmmbePlants'] {
     out.push({ plant, soPlant, link: String((x as Row)?.link ?? '').trim().toUpperCase() });
   }
   return out.slice(0, 200);
+}
+/** Settings → blocked Korber locations: upper case, no blanks, each pair once */
+const locKey = (v: unknown) => String(v ?? '').trim().toUpperCase().replace(/\s+/g, '');
+function blockLocList(v: unknown): Settings['blockLocs'] {
+  const out: Settings['blockLocs'] = [];
+  for (const x of Array.isArray(v) ? v : []) {
+    const wh = locKey((x as Row)?.wh), loc = locKey((x as Row)?.loc), note = String((x as Row)?.note ?? '').trim().slice(0, 80);
+    if (!loc || out.some((o) => o.wh === wh && o.loc === loc)) continue;
+    out.push({ wh, loc, ...(note ? { note } : {}) });
+  }
+  return out.slice(0, 500);
+}
+/** why a Korber roll may not be picked because of its Wh Id + Location Id (Settings), null = it may */
+function locBlocker(st: Settings) {
+  const rules = st.blockLocs || [];
+  return (k: Row | null | undefined): string | null => {
+    if (!k || !rules.length) return null;
+    const loc = locKey(k.location), wh = locKey(k.wh);
+    if (!loc) return null;
+    const hit = rules.find((r) => (!r.wh || r.wh === wh) && (r.loc.endsWith('*') ? loc.startsWith(r.loc.slice(0, -1)) : r.loc === loc));
+    return hit ? `Korber Location ${k.location}${wh ? ` (Wh ${wh})` : ''} is blocked in Settings${hit.note ? ` — ${hit.note}` : ''}` : null;
+  };
 }
 /** the setup pair a ZMMBE row belongs to (exact SO Plant first, then "*"); null = not in the setup */
 const pairOf = (pairs: Settings['zmmbePlants'], plant: unknown, soPlant: unknown) => {
@@ -1727,7 +1758,7 @@ const PICK_COLS: Record<'zinr' | 'zcoment' | 'korber' | 'zroll' | 'ztrr', Record
   },
   korber: {
     pallet: ['Pallet'], item: ['Item Number'], display: ['Display Item Number'], lot: ['Lot Number'], qty: ['Actual Qty'], uom: ['Uom'], invoice: ['Invoice Number'], location: ['Location Id'],
-    supplier_hu: ['Supplier Hu'], status: ['Status'], po: ['Po Number'], pick_id: ['Pick Id'],
+    supplier_hu: ['Supplier Hu'], status: ['Status'], po: ['Po Number'], pick_id: ['Pick Id'], wh: ['Wh Id', 'Warehouse Id', 'Wh'],
   },
 };
 const REQUIRED: Record<string, string[]> = { ztrr: ['tn', 'to_so', 'to_li', 'material'], zroll: ['barcode', 'bin'], zinr: ['lot', 'batch', 'material', 'qty', 'so', 'li'], zcoment: ['lot', 'roll_no', 'shade'], korber: ['pallet', 'item', 'lot', 'qty'] };
@@ -1831,7 +1862,7 @@ async function handlePick(env: Env, req: Request, p: string) {
         seen.set(pallet, { pallet, item: korberItem(g(r, 'display'), g(r, 'item')), lot: txt(g(r, 'lot')), qty: num(g(r, 'qty')), uom: txt(g(r, 'uom')), invoice: txt(up(g(r, 'invoice'))),
           location: txt(g(r, 'location')), supplier_hu: txt(up(g(r, 'supplier_hu'))), status: txt(g(r, 'status')), po: txt(up(g(r, 'po'))), pcore: palletCore(pallet), raw: JSON.stringify(r),
           // Korber's own Pick Id: a roll is pickable only while it is 0 (another number = already on a WMS pick)
-          pick_id: ix.pick_id >= 0 ? (normId(g(r, 'pick_id')) || '0') : '0' });
+          pick_id: ix.pick_id >= 0 ? (normId(g(r, 'pick_id')) || '0') : '0', wh: txt(up(g(r, 'wh'))) });
       }
       rows = Array.from(seen.values());
     }
@@ -1870,14 +1901,27 @@ async function handlePick(env: Env, req: Request, p: string) {
   }
 
   // Korber rolls to choose by hand: same item first; search by pallet, lot or supplier HU; with what is left of each
+  // GET /api/pick/locs — Settings → blocked Korber locations: the Wh Ids in Korber and how many rolls each rule holds back
+  if (part === 'locs' && req.method === 'GET') {
+    await requireUser(env, req);
+    const whs = (await env.DB.prepare("SELECT COALESCE(wh, '') wh, COUNT(DISTINCT pallet) n FROM korber GROUP BY 1 ORDER BY 2 DESC LIMIT 50").all<Row>()).results;
+    const st = await getSettings(env);
+    const rules: Row[] = [];
+    for (const r of st.blockLocs || []) {
+      const like = r.loc.endsWith('*') ? r.loc.slice(0, -1).replace(/[%_]/g, '') + '%' : r.loc;
+      const n = Number((await env.DB.prepare(`SELECT COUNT(DISTINCT pallet) n FROM korber WHERE upper(replace(trim(location), ' ', '')) ${r.loc.endsWith('*') ? 'LIKE' : '='} ?1 AND (?2 = '' OR upper(trim(COALESCE(wh, ''))) = ?2)`).bind(like, r.wh).first<{ n: number }>())?.n ?? 0);
+      rules.push({ ...r, n });
+    }
+    return json({ whs, rules });
+  }
   if (part === 'korber' && req.method === 'GET') {
     await requireUser(env, req, 'editor');
     const item = normId(url.searchParams.get('item')), qs = up(url.searchParams.get('q'));
     const kenv = await envFor(env, url.searchParams.get('rid'));
     const rows = qs
-      ? (await kenv.DB.prepare('SELECT pallet, item, lot, qty, uom, invoice, location, supplier_hu, status, pick_id FROM korber WHERE pallet = ? OR (item = ? AND (upper(lot) LIKE ? OR supplier_hu LIKE ? OR pallet LIKE ? OR upper(invoice) LIKE ?)) LIMIT 80')
+      ? (await kenv.DB.prepare('SELECT pallet, item, lot, qty, uom, invoice, location, wh, supplier_hu, status, pick_id FROM korber WHERE pallet = ? OR (item = ? AND (upper(lot) LIKE ? OR supplier_hu LIKE ? OR pallet LIKE ? OR upper(invoice) LIKE ?)) LIMIT 80')
         .bind(qs, item, `%${qs}%`, `%${qs}%`, `%${qs}%`, `%${qs}%`).all<Row>()).results
-      : (await kenv.DB.prepare('SELECT pallet, item, lot, qty, uom, invoice, location, supplier_hu, status, pick_id FROM korber WHERE item = ? ORDER BY lot, supplier_hu LIMIT 200').bind(item).all<Row>()).results;
+      : (await kenv.DB.prepare('SELECT pallet, item, lot, qty, uom, invoice, location, wh, supplier_hu, status, pick_id FROM korber WHERE item = ? ORDER BY lot, supplier_hu LIMIT 200').bind(item).all<Row>()).results;
     const rej = new Map((await env.DB.prepare('SELECT pallet, reason FROM pick_reject').all<{ pallet: string; reason: string }>()).results.map((x) => [up(x.pallet), x.reason]));
     const gate = await makeGate(kenv);
     for (const r of rows) {
@@ -1888,6 +1932,7 @@ async function handlePick(env: Env, req: Request, p: string) {
       const wms = String(r.pick_id ?? '0') !== '0' && String(r.pick_id ?? '') !== '';
       r.available = wms || rej.has(up(r.pallet)) ? 0 : Math.max(0, r3(base - pp.before));
       if (wms) r.blocked = `Korber Pick Id ${r.pick_id}`;
+      { const lw = gate.locWhy(r); if (lw && !r.blocked) { r.blocked = lw; r.available = 0; } }
       if (rej.has(up(r.pallet))) r.blocked = `Rejected: ${rej.get(up(r.pallet))}`;
       if (!r.blocked) { const why = await gate.check(String(r.pallet), null, false); if (why) { r.blocked = why; r.available = 0; } }
       r.picks = pp.picks;
@@ -1978,8 +2023,9 @@ async function handlePick(env: Env, req: Request, p: string) {
       // a roll chosen by hand: at most its ZROLLMGT Available Quantity too (a Reserved part in SAP is not picked)
       if (!byPallet.has(up(x.pallet)) && gate.on) { const a = (await gate.availOf([r.pallet])).get(up(r.pallet)); if (a !== undefined && a < r.available - 1e-6) r.available = Math.max(0, r3(a)); }
       // Korber Pick Id must be 0 (another number: the roll is already on a WMS pick); a rejected roll is not picked again
-      const kp = await senv.DB.prepare('SELECT pick_id FROM korber WHERE pallet = ?').bind(up(r.pallet)).first<{ pick_id: string | null }>();
+      const kp = await senv.DB.prepare('SELECT pick_id, location, wh FROM korber WHERE pallet = ?').bind(up(r.pallet)).first<Row>();
       if (kp && String(kp.pick_id ?? '0') !== '0' && String(kp.pick_id ?? '') !== '') throw new HttpError(409, `Pallet ${r.pallet} is on Korber Pick Id ${kp.pick_id} — only rolls with Pick Id 0 can be picked.`);
+      { const lw = gate.locWhy(kp); if (lw) throw new HttpError(409, `Pallet ${r.pallet} cannot be picked — ${lw}.`); }
       { const bc = (r as Candidate & { barcode?: string | null }).barcode ?? null; const why = await gate.check(r.pallet, bc, !!bc && !nb && !x.manual && !r.zroll); if (why) throw new HttpError(409, `Pallet ${r.pallet} cannot be picked — ${why}.`); }
       const rj = await env.DB.prepare('SELECT reason, by_user, day FROM pick_reject WHERE pallet = ? ORDER BY id DESC LIMIT 1').bind(up(r.pallet)).first<Row>();
       if (rj) throw new HttpError(409, `Pallet ${r.pallet} was rejected (${rj.reason ?? '–'} · ${rj.day} · ${rj.by_user}) — it is not picked again.`);
@@ -2164,6 +2210,7 @@ async function handlePick(env: Env, req: Request, p: string) {
     if (!k) throw new HttpError(404, `Pallet ${pallet} is not in this Pick's Korber Inventory.`);
     if (normId(k.item) !== normId(rj.item)) throw new HttpError(400, `Pallet ${pallet} is item ${k.item}, not ${rj.item}.`);
     if (String(k.pick_id ?? '0') !== '0' && String(k.pick_id ?? '') !== '') throw new HttpError(409, `Pallet ${pallet} is on Korber Pick Id ${k.pick_id}.`);
+    { const lw = locBlocker(await getSettings(env))(k); if (lw) throw new HttpError(409, `Pallet ${pallet} cannot be picked — ${lw}.`); }
     if (await env.DB.prepare('SELECT 1 FROM pick_reject WHERE pallet = ?').bind(pallet).first()) throw new HttpError(409, `Pallet ${pallet} was rejected itself.`);
     { const why = await (await makeGate(senv)).check(pallet, null, false); if (why) throw new HttpError(409, `Pallet ${pallet} cannot be picked — ${why}.`); }
     const pp = await palletPicks(env, pallet);
@@ -2654,7 +2701,8 @@ async function makeGate(env: Env) {
   };
   const batchOf = async (pallet: string) => loaded ? ((await rowsOf([up(pallet)])).map((z) => z.batch as string | null).find(Boolean) ?? null) : null;
   const rowOk = (z: Row) => !on || !rowWhy(z);
-  return { on, bin, loaded, hasStatus, check, atBin, rowOk, rowWhy, batchOf, availOf };
+  const locWhy = locBlocker(st);
+  return { on, bin, loaded, hasStatus, check, atBin, rowOk, rowWhy, batchOf, availOf, locWhy };
 }
 
 /**
@@ -3026,6 +3074,17 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
       r.qtyNote = [r.qtyNote, `This roll is in the inspection lots of ${nLines} SO lines (batch ${bt}) — ${r.suggested ? 'suggested for this line' : 'suggested for another line'}`].filter(Boolean).join(' · ');
     }
     steps.push(`Batch ${bt}: ${mineShared.length} roll${mineShared.length === 1 ? ' is' : 's are'} in the inspection lots of ${nLines} SO lines (${Array.from(perLine.keys()).slice(0, 4).join(', ')}${nLines > 4 ? '…' : ''}) — ${mineSet.size} suggested for this line (lot QTY ${perLine.get(me) ?? 0}): tick them with “Select suggested rolls”.`);
+  }
+  // Settings → blocked Korber Wh Id + Location Id: those rolls are not picked by any Pick (shown under "Not pickable")
+  {
+    const pals = [...Array.from(rolls.keys()), ...nobarcode.flatMap((m) => (m.options as Row[]).map((o) => String(o.pallet)))];
+    const locs = pals.length ? new Map((await env.DB.prepare('SELECT pallet, location, wh FROM korber WHERE pallet IN (SELECT value FROM json_each(?))').bind(JSON.stringify(Array.from(new Set(pals.map(up))))).all<Row>()).results.map((k) => [up(k.pallet), k])) : new Map<string, Row>();
+    for (const [p0, r] of Array.from(rolls.entries())) {
+      const why = gate.locWhy(locs.get(up(p0)));
+      if (why) { rolls.delete(p0); blocked.push({ lot: r.lot ?? '–', batch: (r.batches || [])[0] ?? null, roll_no: (r as Candidate & { roll_no?: string | null }).roll_no ?? null, barcode: r.barcode ?? null, shade: r.shade ?? null, pallet: r.pallet, qty: Number(r.actual_qty) || null, why }); }
+    }
+    for (const m of nobarcode) m.options = (m.options as Row[]).filter((o) => !gate.locWhy(locs.get(up(o.pallet))));
+    for (let i = nobarcode.length - 1; i >= 0; i--) if (!(nobarcode[i].options as Row[]).length) nobarcode.splice(i, 1);
   }
   // ZROLLMGT Available Quantity: a roll with a Reserved part in SAP is picked only up to what SAP has available
   if (gate.on) {
@@ -3540,6 +3599,7 @@ export default {
             rollGate: b.rollGate === undefined ? cur.rollGate : !!b.rollGate,
             pickBin: b.pickBin === undefined ? cur.pickBin : (String(b.pickBin).trim().toUpperCase().slice(0, 30) || 'EXPO-FIX'),
             zrollNeedsZinsr: b.zrollNeedsZinsr === undefined ? cur.zrollNeedsZinsr !== false : !!b.zrollNeedsZinsr,
+            blockLocs: b.blockLocs === undefined ? (cur.blockLocs || []) : blockLocList(b.blockLocs),
           };
           await env.DB.batch([
             env.DB.prepare("INSERT INTO config (k, v) VALUES ('settings', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(JSON.stringify(next)),
