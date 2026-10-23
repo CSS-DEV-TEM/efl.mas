@@ -272,6 +272,40 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
         </nav>
       )}
 
+      {data && rows.length > 0 && (() => {
+        // At a glance: how far the plan is, and what to do next (each opens the lines or the page that does it)
+        const pct = t.qty ? Math.min(100, (t.dispatched / t.qty) * 100) : 0;
+        const linePct = t.lines ? (t.done / t.lines) * 100 : 0;
+        const ready = viewCounts['Ready to pull'] ?? 0, notK = viewCounts['Not in Korber'] ?? 0, noStock = viewCounts['No stock'] ?? 0, hold = viewCounts['On hold'] ?? 0;
+        const zAt = up.get('zmmbe')?.uploaded_at;
+        const ageH = zAt ? Math.floor((Date.now() - new Date(zAt).getTime()) / 3600000) : null;
+        const R = 34, C = 2 * Math.PI * R;
+        return (
+          <section className="glance" aria-label="At a glance">
+            <div className="gl-ring" title={`${fmt(t.dispatched, 2)} of ${fmt(t.qty, 2)} picked`}>
+              <svg viewBox="0 0 80 80" width="92" height="92" aria-hidden="true">
+                <circle cx="40" cy="40" r={R} className="gl-track" />
+                <circle cx="40" cy="40" r={R} className="gl-fill" strokeDasharray={`${(pct / 100) * C} ${C}`} transform="rotate(-90 40 40)" />
+              </svg>
+              <div className="gl-pct"><b>{Math.round(pct)}%</b><span>picked</span></div>
+            </div>
+            <div className="gl-text">
+              <b>{t.open > 0 ? `${fmt(t.open)} line${t.open === 1 ? '' : 's'} still open` : 'All lines are done 🎉'}</b>
+              <span>{compact(t.dispatched)} of {compact(t.qty)} QTY picked · {fmt(t.done)} of {fmt(t.lines)} lines done</span>
+              <div className="gl-bar"><i style={{ width: `${linePct}%` }} /></div>
+            </div>
+            <div className="gl-actions">
+              {canEdit && ready > 0 && <Link className="gl-act ok" href="/dispatch/"><b>{fmt(ready)}</b><span>Ready to pull — pick now</span></Link>}
+              {notK > 0 && <button type="button" className="gl-act warn" onClick={() => openView({ kind: 'action', value: 'Not in Korber' })}><b>{fmt(notK)}</b><span>Not in Korber — check</span></button>}
+              {noStock > 0 && <button type="button" className="gl-act bad" onClick={() => openView({ kind: 'action', value: 'No stock' })}><b>{fmt(noStock)}</b><span>No stock — follow up</span></button>}
+              {hold > 0 && <button type="button" className="gl-act bad" onClick={() => openView({ kind: 'action', value: 'On hold' })}><b>{fmt(hold)}</b><span>On hold</span></button>}
+              {canEdit && ageH !== null && ageH >= 24 && <Link className="gl-act warn" href="/upload/"><b>{ageH}h</b><span>ZMMBE is old — upload a new one</span></Link>}
+              {!(ready || notK || noStock || hold) && <span className="gl-act ok"><b>✓</b><span>Nothing waiting</span></span>}
+            </div>
+          </section>
+        );
+      })()}
+
       {data && rows.length > 0 && <section className="kpis compact" aria-label="Key figures">
         <div className="kpi"><span className="k">Plan lines</span><span className={`v ${!data ? 'skel' : ''}`}><CountUp value={t.lines} format={(n) => fmt(n)} /></span>
           <span className="s">{fmt(t.done)} done · {fmt(t.open)} open</span>

@@ -335,6 +335,21 @@ function rollParts(r: Candidate): { batch: string; qty: number }[] {
  * the smallest need first, full rolls while they fit, then the roll of that batch that fits the rest best — cut,
  * or sent in full if the user confirms. A roll split over two batches (86 + 1 = 87) counts for both.
  */
+/** Rolls whose QTY adds up to exactly `target` (within 0.0005), fewest rolls; null when there is none (up to 18 rolls). */
+function exactSubset(items: { id: string; q: number }[], target: number): Set<string> | null {
+  if (!(target > 1e-9) || !items.length) return null;
+  const xs = items.slice(0, 18);
+  let best: number | null = null, bestN = Infinity;
+  const n = xs.length;
+  for (let m = 1; m < 1 << n; m++) {
+    let q = 0, c = 0;
+    for (let i = 0; i < n; i++) if (m & (1 << i)) { q += xs[i].q; c++; if (q > target + 0.0005) break; }
+    if (Math.abs(q - target) <= 0.0005 && c < bestN) { best = m; bestN = c; }
+  }
+  if (best === null) return null;
+  return new Set(xs.filter((_, i) => best! & (1 << i)).map((x) => x.id));
+}
+
 function autoPlan(c: Candidates, withPool = false): { sel: Sel; last: LastRoll | null } {
   let left = r3(c.need - c.picked);
   const sel: Sel = {};
@@ -356,7 +371,15 @@ function autoPlan(c: Candidates, withPool = false): { sel: Sel; last: LastRoll |
     const order = Array.from(need.entries()).filter(([, n]) => n > 1e-9).sort((a, b) => a[1] - b[1]).map(([b]) => b);
     for (const batch of order) {
       const partOf = (r: Candidate) => rollParts(r).find((p) => p.batch === batch)?.qty ?? 0;
-      const rs = () => avail.filter((r) => !sel[r.pallet] && partOf(r) > 1e-9);
+      // fewer cuts: a cut roll's balance first (it leaves the shelf), then the others in their order
+      const rs = () => avail.filter((r) => !sel[r.pallet] && partOf(r) > 1e-9).sort((a, b) => Number(b.picked_before > 0) - Number(a.picked_before > 0));
+      // rolls whose QTY adds up to exactly what the batch needs: no cut at all
+      {
+        const nb0 = Math.min(need.get(batch) ?? 0, left);
+        const whole = rs().filter((r) => partOf(r) >= r.available - 1e-9 && r.available <= nb0 + 1e-9);
+        const exact = exactSubset(whole.map((r) => ({ id: r.pallet, q: r.available })), nb0);
+        if (exact) { for (const r of whole) if (exact.has(r.pallet)) take(r, r.available, need); continue; }
+      }
       for (const r of rs()) {
         const nb = need.get(batch) ?? 0;
         if (nb <= 1e-9 || left <= 1e-9) break;
@@ -364,18 +387,24 @@ function autoPlan(c: Candidates, withPool = false): { sel: Sel; last: LastRoll |
       }
       const nb = Math.min(need.get(batch) ?? 0, left);
       if (nb > 1e-9) {
-        const fit = rs().filter((r) => partOf(r) >= nb - 1e-9).sort((a, b) => partOf(a) - partOf(b) || a.available - b.available)[0];
+        // the roll to cut: one already cut (no new cut roll on the shelf), else the smallest that covers the rest
+        const fit = rs().filter((r) => partOf(r) >= nb - 1e-9).sort((a, b) => Number(b.picked_before > 0) - Number(a.picked_before > 0) || partOf(a) - partOf(b) || a.available - b.available)[0];
         if (fit) { last = { pallet: fit.pallet, hu: fit.supplier_hu, full: r3(fit.available), cut: r3(nb) }; take(fit, nb, need); }
       }
     }
   }
-  // whatever the batches do not explain: any matched roll, full rolls first, then the best fit
-  for (const r of avail) {
+  // whatever the batches do not explain: any matched roll, full rolls first (an exact set first: no cut), then the best fit
+  if (left > 1e-9) {
+    const rest = avail.filter((r) => !sel[r.pallet] && r.available <= left + 1e-9);
+    const exact = exactSubset(rest.map((r) => ({ id: r.pallet, q: r.available })), left);
+    if (exact) for (const r of rest) if (exact.has(r.pallet)) take(r, r.available, null);
+  }
+  for (const r of [...avail].sort((a, b) => Number(b.picked_before > 0) - Number(a.picked_before > 0))) {
     if (left <= 1e-9) break;
     if (!sel[r.pallet] && r.available <= left + 1e-9) take(r, r.available, null);
   }
   if (left > 1e-9) {
-    const fit = avail.filter((r) => !sel[r.pallet] && r.available >= left).sort((a, b) => a.available - b.available)[0];
+    const fit = avail.filter((r) => !sel[r.pallet] && r.available >= left).sort((a, b) => Number(b.picked_before > 0) - Number(a.picked_before > 0) || a.available - b.available)[0];
     if (fit) { last = { pallet: fit.pallet, hu: fit.supplier_hu, full: r3(fit.available), cut: left }; take(fit, left, null); }
   }
   return { sel, last };

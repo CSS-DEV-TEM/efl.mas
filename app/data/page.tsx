@@ -4,8 +4,8 @@ import Link from 'next/link';
 import Shell, { useShell } from '@/components/Shell';
 import { Loader } from '@/components/Loader';
 import DayPickBar, { useDayPick } from '@/components/DayPickBar';
-import { api } from '@/lib/api';
-import { ago, fmt, fmtQty } from '@/lib/calc';
+import { api, isBossRole } from '@/lib/api';
+import { ago, fmt, fmtDate, fmtQty } from '@/lib/calc';
 import { uploadPickFile } from '@/lib/pick';
 
 export default function Page() {
@@ -134,6 +134,99 @@ function DataPage() {
         )}
         {res && res.rows.length >= 500 && <p className="muted small">The first 500 rolls are shown — search to narrow down.</p>}
       </section>
+
+      <PalletHistory boss={isBossRole(user.role)} toast={toast} />
+      <CutRolls rid={rid} />
     </main>
+  );
+}
+
+interface PalletPick { id: number; day: string; plan: string; so: string; li: string; item: string; qty: number; roll_qty: number; partial: number; shade: string | null; batch: string | null; note: string | null; by_user: string; at: string; seq: number | null; pick_no: string | null; kind: string | null; auto: number | null }
+interface PalletRes { pallet: string; korber: { item: string; lot: string | null; qty: number; location: string | null } | null; picks: PalletPick[]; rejects: { id: number; day: string; plan: string; so: string; li: string; qty: number; reason: string; by_user: string; replaced_by: string | null }[]; picked: number; base: number; left: number }
+/** A Korber pallet's history (every pick of it, all days / Picks / users) — and, for Admin / Head, delete it. */
+function PalletHistory({ boss, toast }: { boss: boolean; toast: (m: string) => void }) {
+  const [q, setQ] = useState('');
+  const [res, setRes] = useState<PalletRes | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const find = async (p = q) => {
+    if (!p.trim()) return;
+    setBusy(true); setErr('');
+    try { setRes(await api<PalletRes>('/api/pick/pallet?p=' + encodeURIComponent(p.trim()))); } catch (e) { setRes(null); setErr(e instanceof Error ? e.message : 'Not found.'); } finally { setBusy(false); }
+  };
+  const del = async () => {
+    if (!res) return;
+    const t = prompt(`Delete the whole pick history of pallet ${res.pallet}?\n\n${res.picks.length} pick${res.picks.length === 1 ? '' : 's'} (${fmtQty(res.picked)})${res.rejects.length ? ` and ${res.rejects.length} reject${res.rejects.length === 1 ? '' : 's'}` : ''} are deleted: the plan lines lose that picked QTY and the pallet can be picked in full again. This cannot be undone.\n\nType DELETE to confirm.`);
+    if (t === null) return;
+    if (t.trim().toUpperCase() !== 'DELETE') { toast('Not deleted — type DELETE to confirm.'); return; }
+    try { const r = await api<{ picks: number; rejects: number }>('/api/pick/pallet?p=' + encodeURIComponent(res.pallet), { method: 'DELETE' }); toast(`History of ${res.pallet} deleted (${r.picks} pick${r.picks === 1 ? '' : 's'}${r.rejects ? `, ${r.rejects} reject${r.rejects === 1 ? '' : 's'}` : ''})`); void find(res.pallet); }
+    catch (e) { toast(e instanceof Error ? e.message : 'Could not delete.'); }
+  };
+  return (
+    <section className="card" aria-labelledby="ph2-title">
+      <div className="sheet-top">
+        <div>
+          <h2 id="ph2-title">Pallet history</h2>
+          <p className="sub" style={{ margin: 0 }}>Scan or type a Korber pallet: every pick of it (all days, Picks and users) and its rejects.{boss ? ' Admin / Head can delete its history — the pallet is then pickable in full again.' : ''}</p>
+        </div>
+        <form style={{ display: 'flex', gap: 8 }} onSubmit={(e) => { e.preventDefault(); void find(); }}>
+          <input className="as-search" autoComplete="off" placeholder="Pallet, e.g. CP000008064260" value={q} onChange={(e) => setQ(e.target.value.toUpperCase())} aria-label="Korber pallet" style={{ width: 230 }} />
+          <button className="btn primary" disabled={busy || !q.trim()}>{busy ? 'Looking…' : 'Show history'}</button>
+        </form>
+      </div>
+      {err && <div className="notice bad">{err}</div>}
+      {res && (
+        <>
+          <div className="pk-stats" style={{ marginTop: 10 }}>
+            <div><span>Pallet</span><b className="mono" style={{ fontSize: 15 }}>{res.pallet}</b><small>{res.korber ? `${res.korber.item} · lot ${res.korber.lot ?? '–'} · ${res.korber.location ?? ''}` : 'not in a Korber upload'}</small></div>
+            <div><span>Roll QTY</span><b>{fmtQty(res.base)}</b></div>
+            <div><span>Picked</span><b>{fmtQty(res.picked)}</b><small>{res.picks.length} pick{res.picks.length === 1 ? '' : 's'}</small></div>
+            <div className={res.left > 1e-9 && res.picked > 0 ? 'em' : ''}><span>{res.picked > 0 ? (res.left > 1e-9 ? 'Cut roll — balance' : 'Picked in full') : 'Not picked'}</span><b>{fmtQty(res.left)}</b></div>
+          </div>
+          {!res.picks.length && !res.rejects.length ? <p className="muted">This pallet has no pick history.</p> : (
+            <div className="table-wrap" style={{ maxHeight: 340, marginTop: 8 }}>
+              <table className="mini">
+                <thead><tr><th>Day</th><th>Plan</th><th>SO / LI</th><th>Item</th><th className="n">QTY</th><th>Batch</th><th>Shade</th><th>Pick</th><th>By</th><th>Note</th></tr></thead>
+                <tbody>
+                  {res.picks.map((x) => (
+                    <tr key={`p${x.id}`}><td>{fmtDate(x.day)}</td><td className="small">{x.plan}</td><td>{x.so} / {x.li}</td><td>{x.item}</td><td className="n">{fmtQty(x.qty)}{x.partial ? <span className="pill accent" style={{ marginLeft: 4 }}>cut</span> : null}</td><td>{x.batch || '–'}</td><td>{x.shade || '–'}</td>
+                      <td className="small">{x.seq ? `#${x.seq}` : ''}{x.pick_no ? ` · ${x.pick_no}` : ''}{x.auto ? ' · auto' : ''}</td><td>{x.by_user}</td><td className="small muted">{x.note || ''}</td></tr>
+                  ))}
+                  {res.rejects.map((x) => (
+                    <tr key={`r${x.id}`}><td>{fmtDate(x.day)}</td><td className="small">{x.plan}</td><td>{x.so} / {x.li}</td><td /><td className="n">{fmtQty(x.qty)}</td><td colSpan={2}><span className="pill bad">Rejected · {x.reason}</span></td><td /><td>{x.by_user}</td><td className="small muted">{x.replaced_by ? `replaced by ${x.replaced_by}` : ''}</td></tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {boss && (res.picks.length > 0 || res.rejects.length > 0) && <div style={{ marginTop: 8 }}><button className="btn danger" onClick={del}>Delete this pallet&apos;s history</button></div>}
+        </>
+      )}
+    </section>
+  );
+}
+
+interface CutRoll { pallet: string; item: string; base: number; picked: number; balance: number; picks: number; last_at: string; last_day: string; lines: string; location: string | null; lot: string | null; in_korber: boolean; pick_id: string | null }
+/** Cut rolls on the shelf: rolls picked in part — their balance is offered first when the same item is picked again. */
+function CutRolls({ rid }: { rid: string }) {
+  const [res, setRes] = useState<{ rows: CutRoll[]; total: number } | null>(null);
+  useEffect(() => { api<{ rows: CutRoll[]; total: number }>('/api/pick/cutrolls' + (rid ? '?rid=' + encodeURIComponent(rid) : '')).then(setRes).catch(() => setRes({ rows: [], total: 0 })); }, [rid]);
+  return (
+    <section className="card" aria-labelledby="cr-title">
+      <h2 id="cr-title">Cut rolls on the shelf {res && <span className="pill accent" style={{ marginLeft: 6 }}>{res.rows.length} · {fmtQty(res.total)}</span>}</h2>
+      <p className="sub">Rolls picked in part (all days, Picks and users) and what is left of each. The pick window uses a cut roll&apos;s balance first and, when a roll has to be cut, cuts one that is already cut — so fewer rolls are cut.</p>
+      {!res ? <Loader label="Loading cut rolls…" /> : !res.rows.length ? <p className="muted">No cut roll on the shelf.</p> : (
+        <div className="table-wrap" style={{ maxHeight: 360 }}>
+          <table className="mini">
+            <thead><tr><th>Pallet</th><th>Item</th><th>Lot</th><th>Location</th><th className="n">Roll QTY</th><th className="n">Picked</th><th className="n">Balance</th><th>Picks</th><th>Last pick</th><th>In this Pick&apos;s Korber</th></tr></thead>
+            <tbody>{res.rows.map((r) => (
+              <tr key={r.pallet}><td className="mono">{r.pallet}</td><td>{r.item}</td><td>{r.lot || '–'}</td><td>{r.location || '–'}</td><td className="n">{fmtQty(r.base)}</td><td className="n">{fmtQty(r.picked)}</td><td className="n"><b>{fmtQty(r.balance)}</b></td>
+                <td className="small" title={r.lines}>{r.picks} · {r.lines.split(',').slice(0, 2).join(', ')}{r.lines.split(',').length > 2 ? '…' : ''}</td><td className="small">{fmtDate(r.last_day)} · {ago(r.last_at)}</td>
+                <td>{r.in_korber ? (r.pick_id && r.pick_id !== '0' ? <span className="pill warn">Pick Id {r.pick_id}</span> : <span className="pill ok">yes</span>) : <span className="muted">no</span>}</td></tr>
+            ))}</tbody>
+          </table>
+        </div>
+      )}
+    </section>
   );
 }

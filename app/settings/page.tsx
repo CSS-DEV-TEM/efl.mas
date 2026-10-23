@@ -11,7 +11,7 @@ export default function Page() {
   return <Shell admin><Settings /></Shell>;
 }
 
-export interface SystemSettings { fullRollPct: number; defaultPickKind: 'normal' | 'offsite'; allowOffsite: boolean; allowNormalShort: boolean; allowNormalFull: boolean; deriveFromZmmbe: boolean; pfcSlocs: string[]; plantSlocs: string[]; soliPerHour: number; lateGraceMin: number; defaultTarget: string; zmmbePlants?: PlantPair[]; rollGate?: boolean; pickBin?: string }
+export interface SystemSettings { fullRollPct: number; defaultPickKind: 'normal' | 'offsite'; allowOffsite: boolean; allowNormalShort: boolean; allowNormalFull: boolean; deriveFromZmmbe: boolean; pfcSlocs: string[]; plantSlocs: string[]; soliPerHour: number; lateGraceMin: number; defaultTarget: string; zmmbePlants?: PlantPair[]; rollGate?: boolean; pickBin?: string; zrollNeedsZinsr?: boolean }
 export interface PlantPair { plant: string; soPlant: string; link: string }
 
 const TABS = [['plants', 'Plants'], ['zmmbe', 'ZMMBE plants'], ['reports', 'Locations'], ['time', 'Time setup'], ['plans', 'Plans (data change)'], ['pick', 'Pick rules'], ['users', 'Users & roles'], ['backup', 'Backup & Restore'], ['database', 'Database']] as const;
@@ -94,6 +94,10 @@ function PickRules({ toast }: { toast: (m: string) => void }) {
         <label className="set-row">
           <span><b>ZROLLMGT StorageBin to pick from</b><small>Rolls in any other bin cannot be picked.</small></span>
           <input type="text" value={s.pickBin ?? 'EXPO-FIX'} onChange={(e) => set('pickBin', e.target.value.toUpperCase())} style={{ width: 130 }} />
+        </label>
+        <label className="set-row">
+          <span><b>ZMMBE batch → ZROLLMGT System Batch needs ZINSR</b><small>On: a roll found by its System Batch is picked only when ZINSR has the line&apos;s Sales Order + Line Item + Material + Batch. Off: the System Batch is enough (a batch that other SO lines also have is offered, not selected).</small></span>
+          <input type="checkbox" checked={s.zrollNeedsZinsr !== false} onChange={(e) => set('zrollNeedsZinsr', e.target.checked)} />
         </label>
       </div>
       {err && <div className="notice bad">{err}</div>}
