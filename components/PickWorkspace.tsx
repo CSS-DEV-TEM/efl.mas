@@ -64,20 +64,34 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
   // the plan report's ALRADY SEND (ZMMBE at the plant storage locations): the balance is QTY − ALRADY SEND − picked
   const repRow = useMemo(() => new Map((report?.hasSent ? report.rows : []).map((x) => [`${x.key}|${x.pick_date ?? ''}`, x])), [report]);
   const sentOf = useCallback((l: LineP) => repRow.get(`${l.key}|${l.date ?? ''}`), [repRow]);
-  const bal = useCallback((l: LineP) => { const x = sentOf(l); return x ? Math.max(0, r3(Number(l.qty) - x.sent - (l.picked ?? 0))) : need(l); }, [sentOf]);
+  const bal = useCallback((l: LineP) => { const x = sentOf(l); return x ? (x.left ?? Math.max(0, r3(Number(l.qty) - x.sent - (l.picked ?? 0)))) : need(l); }, [sentOf]);
   /** what can be picked now: the balance, at most the UR left */
   const todo = useCallback((l: LineP) => (isDone(l) ? 0 : Math.max(0, r3(Math.min(bal(l), Math.max(0, avail(l)))))), [bal]);
   // "Needs manual": the open lines with UR are checked against their matched rolls (as "Pick all matched" would pick them)
   type ScanR = { auto: number; left: number; why: string };
   const [scan, setScan] = useState<Record<number, ScanR>>({});
   const [scanning, setScanning] = useState(false);
-  const scanKey = useMemo(() => rows.filter((l) => !l.hold && todo(l) > 1e-9).map((l) => `${l.id}:${todo(l)}`).join(','), [rows, todo]);
+  // a line is checked again only when its QTY to pick or the Pick's reports changed (not the whole Pick after every pick)
+  const repVer = useMemo(() => (status?.uploads || []).map((u) => `${u.src}@${u.uploaded_at}`).join(','), [status]);
+  const scanCache = useRef(new Map<string, ScanR | null>());
+  const ck = (l: LineP) => `${week}|${l.id}|${todo(l)}|${l.picked ?? 0}|${repVer}`;
+  const scanKey = useMemo(() => rows.filter((l) => !l.hold && todo(l) > 1e-9).map(ck).join(','),
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  [rows, todo, repVer, week]);
   useEffect(() => {
-    const ls = rows.filter((l) => !l.hold && todo(l) > 1e-9).slice(0, 150);
-    if (!ls.length) { setScan({}); return; }
+    const all = rows.filter((l) => !l.hold && todo(l) > 1e-9).slice(0, 300);
+    const cache = scanCache.current;
+    const fromCache = () => { const o: Record<number, ScanR> = {}; for (const l of all) { const v = cache.get(ck(l)); if (v) o[l.id] = v; } return o; };
+    const ls = all.filter((l) => !cache.has(ck(l)));
+    if (!ls.length) { setScan(fromCache()); setScanning(false); return; }
     let stop = false; setScanning(true);
     const out: Record<number, ScanR> = {};
     const one = async (l: LineP) => {
+      const key = ck(l);
+      await scanOne(l);
+      cache.set(key, out[l.id] ?? null);
+    };
+    const scanOne = async (l: LineP) => {
       try {
         const wk = (l as LineP & { week?: string }).week || week;
         const c = await api<Candidates>(`/api/pick/candidates?week=${encodeURIComponent(wk)}&key=${encodeURIComponent(l.key)}&date=${encodeURIComponent(l.date ?? '')}`);
@@ -97,16 +111,17 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
       } catch { /* the line is not in a Pick */ }
     };
     void (async () => {
-      for (let i = 0; i < ls.length && !stop; i += 4) await Promise.all(ls.slice(i, i + 4).map(one));
-      if (!stop) { setScan({ ...out }); setScanning(false); }
+      for (let i = 0; i < ls.length && !stop; i += 6) await Promise.all(ls.slice(i, i + 6).map(one));
+      if (!stop) { setScan(fromCache()); setScanning(false); }
     })();
     return () => { stop = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scanKey, week]);
   const needsManual = useCallback((l: LineP) => !l.hold && todo(l) > 1e-9 && !!scan[l.id]?.why, [scan, todo]);
-  const autoReady = useCallback((l: LineP) => !l.hold && todo(l) > 1e-9 && !!scan[l.id] && !scan[l.id].why, [scan, todo]);
+  // Auto match: the matched rolls cover all or part of the QTY (a part also shows under Needs manual for the rest)
+  const autoReady = useCallback((l: LineP) => !l.hold && todo(l) > 1e-9 && (scan[l.id]?.auto ?? 0) > 1e-9, [scan, todo]);
   type Scope = typeof scope;
-  const inScope = useCallback((sc: Scope, l: LineP, w = '') => (sc === 'possible' ? possible.has(`${l.key}|${l.date ?? ''}`) && !isDone(l)
+  const inScope = useCallback((sc: Scope, l: LineP, w = '') => (sc === 'possible' ? possible.has(`${l.key}|${l.date ?? ''}`) && !isDone(l) && bal(l) > 1e-9
     : sc === 'manual' ? !isDone(l) && needsManual(l)
     : sc === 'picked' ? (l.picked ?? 0) > 0
     : sc === 'done' ? isDone(l)
@@ -233,7 +248,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
           {([
             ['To pick now', [
               ...(possible.size > 0 ? [['possible', 'Posibal pending', 'POSIBAL PENDING (plan report): QTY − ALRADY SEND, and the warehouse ZMMBE has UR for it — pick these now']] : []),
-              ['ready', 'Auto match', 'Lines whose matched rolls cover the QTY to pick — “Pick all matched” picks them'],
+              ['ready', 'Auto match', 'Lines with All-match rolls — “Pick all matched” picks them (a line they only part cover also shows under Needs manual for the rest)'],
               ['manual', 'Needs manual', 'Lines with UR the matched rolls do not cover: rolls to check, shared lots, no barcode, not matched or Manual pallet — with the reason'],
               ['open', 'All with UR', 'Every open line with UR to pick'],
             ]],
@@ -359,9 +374,9 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
                     <td className="n">{l.korber_avail == null ? <span className="muted" title="No Korber Inventory uploaded">–</span>
                       : <span className={!isDone(l) && l.korber_avail < need(l) - 1e-6 ? 'kb-short' : ''} title={`${l.korber_rolls ?? 0} roll${l.korber_rolls === 1 ? '' : 's'} on the Korber shelf${!isDone(l) && l.korber_avail < need(l) - 1e-6 ? ` — ${fmtQty(need(l) - l.korber_avail)} less than the balance` : ''}`}>
                         {fmtQty(l.korber_avail)} <span className="muted">({l.korber_rolls ?? 0})</span></span>}</td>
-                    <td>{l.hold && !isDone(l) ? <span className="pill bad" title={`On hold${l.hold_by ? ` by ${l.hold_by}` : ''}${l.hold_at ? ` · ${new Date(l.hold_at).toLocaleString()}` : ''}`}>On hold · {l.hold}</span> : isDone(l) && !done ? <span className="pill ok" title={l.comment || ''}>Completed ✓</span> : Number(l.auto_picked) > 0 ? <span className={`pill ${done ? 'ok' : 'accent'}`} title={`${fmtQty(Number(l.auto_picked))} picked by “Pick all matched”`}>{done ? 'Auto Picked ✓' : 'Auto Picked · part'}</span> : scope === 'pending' && !done ? <span className={`pill ${PENDING_TONE[pendingWhy(l)] || 'mute'}`}>{pendingWhy(l)}</span> : done && Number((l as LineP & { closed_short?: number }).closed_short) > 0 ? <span className="pill ok" title="Closed short by a Normal pick">Picked ✓ · {fmtQty(Number((l as LineP & { closed_short?: number }).closed_short))} short</span> : done ? <span className="pill ok">Picked ✓ · Dispatched</span> : pk ? <span className="pill accent">Part picked</span> : <span className="pill mute">To pick</span>}
+                    <td>{l.hold && !isDone(l) ? <span className="pill bad" title={`On hold${l.hold_by ? ` by ${l.hold_by}` : ''}${l.hold_at ? ` · ${new Date(l.hold_at).toLocaleString()}` : ''}`}>On hold · {l.hold}</span> : isDone(l) && !done ? <span className="pill ok" title={l.comment || ''}>Completed ✓</span> : Number(l.auto_picked) > 0 ? <span className={`pill ${done ? 'ok' : 'accent'}`} title={`${fmtQty(Number(l.auto_picked))} picked by “Pick all matched”`}>{done ? 'Auto Picked ✓' : 'Auto Picked · part'}</span> : scope === 'pending' && !done ? <span className={`pill ${PENDING_TONE[pendingWhy(l)] || 'mute'}`}>{pendingWhy(l)}</span> : done && Number((l as LineP & { closed_short?: number }).closed_short) > 0 ? <span className="pill ok" title="Closed short by a Normal pick">Picked ✓ · {fmtQty(Number((l as LineP & { closed_short?: number }).closed_short))} short</span> : done ? <span className="pill ok">Picked ✓ · Dispatched</span> : pk && sentOf(l) && bal(l) <= 1e-9 ? <span className="pill ok" title="The picks and ALRADY SEND cover the QTY">Picked ✓ · rest sent</span> : pk ? <span className="pill accent">Part picked</span> : <span className="pill mute">To pick</span>}
                       {scope === 'manual' && (scan[l.id]?.why || runWhy[l.id]) && <div className="small run-why"><span className="pill warn">Manual</span> <span className="muted">{scan[l.id]?.why || runWhy[l.id]}</span></div>}
-                      {scope === 'ready' && scan[l.id] && <div className="small run-why"><span className="pill ok">All match {fmtQty(scan[l.id].auto)}</span></div>}
+                      {scope === 'ready' && scan[l.id] && <div className="small run-why"><span className="pill ok">All match {fmtQty(scan[l.id].auto)}</span>{scan[l.id].why && <span className="muted"> · {fmtQty(r3(scan[l.id].left - scan[l.id].auto))} more by hand</span>}</div>}
                       {scope === 'possible' && (() => { const x = possible.get(`${l.key}|${l.date ?? ''}`); return x ? <div className="small run-why"><span className="pill warn">Posibal pending {fmtQty(Number(x.possible))}</span> <span className="muted">sent {fmtQty(x.sent)} · warehouse {fmtQty(x.wh)}{x.tn ? ` · TN ${x.tn}` : ''}</span></div> : null; })()}</td>
                     <td style={{ whiteSpace: 'nowrap' }}>{canEdit && !isDone(l) && (l.hold
                         ? <button className="btn sm" onClick={() => setHold(l, null)} title="Release the hold — the line can be picked again">Release hold</button>

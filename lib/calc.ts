@@ -104,7 +104,7 @@ export function totals(rows: Line[]): Totals {
 
 export const fmt = (n: number, d = 0) => (Number.isFinite(n) ? n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }) : '–');
 /** QTY always with 2 decimals. */
-export const fmtQty = (n: number) => (Math.abs(n) < 0.0005 ? '–' : fmt(n, 2));
+export const fmtQty = (n: number) => (Math.abs(n) < 0.0005 ? '–' : fmt(n, Math.abs(n) < 0.005 ? 3 : 2)); // 0.004 is not shown as 0.00
 /** KPI figures: full number with 2 decimals. */
 export const compact = (n: number) => fmt(n, 2);
 export function fmtDate(d: string | null) {

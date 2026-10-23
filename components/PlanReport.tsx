@@ -7,7 +7,7 @@ import { fmt, fmtDate, fmtQty } from '@/lib/calc';
 
 export interface PlanReportRow {
   unic: string; so: string; li: string; item: string; date: string | null; pick_date: string | null; qty: number; avail: number; sent: number; pending: number; possible: number | null;
-  qi: number; block: number; tn: string | null; tn_qty: number | null; tn_status: string | null; wh: number; wh_ur: number; picked: number; rolls: number; key: string; plant: string | null; remarks: string | null;
+  qi: number; block: number; tn: string | null; tn_qty: number | null; tn_status: string | null; wh: number; wh_ur: number; picked: number; /** QTY − ALRADY SEND − picks after the ZMMBE upload */ left?: number; rolls: number; key: string; plant: string | null; remarks: string | null;
 }
 export interface PlanReportRes {
   rid: string; name: string; day: string; plant: string | null; hasZmmbe: boolean; hasSent: boolean; hasTrr: boolean; rows: PlanReportRow[];
@@ -18,11 +18,11 @@ type View = 'all' | 'pending' | 'possible' | 'tn' | 'qiblock';
 /** The Pick's plan report as an Excel file — the same sheet and columns as the "ASIALLINE-23" workbook. */
 export async function downloadPlanReport(r: PlanReportRes) {
   const XLSX = await import('xlsx-js-style');
-  const head = ['UNIC', 'SO', 'LI', 'ITEM CODE', 'DATE', 'QTY', 'AVALABALE', 'ALRADY SEND', 'Pending', 'POSIBAL PENDING', 'QI', 'BLOCK', 'TRANSFER NOTE', 'PICKED (system)'];
+  const head = ['UNIC', 'SO', 'LI', 'ITEM CODE', 'DATE', 'QTY', 'AVALABALE', 'ALRADY SEND', 'Pending', 'POSIBAL PENDING', 'QI', 'BLOCK', 'TRANSFER NOTE', 'PICKED (system)', 'BALANCE (system)'];
   const num = (v: string) => (/^\d{1,15}$/.test(v) ? Number(v) : v);
   // an Excel date serial (no time zone shift: a JS Date would land on the previous day in UTC+5:30)
   const xd = (d: string | null) => (d ? Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10)) / 86400000 + 25569 : '');
-  const body = r.rows.map((x) => [x.unic, x.so, num(String(x.li)), num(String(x.item)), xd(x.date), x.qty, x.avail, x.sent, x.pending, x.possible ?? '', x.qi, x.block, x.tn ?? '#N/A', x.picked || '']);
+  const body = r.rows.map((x) => [x.unic, x.so, num(String(x.li)), num(String(x.item)), xd(x.date), x.qty, x.avail, x.sent, x.pending, x.possible ?? '', x.qi, x.block, x.tn ?? '#N/A', x.picked || '', x.left ?? '']);
   const ws = XLSX.utils.aoa_to_sheet([head, ...body]);
   const hs = { font: { bold: true, color: { rgb: 'FFFFFF' } }, fill: { fgColor: { rgb: '1F3A5F' } }, alignment: { horizontal: 'center', vertical: 'center', wrapText: true } };
   head.forEach((_, i) => { const a = XLSX.utils.encode_cell({ r: 0, c: i }); if (ws[a]) ws[a].s = hs; });
@@ -36,7 +36,7 @@ export async function downloadPlanReport(r: PlanReportRes) {
       if (x.possible) ws[a].s = { fill: { fgColor: { rgb: 'FFF2CC' } } };
     }
   });
-  ws['!cols'] = [26, 13, 6, 12, 11, 11, 12, 12, 11, 15, 9, 9, 15, 13].map((w) => ({ wch: w }));
+  ws['!cols'] = [26, 13, 6, 12, 11, 11, 12, 12, 11, 15, 9, 9, 15, 13, 14].map((w) => ({ wch: w }));
   ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: r.rows.length, c: head.length - 1 } }) };
   ws['!freeze'] = { xSplit: 0, ySplit: 1 };
   const wb = XLSX.utils.book_new();
@@ -102,7 +102,7 @@ export default function PlanReport({ rid, onClose }: { rid: string; onClose: () 
             </div>
             <div className="table-wrap" style={{ maxHeight: '60vh' }}>
               <table className="mini plan-report-table" data-noexport>
-                <thead><tr><th>UNIC</th><th>SO</th><th>LI</th><th>ITEM CODE</th><th>DATE</th><th className="n">QTY</th><th className="n">AVALABALE</th><th className="n">ALRADY SEND</th><th className="n">Pending</th><th className="n">POSIBAL PENDING</th><th className="n">QI</th><th className="n">BLOCK</th><th>TRANSFER NOTE</th><th className="n">Picked</th></tr></thead>
+                <thead><tr><th>UNIC</th><th>SO</th><th>LI</th><th>ITEM CODE</th><th>DATE</th><th className="n">QTY</th><th className="n">AVALABALE</th><th className="n">ALRADY SEND</th><th className="n">Pending</th><th className="n">POSIBAL PENDING</th><th className="n">QI</th><th className="n">BLOCK</th><th>TRANSFER NOTE</th><th className="n">Picked</th><th className="n" title="QTY − ALRADY SEND − the picks the ZMMBE does not show yet">Balance</th></tr></thead>
                 <tbody>{list.map((x) => (
                   <tr key={x.unic + x.date} className={x.possible ? 'pr-possible' : ''}>
                     <td className="mono small">{x.unic}</td><td>{x.so}</td><td>{x.li}</td><td>{x.item}</td><td>{fmtDate(x.date)}</td>
@@ -111,7 +111,7 @@ export default function PlanReport({ rid, onClose }: { rid: string; onClose: () 
                     <td className="n">{x.possible ? <b>{fmtQty(x.possible)}</b> : ''}</td>
                     <td className="n">{x.qi ? fmtQty(x.qi) : '0'}</td><td className="n">{x.block ? fmtQty(x.block) : '0'}</td>
                     <td>{x.tn ? <span title={`${x.tn_qty ?? ''} · status ${x.tn_status ?? ''}`}>{x.tn}</span> : <span className="muted">#N/A</span>}</td>
-                    <td className="n">{x.picked ? fmtQty(x.picked) : ''}</td>
+                    <td className="n">{x.picked ? fmtQty(x.picked) : ''}</td><td className="n">{x.left != null ? fmtQty(x.left) : ''}</td>
                   </tr>
                 ))}</tbody>
               </table>

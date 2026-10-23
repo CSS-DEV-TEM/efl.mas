@@ -20,6 +20,20 @@ import {
   type Grid, type Mapping, type Src,
 } from '@/lib/mapping';
 
+/** The day DD nearest to today (this month, or the month before / after): "ASIALLINE-30" uploaded on 2 Nov is 30 Oct,
+ *  "-01" uploaded on 30 Oct is 1 Nov. A DD the month does not have (31 in a 30-day month) is skipped. */
+function nearDay(today: string, dd: number) {
+  const t = Date.UTC(+today.slice(0, 4), +today.slice(5, 7) - 1, +today.slice(8, 10));
+  let best = '', bestD = Infinity;
+  for (const off of [-1, 0, 1]) {
+    const d = new Date(Date.UTC(+today.slice(0, 4), +today.slice(5, 7) - 1 + off, dd));
+    if (d.getUTCDate() !== dd) continue;
+    const dist = Math.abs(d.getTime() - t);
+    if (dist < bestD) { bestD = dist; best = d.toISOString().slice(0, 10); }
+  }
+  return best || today;
+}
+
 export default function Page() {
   return <Shell><Uploads /></Shell>;
 }
@@ -128,9 +142,8 @@ function Uploads() {
           const want = squash(m[1]);
           const hit = plants.find((c) => squash(c) === want) ?? Object.entries(plantNames).find(([, nm]) => nm && squash(nm) === want)?.[0];
           const code = (hit || m[1].replace(/\s+/g, '')).toUpperCase();
-          const ym = todayLocal().slice(0, 7);
           const dd = Math.min(31, Math.max(1, Number(m[2])));
-          filePick = { plant: code, day: `${ym}-${String(dd).padStart(2, '0')}` };
+          filePick = { plant: code, day: nearDay(todayLocal(), dd) };
           const ex = await api<{ rounds: RoundInfo[] }>(`/api/rounds?day=${filePick.day}`).then((r) => r.rounds.filter((x) => (x.plant || '').toUpperCase() === code)).catch(() => [] as RoundInfo[]);
           const last = ex.sort((a, b) => b.round - a.round)[0];
           const map = detectMapping('plan', s.grid);

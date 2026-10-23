@@ -1104,7 +1104,9 @@ async function handlePlanReport(env: Env, req: Request) {
   const tn = new Map<string, Row>();
   for (const x of (await senv.DB.prepare(`SELECT to_so, to_li, material, GROUP_CONCAT(DISTINCT tn) tn, ROUND(SUM(qty), 3) tn_qty, ROUND(SUM(tqty), 3) tn_tqty, GROUP_CONCAT(DISTINCT status) tn_status FROM ztrr GROUP BY to_so, to_li, material`).all<Row>()).results)
     tn.set(`${x.to_so}|${x.to_li}|${x.material}`, x);
-  const pk = new Map((await env.DB.prepare('SELECT line, ROUND(SUM(qty), 3) q, COUNT(*) n FROM picks WHERE week = ? AND cancelled_at IS NULL GROUP BY line').bind(rid).all<Row>()).results.map((x) => [String(x.line), x]));
+  // picks after the latest ZMMBE upload are not in its ALRADY SEND yet (the same rule as the pick's "to pick")
+  const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(rid).first<{ at: string | null }>())?.at ?? '';
+  const pk = new Map((await env.DB.prepare('SELECT line, ROUND(SUM(qty), 3) q, ROUND(SUM(CASE WHEN at > ?2 THEN qty ELSE 0 END), 3) qa, COUNT(*) n FROM picks WHERE week = ?1 AND cancelled_at IS NULL GROUP BY line').bind(rid, zAt).all<Row>()).results.map((x) => [String(x.line), x]));
   const hasSent = !!(await senv.DB.prepare("SELECT 1 FROM stock_sent LIMIT 1").first());
   const zm = !!(await senv.DB.prepare("SELECT 1 FROM stock WHERE src = 'zmmbe' LIMIT 1").first());
   const rows = lines.map((l) => {
@@ -1112,7 +1114,10 @@ async function handlePlanReport(env: Env, req: Request) {
     const avail = Number(x?.avail ?? 0), sent = Number(x?.sent ?? 0), qty = Number(l.qty);
     const pending = r3(qty - sent);
     const possible = pending > 1e-4 && avail - sent > 1e-4 ? pending : null;
-    return { unic: `${l.so}${l.li}${l.item}A`, so: l.so, li: l.li, item: l.item, date: l.plan_date, pick_date: l.date, qty, avail: r3(avail), sent: r3(sent), pending, possible,
+    // the balance still to send: QTY − ALRADY SEND − the picks the ZMMBE does not show yet
+    const pq = p0 ? Number(p0.q) : 0, after = p0 ? Number(p0.qa) : 0, before = Math.max(0, r3(pq - after));
+    const left = Math.max(0, r3(qty - Math.max(sent, before) - after));
+    return { left, unic: `${l.so}${l.li}${l.item}A`, so: l.so, li: l.li, item: l.item, date: l.plan_date, pick_date: l.date, qty, avail: r3(avail), sent: r3(sent), pending, possible,
       qi: r3(Number(x?.qi ?? 0)), block: r3(Number(x?.block ?? 0)), tn: t?.tn ?? null, tn_qty: t ? Number(t.tn_qty) : null, tn_status: t?.tn_status ?? null,
       wh: r3(avail - sent), wh_ur: r3(Number(x?.wh_ur ?? 0)), picked: p0 ? Number(p0.q) : 0, rolls: p0 ? Number(p0.n) : 0, key: l.key, plant: l.plant, remarks: l.remarks };
   });
