@@ -854,3 +854,7 @@ tr.on-hold td { background: color-mix(in srgb, #ef4444 9%, transparent); }
 .gl-act.bad b { color: #e5484d; }
 @media (max-width: 860px) { .glance { grid-template-columns: auto 1fr; } .gl-actions { grid-column: 1 / -1; justify-content: flex-start; } }
 @media (prefers-reduced-motion: reduce) { .glance, .gl-fill, .gl-bar i, .gl-act { animation: none; transition: none; } }
+
+/* Plan report (components/PlanReport) */
+.modal.plan-report { width: min(1500px, 96vw); max-width: none; }
+.plan-report-table tr.pr-possible td { background: color-mix(in srgb, #f5c542 14%, transparent); }

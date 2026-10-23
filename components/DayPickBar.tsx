@@ -3,13 +3,14 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, getSession, isBossRole } from '@/lib/api';
 import { ago, fmt, fmtDate } from '@/lib/calc';
 import { uploadPickFile, type PickSrc } from '@/lib/pick';
+import PlanReport from '@/components/PlanReport';
 import { todayLocal } from '@/lib/smart';
 
 export interface DayRow { day: string; picks: number; lines: number }
 export interface PickRound { id: string; plant: string | null; round: number; lines: number; qty: number; src_at?: string | null; created_by?: string; reports: string[] }
 interface Report { src: string; uses: 'own' | 'shared' | 'none'; rows: number; missing?: string[]; own: { file_name: string | null; uploaded_by: string; uploaded_at: string } | null; shared: { file_name: string | null; uploaded_by: string; uploaded_at: string } | null }
 
-const REPORT_NAME: Record<string, string> = { plan: 'Plan', zmmbe: 'ZMMBE', zinr: 'ZINSR / ZINR', zcoment: 'ZCOMENT VIEW', korber: 'Korber Inventory', zroll: 'ZROLLMGT' };
+const REPORT_NAME: Record<string, string> = { plan: 'Plan', zmmbe: 'ZMMBE', zinr: 'ZINSR / ZINR', zcoment: 'ZCOMENT VIEW', korber: 'Korber Inventory', zroll: 'ZROLLMGT', ztrr: 'ZMM_TRR' };
 const KEY_DAY = 'mas-day', KEY_RID = 'mas-rid';
 export const pickLabel = (r: { plant: string | null; round: number }, names: Record<string, string> = {}) => `${(r.plant && names[r.plant]) || r.plant || 'No plant'} · Pick ${r.round}`;
 
@@ -81,6 +82,7 @@ export default function DayPickBar({ day, setDay, rid, setRid, toast, refreshKey
       setRid(''); toast(`Pick deleted with its history (${x.picks} pick${x.picks === 1 ? '' : 's'}, ${x.rolls} roll${x.rolls === 1 ? '' : 's'})`); await loadRounds(); onUploaded?.();
     } catch (e) { toast(e instanceof Error ? e.message : 'Could not delete.'); }
   };
+  const [report, setReport] = useState(false);
   const inputs = useRef<Record<string, HTMLInputElement | null>>({});
   const upload = async (src: PickSrc, f: File) => {
     setBusy(src);
@@ -122,6 +124,8 @@ export default function DayPickBar({ day, setDay, rid, setRid, toast, refreshKey
           </select>
           <button className="btn sm primary" onClick={createPick} disabled={!day}>+ Create Pick</button>
         </span>}
+        {cur && <button className="btn sm" onClick={() => setReport(true)} title="The plan report of this Pick (AVALABALE, ALRADY SEND, Pending, POSIBAL PENDING, QI, BLOCK, TRANSFER NOTE) — on screen and as Excel">📋 Plan report</button>}
+        {report && rid && <PlanReport rid={rid} onClose={() => setReport(false)} />}
         {boss && cur && <button className="btn sm danger" onClick={deletePick} title="Delete this Pick with its plan and its own reports">Delete Pick</button>}
         {boss && cur && <button className="btn sm danger" onClick={deleteWithHistory} title="Delete this Pick with its plan, reports AND its pick history (picks, packing lists, rejected rolls, balances)">Delete Pick + history</button>}
       </div>
@@ -129,7 +133,7 @@ export default function DayPickBar({ day, setDay, rid, setRid, toast, refreshKey
         <div className="dpb-reports">
           {(reports || []).map((r) => {
             const u = r.own ?? r.shared;
-            const pickSrc = ['zinr', 'zcoment', 'korber', 'zroll'].includes(r.src);
+            const pickSrc = ['zinr', 'zcoment', 'korber', 'zroll', 'ztrr'].includes(r.src);
             return (
               <div key={r.src} className={`dpb-rep ${r.uses}`}>
                 <div className="dpb-h"><b>{REPORT_NAME[r.src]}</b><span className={`pill ${r.uses === 'own' ? 'ok' : r.uses === 'shared' ? 'warn' : 'bad'}`}>{r.uses === 'own' ? 'this Pick' : r.uses === 'shared' ? 'shared' : 'missing'}</span></div>

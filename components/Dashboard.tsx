@@ -14,6 +14,7 @@ import { COVERAGES, periodOf, type DispatchSummary, ago, compact, coverage, fmt,
 import { exportPullPlan } from '@/lib/export';
 import { CountUp } from '@/components/Brand';
 import InsightDrawer from '@/components/InsightDrawer';
+import PlanReport from '@/components/PlanReport';
 import EditLine from '@/components/EditLine';
 import { SRC_INFO, SRC_ORDER } from '@/lib/mapping';
 import { ACTION_HELP, insights, matchView, todayLocal, type Action, type Insight, type View } from '@/lib/smart';
@@ -67,6 +68,7 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
   const setTab = useCallback((t: 'summary' | 'details' | 'picks') => { setTabState(t); try { history.replaceState(null, '', t === 'summary' ? location.pathname : '#' + t); } catch { /* ignore */ } }, []);
   const searchRef = useRef<HTMLInputElement>(null);
   const tableRef = useRef<HTMLElement>(null);
+  const [reportRid, setReportRid] = useState<string | null>(null);
   const today = todayLocal();
 
   // "/" jumps to search, Esc clears the smart view
@@ -250,6 +252,9 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
             <button key={r.id} type="button" className={`day-chip ${round === r.id ? 'on' : ''} ${r.lines && r.done >= r.lines ? 'done' : ''}`} aria-pressed={round === r.id}
               onClick={() => { setRound(round === r.id ? null : r.id); setView({ kind: 'all' }); }} title={`${plantLabel(r.plant)} Pick ${r.round} · ${fmt(r.lines)} lines · ${fmt(r.done)} done · uploaded ${r.src_at ? fmtTime(r.src_at) : ''} by ${r.src_user || ''}`}>
               <b>{plantLabel(r.plant)} · Pick {r.round}</b><span>{fmt(r.lines)} lines{r.src_at ? ` · ${fmtTime(r.src_at)}` : ''}</span></button>
+          ))}
+          {(round ? (data.rounds || []).filter((r) => r.id === round) : (data.rounds || [])).map((r) => (
+            <button key={'rep' + r.id} type="button" className="btn sm" onClick={() => setReportRid(r.id)} title="The plan report of this Pick — on screen and as Excel">📋 {(plantLabel(r.plant) || '').replace(/\s+/g, '').toUpperCase()}-{(data.day || '').slice(8, 10)}{(data.rounds || []).length > 1 ? ` · Pick ${r.round}` : ''}</button>
           ))}
         </nav>
       )}
@@ -458,6 +463,7 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
           </>}
         </>
       )}
+      {reportRid && <PlanReport rid={reportRid} onClose={() => setReportRid(null)} />}
       {openInsight?.view && period && (
         <InsightDrawer insight={openInsight} week={period} canEdit={canEdit}
           rows={scoped.filter((r) => matchView(r, openInsight.view!, today))}

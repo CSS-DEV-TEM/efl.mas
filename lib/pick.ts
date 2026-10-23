@@ -6,11 +6,12 @@ import type { Line } from './calc';
 import { api } from './api';
 import { readWorkbook, type Grid } from './mapping';
 
-export type PickSrc = 'zinr' | 'zcoment' | 'korber' | 'zroll';
+export type PickSrc = 'zinr' | 'zcoment' | 'korber' | 'zroll' | 'ztrr';
 export const PICK_SRCS: { src: PickSrc; title: string; hint: string; needs: string[] }[] = [
   { src: 'zinr', title: 'ZINR', hint: 'Inspection lots: Sales Order, Line Item, Material, Batch, Insp. Lot Quantity, Vendor Invoice No', needs: ['inspection lot', 'insp lot quantity'] },
   // either layout: the detail export (Inspection lot, Report Name, Roll qty.) or the roll view (Inspection #, Vendor Roll No, Shade, Barcode Number)
   { src: 'zcoment', title: 'ZCOMENT VIEW', hint: 'One row per roll: Inspection # / Inspection lot, Vendor Batch, Vendor Roll No, Shade, Barcode Number (only "Shade Report" rows when there is a Report Name)', needs: ['vendor roll no', 'shade'] },
+  { src: 'ztrr', title: 'ZMM_TRR', hint: 'Transfer requests: Transfer Request Number, To Sales Order, Sales Document Item, Material (the plan report’s TRANSFER NOTE)', needs: ['transfer request number', 'to sales order'] },
   { src: 'zroll', title: 'ZROLLMGT', hint: 'Roll management: Barcode Number and StorageBin (only rolls at EXPO-FIX can be picked)', needs: ['barcode number|barcode|barcode no|barcode no.', 'storagebin|storage bin|bin|bin location'] },
   { src: 'korber', title: 'Korber Inventory', hint: 'Only rolls of items in the plan are uploaded: Pallet, Item Number, Lot Number, Actual Qty, Supplier Hu', needs: ['pallet', 'item number', 'actual qty'] },
 ];
@@ -67,6 +68,8 @@ export interface Candidates {
   line: { so: string; li: string; item: string; qty: number; plant: string | null; key: string; week: string; date: string };
   /** plan QTY and the UR (Total − SO QI − SO Blocked − Assigned); need = what to pick = the smaller of the two */
   planQty?: number; ur?: number;
+  /** Already sent (ZMMBE at the plant storage locations); null = not known */
+  sent?: number | null;
   need: number; picked: number; stock: { batch: string; ur: number; sloc: string }[]; lots: LotInfo[]; rolls: Candidate[]; steps: string[];
   /** ZROLLMGT check: rolls of this line that cannot be picked, and why */
   blocked?: BlockedRoll[]; gate?: { on: boolean; bin: string; loaded: boolean };
@@ -102,7 +105,11 @@ export function findTable(sheets: { name: string; grid: Grid }[], src: PickSrc) 
 /** Reads a pick report file and uploads it (Korber: only the rolls of items in the plan / shade reports). */
 /** Uploads a ZINR / ZCOMENT VIEW / Korber file — to a Pick (`rid`), or as the shared report (no rid). */
 export async function uploadPickFile(src: PickSrc, file: File, rid?: string | null) {
-  const sheets = readWorkbook(await file.arrayBuffer());
+  return uploadPickSheets(src, readWorkbook(await file.arrayBuffer()), file.name, rid);
+}
+/** The same, from sheets already read (one sheet of a workbook that has several reports). */
+export async function uploadPickSheets(src: PickSrc, sheets: ReturnType<typeof readWorkbook>, fileName: string, rid?: string | null) {
+  const file = { name: fileName };
   const t = findTable(sheets, src);
   const title = PICK_SRCS.find((x) => x.src === src)!.title;
   if (!t) throw new Error(`${file.name} does not look like ${title}: no header row with ${PICK_SRCS.find((x) => x.src === src)!.needs.map((n) => n.split('|')[0]).join(', ')}.`);

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Loader, Skeleton } from '@/components/Loader';
 import { api, getSession, isBossRole } from '@/lib/api';
 import CompleteLine from '@/components/CompleteLine';
+import PlanReport, { type PlanReportRes } from '@/components/PlanReport';
 import { ago, avail, fmt, fmtDate, fmtQty, isDispatched, isDone, need, periodOf, type Line } from '@/lib/calc';
 import { action } from '@/lib/smart';
 import {
@@ -29,7 +30,7 @@ function pendingWhy(l: LineP): string {
 export default function PickWorkspace({ week, rows, canEdit, toast, reload, label }: { week: string; rows: LineP[]; canEdit: boolean; toast: (m: string) => void; reload: () => void; /** what is on screen, e.g. "20 Oct · ASIALINE Pick 2" */ label?: string }) {
   const [status, setStatus] = useState<{ counts: { src: string; n: number }[]; uploads: { src: string; file_name: string | null; row_count: number; uploaded_by: string; uploaded_at: string }[]; reports?: { src: string; uses: 'own' | 'shared' | 'none' }[] } | null>(null);
   const [busy, setBusy] = useState<PickSrc | null>(null);
-  const [scope, setScope] = useState<'pending' | 'ready' | 'open' | 'picked' | 'done' | 'hold' | 'manual'>('pending');
+  const [scope, setScope] = useState<'pending' | 'ready' | 'open' | 'picked' | 'done' | 'hold' | 'manual' | 'possible'>('pending');
   // the plan by SO (open an SO to see its items) or as one list of lines
   const [byView, setByViewS] = useState<'so' | 'lines'>(() => { try { return localStorage.getItem('mas-pick-view') === 'lines' ? 'lines' : 'so'; } catch { return 'so'; } });
   const setByView = (v: 'so' | 'lines') => { setByViewS(v); try { localStorage.setItem('mas-pick-view', v); } catch { /* private mode */ } };
@@ -55,9 +56,15 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
     finally { setBusy(null); }
   };
 
+  // the Pick's plan report: POSIBAL PENDING = the lines the warehouse can send now (Pending, and UR in the warehouse ZMMBE)
+  const [report, setReport] = useState<PlanReportRes | null>(null);
+  const [showReport, setShowReport] = useState(false);
+  useEffect(() => { if (!rid) { setReport(null); return; } api<PlanReportRes>('/api/plan-report?rid=' + encodeURIComponent(rid)).then(setReport).catch(() => setReport(null)); }, [rid, rows]);
+  const possible = useMemo(() => new Map((report?.rows || []).filter((x) => x.possible).map((x) => [`${x.key}|${x.pick_date ?? ''}`, x])), [report]);
   const list = useMemo(() => {
     const s = q.trim().toLowerCase();
-    return rows.filter((l) => (scope === 'manual' ? !isDone(l) && need(l) > 1e-9 && !l.hold
+    return rows.filter((l) => (scope === 'possible' ? possible.has(`${l.key}|${l.date ?? ''}`) && !isDone(l)
+      : scope === 'manual' ? !isDone(l) && need(l) > 1e-9 && !l.hold
       : scope === 'picked' ? (l.picked ?? 0) > 0
       : scope === 'done' ? isDone(l)
       : scope === 'hold' ? !!l.hold && !isDone(l)
@@ -65,7 +72,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
       : !isDone(l) && need(l) > 1e-9 && (scope === 'open' ? avail(l) > 0 : action(l) === 'Ready to pull')))
       .filter((l) => !s || [l.so, l.li, l.item, l.plant].join(' ').toLowerCase().includes(s))
       .sort((a, b) => String(a.date ?? '').localeCompare(String(b.date ?? '')) || a.row_no - b.row_no);
-  }, [rows, scope, q, why]);
+  }, [rows, scope, q, why, possible]);
   // everything of the plan not dispatched yet, by what it is waiting for
   const pending = useMemo(() => {
     const m = new Map<string, { n: number; qty: number }>();
@@ -177,8 +184,11 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
               <button className={scope === 'picked' ? 'on' : ''} onClick={() => setScope('picked')}>Picked</button>
               <button className={scope === 'hold' ? 'on' : ''} onClick={() => setScope('hold')}>On hold{holdN ? ` (${holdN})` : ''}</button>
               <button className={scope === 'done' ? 'on' : ''} onClick={() => setScope('done')}>Completed</button>
+              {possible.size > 0 && <button className={scope === 'possible' ? 'on' : ''} onClick={() => { setScope('possible'); setByView('lines'); }} title="POSIBAL PENDING (plan report): Pending = QTY − ALRADY SEND, and the warehouse ZMMBE has UR for it — pick these now">Posibal pending ({possible.size})</button>}
               <button className={scope === 'manual' ? 'on' : ''} onClick={() => { setScope('manual'); setByView('lines'); }} title="The open lines still to pick by hand (after “Pick all matched”: with the reason)">Needs manual</button>
             </div>
+            {rid && <button className="btn" onClick={() => setShowReport(true)} title="The plan report of this Pick — on screen and as Excel">📋 {report?.name || 'Plan report'}</button>}
+            {showReport && rid && <PlanReport rid={rid} onClose={() => setShowReport(false)} />}
             {canEdit && <button className="btn primary run-all" disabled={!!run && !run.finished} onClick={runAll} title="Pick every roll where everything matches, line by line">⚡ Pick all matched</button>}
           </div>
         </div>
@@ -267,7 +277,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
             </div>
           );
         })()}
-        {byView === 'lines' && (!list.length ? <p className="muted">No lines {scope === 'manual' ? 'left to pick by hand' : scope === 'ready' ? 'are ready to pull' : scope === 'picked' ? 'picked yet' : scope === 'hold' ? 'on hold' : scope === 'pending' ? 'pending' : 'with UR stock'} in {label || week}.</p> : (
+        {byView === 'lines' && (!list.length ? <p className="muted">No lines {scope === 'possible' ? 'in POSIBAL PENDING' : scope === 'manual' ? 'left to pick by hand' : scope === 'ready' ? 'are ready to pull' : scope === 'picked' ? 'picked yet' : scope === 'hold' ? 'on hold' : scope === 'pending' ? 'pending' : 'with UR stock'} in {label || week}.</p> : (
           <div className="table-wrap" style={{ maxHeight: 460 }}>
             <table className="mini">
               <thead><tr><th>SO</th><th>LI</th><th>Item</th><th>Date</th><th>Plant</th><th className="n">QTY</th><th className="n">Picked = Dispatched</th><th className="n">Balance</th><th className="n">UR left</th><th className="n" title="Korber Inventory: Actual Qty of this SO / LI / Item's rolls still on the shelf (its ZINR lots; picks taken off)">Korber qty</th><th>State</th><th /></tr></thead>
@@ -283,7 +293,8 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
                       : <span className={!isDone(l) && l.korber_avail < need(l) - 1e-6 ? 'kb-short' : ''} title={`${l.korber_rolls ?? 0} roll${l.korber_rolls === 1 ? '' : 's'} on the Korber shelf${!isDone(l) && l.korber_avail < need(l) - 1e-6 ? ` — ${fmtQty(need(l) - l.korber_avail)} less than the balance` : ''}`}>
                         {fmtQty(l.korber_avail)} <span className="muted">({l.korber_rolls ?? 0})</span></span>}</td>
                     <td>{l.hold && !isDone(l) ? <span className="pill bad" title={`On hold${l.hold_by ? ` by ${l.hold_by}` : ''}${l.hold_at ? ` · ${new Date(l.hold_at).toLocaleString()}` : ''}`}>On hold · {l.hold}</span> : isDone(l) && !done ? <span className="pill ok" title={l.comment || ''}>Completed ✓</span> : Number(l.auto_picked) > 0 ? <span className={`pill ${done ? 'ok' : 'accent'}`} title={`${fmtQty(Number(l.auto_picked))} picked by “Pick all matched”`}>{done ? 'Auto Picked ✓' : 'Auto Picked · part'}</span> : scope === 'pending' && !done ? <span className={`pill ${PENDING_TONE[pendingWhy(l)] || 'mute'}`}>{pendingWhy(l)}</span> : done && Number((l as LineP & { closed_short?: number }).closed_short) > 0 ? <span className="pill ok" title="Closed short by a Normal pick">Picked ✓ · {fmtQty(Number((l as LineP & { closed_short?: number }).closed_short))} short</span> : done ? <span className="pill ok">Picked ✓ · Dispatched</span> : pk ? <span className="pill accent">Part picked</span> : <span className="pill mute">To pick</span>}
-                      {scope === 'manual' && runWhy[l.id] && <div className="muted small run-why">{runWhy[l.id]}</div>}</td>
+                      {scope === 'manual' && runWhy[l.id] && <div className="muted small run-why">{runWhy[l.id]}</div>}
+                      {scope === 'possible' && (() => { const x = possible.get(`${l.key}|${l.date ?? ''}`); return x ? <div className="small run-why"><span className="pill warn">Posibal pending {fmtQty(Number(x.possible))}</span> <span className="muted">sent {fmtQty(x.sent)} · warehouse {fmtQty(x.wh)}{x.tn ? ` · TN ${x.tn}` : ''}</span></div> : null; })()}</td>
                     <td style={{ whiteSpace: 'nowrap' }}>{canEdit && !isDone(l) && (l.hold
                         ? <button className="btn sm" onClick={() => setHold(l, null)} title="Release the hold — the line can be picked again">Release hold</button>
                         : <><button className="btn sm primary" onClick={() => setPicking(l)}>{pk ? 'Pick more' : 'Pick'}</button> <button className="btn sm" onClick={() => setHolding(l)} title="Put this line on Pick Hold — nobody can pick it until it is released">Hold</button></>)}
@@ -604,7 +615,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
         </div>
 
         <div className="pk-stats">
-          <div><span>Plan QTY</span><b>{fmtQty(line.qty)}</b>{c?.ur !== undefined && <small title="UR = Total stock − SO Blocked stock − Assigned Qty (ZMMBE)">UR {fmtQty(c.ur)}{c.planQty !== undefined && c.planQty > c.ur + 1e-9 ? ' → UR is picked' : ''}</small>}</div>
+          <div><span>Plan QTY</span><b>{fmtQty(line.qty)}</b>{c?.ur !== undefined && <small title="UR = Total stock − SO QI − SO Blocked stock − Assigned Qty (ZMMBE)">UR {fmtQty(c.ur)}{c.sent != null && c.sent > 1e-9 ? ` · sent ${fmtQty(c.sent)}` : c.planQty !== undefined && c.planQty > c.ur + 1e-9 ? ' → UR is picked' : ''}</small>}</div>
           <div><span>Already picked</span><b>{c ? fmtQty(c.picked) : '…'}</b></div>
           <div className="em"><span>To pick</span><b>{c ? fmtQty(remaining) : '…'}</b></div>
           <div><span>Selected</span><b>{fmt(total, 2)}</b><small>{nSel} roll{nSel === 1 ? '' : 's'}</small></div>
