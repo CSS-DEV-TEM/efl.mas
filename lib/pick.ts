@@ -17,6 +17,8 @@ export const PICK_SRCS: { src: PickSrc; title: string; hint: string; needs: stri
 ];
 
 export interface Candidate {
+  /** SAP fit to the SO line (manual selection) */
+  sap?: SapFit | null;
   /** Korber Fifo Date (yyyy-mm-dd): rolls chosen by hand are listed oldest first */
   fifo?: string | null;
   pallet: string; item: string; lot: string | null; supplier_hu: string | null; location: string | null; uom: string | null; invoice: string | null;
@@ -50,7 +52,9 @@ export interface LotInfo { /** what this SO line may still take from the lot (ZI
 export interface ManualRoll { /** a Korber pallet added by hand for a shortage of the pick */ free?: boolean; lot: string; batch: string; material: string; vendor_batch: string | null; roll_no: string | null; barcode: string | null; roll_qty: number; shade: string | null; invoice: string | null; po?: string | null; reason: string;
   /** Korber rolls with the same item, Lot Number, Supplier Hu, Invoice and Po (another pallet). */
   suggest?: KorberRow[] }
-export interface KorberRow { /** Korber Fifo Date (yyyy-mm-dd) */ fifo?: string | null; /** not pickable: Korber Pick Id not 0, or rejected */ blocked?: string; pick_id?: string | null; pallet: string; item: string; lot: string | null; qty: number; uom: string | null; invoice: string | null; location: string | null; supplier_hu: string | null; status: string | null; available: number; /** ZROLLMGT Reserved part (Available Quantity is less than the roll) */ reserved?: number; picked_before: number; picks?: PalletPick[] }
+/** how well a roll fits the SO line by its SAP data: matched / not matched fields, best first */
+export interface SapFit { score: number; hits: string[]; miss: string[]; shade?: string | null }
+export interface KorberRow { /** SAP fit to the SO line (manual selection) */ sap?: SapFit | null; /** Korber Fifo Date (yyyy-mm-dd) */ fifo?: string | null; /** not pickable: Korber Pick Id not 0, or rejected */ blocked?: string; pick_id?: string | null; pallet: string; item: string; lot: string | null; qty: number; uom: string | null; invoice: string | null; location: string | null; supplier_hu: string | null; status: string | null; available: number; /** ZROLLMGT Reserved part (Available Quantity is less than the roll) */ reserved?: number; picked_before: number; picks?: PalletPick[] }
 /** an earlier pick of a pallet: QTY, the plan it went to (day plan round / week), SO / LI, HJ Pick No, day, who */
 export interface PalletPick { day: string; by_user: string; qty: number; plan?: string; so?: string; li?: string; pick_no?: string | null; at?: string }
 /** "64.46 · 20 Oct · VAANAVIL Pick 1 · E101698226 / 10 · HJ 5501 · admin" */

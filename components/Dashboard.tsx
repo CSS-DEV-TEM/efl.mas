@@ -156,6 +156,12 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
     const cut = all.filter((x) => x.full > 0 && x.q < x.full - 0.0005);
     return { rolls: all.length, cut: cut.length, cutQty: cut.reduce((t0, x) => t0 + x.q, 0), qty: all.reduce((t0, x) => t0 + x.q, 0) };
   }, [data, scoped]);
+  // Plan UR: what the UR covers of the plan — each line's QTY, at most its UR (QTY 100 / UR 1000 → 100; QTY 100 / UR 50 → 50)
+  const planUr = useMemo(() => {
+    let v = 0, short = 0;
+    for (const l of scoped) { const q = Number(l.qty) || 0, u0 = Math.max(0, Number(l.ur) || 0); v += Math.min(q, u0); if (u0 < q - 1e-9) short++; }
+    return { v, short };
+  }, [scoped]);
   // the plan report of what is on screen (each Pick of the day, or the week / its plant): ALRADY SEND, QI, BLOCK, POSIBAL PENDING
   const repIds = useMemo(() => (!data ? [] : isDay ? (round ? [round] : (data.rounds || []).map((r) => String(r.id))) : data.week ? [data.week] : []), [data, isDay, round]);
   const [repMap, setRepMap] = useState<Map<string, PlanReportRow> | null>(null);
@@ -176,8 +182,11 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
     const u = Array.from(byKey.values());
     const sumU = (f: (x: PlanReportRow) => number) => u.reduce((t0, x) => t0 + (f(x) || 0), 0);
     const pp = xs.filter((x) => x.possible);
+    // ZMM_TRR transfer notes of these lines (one TN can cover several lines)
+    const tns = new Set(u.flatMap((x) => String(x.tn ?? '').split(',').map((t) => t.trim()).filter(Boolean)));
     return { sent: sumU((x) => x.sent), sentN: u.filter((x) => x.sent > 1e-9).length, qi: sumU((x) => x.qi), qiN: u.filter((x) => x.qi > 1e-9).length,
-      block: sumU((x) => x.block), blockN: u.filter((x) => x.block > 1e-9).length, possible: pp.reduce((t0, x) => t0 + Number(x.possible), 0), possibleN: pp.length };
+      block: sumU((x) => x.block), blockN: u.filter((x) => x.block > 1e-9).length, possible: pp.reduce((t0, x) => t0 + Number(x.possible), 0), possibleN: pp.length,
+      tnCount: tns.size, tnLines: u.filter((x) => x.tn).length, tnQty: u.reduce((t0, x) => t0 + (Number(x.tn_qty) || 0), 0) };
   }, [repMap, scoped]);
   const tips = useMemo(() => insights(scoped, data?.uploads || [], today, data?.dispatch), [scoped, data?.uploads, today, data?.dispatch]);
   const viewCounts = useMemo(() => {
@@ -370,7 +379,10 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
         <div className="kpi"><span className="k">Required QTY</span><span className="v"><CountUp value={t.qty} format={compact} /></span><span className="s" title="QTY − Assigned">Variance {compact(t.variance)}</span>{unfiltered && prevW && thisW && <span className="s">vs {weekLabel(prevW.week)}: {compact(prevW.qty)} {delta(thisW.qty, prevW.qty, false, true)}</span>}</div>
         <div className="kpi"><span className="k">Full UR stock</span><span className="v"><CountUp value={t.ur} format={compact} /></span><span className="s">QI {compact(t.qi)} · Block {compact(t.block)}</span></div>
         <div className="kpi"><span className="k">KFC / PFC UR</span><span className="v"><CountUp value={t.kfc_ur} format={compact} /></span><span className="s">PFC {compact(t.pfc_ur)}</span></div>
+        <div className="kpi"><span className="k">Plan UR</span><span className="v"><CountUp value={planUr.v} format={compact} /></span><span className="s" title="Each line's QTY, at most its UR (Total − QI − Block − Assigned)">of QTY {compact(t.qty)} · {fmt(planUr.short)} lines short</span>
+          <div className="meter"><span style={{ width: `${t.qty ? Math.min(100, (planUr.v / t.qty) * 100) : 0}%`, background: 'var(--ok)' }} /></div></div>
         {rep && <>
+          <div className="kpi"><span className="k">Transfer notes</span><span className="v"><CountUp value={rep.tnCount} format={(n) => fmt(n)} /></span><span className="s" title="ZMM_TRR transfer requests of these SO lines">{fmt(rep.tnLines)} SO/LI lines · {compact(rep.tnQty)} QTY</span></div>
           <div className="kpi"><span className="k">Alrady send</span><span className="v"><CountUp value={rep.sent} format={compact} /></span><span className="s" title="ZMMBE at the plant storage locations (40 / 70 / 75)">{fmt(rep.sentN)} SO/LI lines · at the plant</span></div>
           <div className={`kpi ${rep.qiN ? 'warn' : ''}`}><span className="k">QI</span><span className="v"><CountUp value={rep.qi} format={compact} /></span><span className="s" title="SO QI stock (ZMMBE) — not picked until released">{fmt(rep.qiN)} SO/LI lines</span></div>
           <div className={`kpi ${rep.blockN ? 'bad' : ''}`}><span className="k">Block</span><span className="v"><CountUp value={rep.block} format={compact} /></span><span className="s" title="SO Blocked stock (ZMMBE) — not picked until released">{fmt(rep.blockN)} SO/LI lines</span></div>

@@ -8,17 +8,19 @@ import { todayLocal, weekDays, weekIdOf, weekOptions } from '@/lib/smart';
 import PlanReport from '@/components/PlanReport';
 import { useShell } from '@/components/Shell';
 
-type Mode = 'replace-week' | 'merge' | 'replace-plant';
-interface Preview { weeks?: string[]; added: number; updated: number; removed: number; kept: number; inFileDups: number; lines: number; plant: string | null; mode: string }
+type Mode = 'add' | 'update' | 'replace';
+interface Preview { weeks?: string[]; added: number; updated: number; same?: number; removed: number; kept: number; inFileDups: number; lines: number; plant: string | null; mode: string }
 /** a sheet of the chosen file: the week plan, ZMMBE (stock) or a pick report — or left out */
 interface Job { name: string; grid: Grid; kind: 'plan' | 'zmmbe' | 'pick' | 'skip'; pick?: PickSrc; why?: string; state?: 'wait' | 'busy' | 'ok' | 'err'; msg?: string }
 interface RepStatus { src: string; uses: 'own' | 'shared' | 'none'; rows: number; own: { file_name: string | null; uploaded_by: string; uploaded_at: string } | null }
 
+/** Add = a new plan of the plant · Update = only what is new or changed is written, the rest stays · Replace = the plant's plan out, the file in */
 const MODES: [Mode, string, string][] = [
-  ['replace-plant', 'Replace one plant', 'Only the lines of this plant are replaced in the week(s); the other plants stay'],
-  ['replace-week', 'Replace the week', 'The week(s) in the file are replaced by the file (every plant: lines not in the file are removed)'],
-  ['merge', 'Add / update', 'New lines are added, lines in the file are updated, the other lines of the week stay'],
+  ['add', 'Add', 'A new plan for this plant in the week (refused when the plant already has one — use Update or Replace)'],
+  ['update', 'Update', 'The plant\'s plan is checked against the file: new lines are added and changed lines (QTY …) updated — only those; the other lines stay'],
+  ['replace', 'Replace', 'The plant\'s plan in the week is removed and the file is uploaded in its place'],
 ];
+const SERVER_MODE: Record<Mode, string> = { add: 'merge', update: 'merge', replace: 'replace-plant' };
 const REP_NAME: Record<string, string> = { plan: 'Plan', zmmbe: 'ZMMBE', zinr: 'ZINSR', zcoment: 'SHADE (ZCOMENT)', zroll: 'ZROLLMGT', korber: 'KORBER', ztrr: 'ZMM_TRR' };
 const weekLabel = (w: string) => { try { const [a, b] = weekDays(w); return `${w} · ${fmtDate(a)} – ${fmtDate(b)}`; } catch { return w; } };
 
@@ -41,9 +43,11 @@ export default function WeekPlanManager({ toast, onChanged }: { toast: (m: strin
   // the plants of the chosen week: each has its own reports (week + plant)
   const [wPlants, setWPlants] = useState<{ plant: string; lines: number; rid: string }[]>([]);
   const [selPlant, setSelPlant] = useState('');
+  const selRef = useRef(sel); selRef.current = sel;
   const loadPlants = useCallback(() => {
     if (!sel) return;
     api<{ plants: { plant: string; lines: number; rid: string }[] }>('/api/week-plants?week=' + encodeURIComponent(sel)).then((r) => {
+      if (selRef.current !== sel) return; // an answer for a week no longer chosen
       setWPlants(r.plants); setSelPlant((p) => (r.plants.some((x) => x.plant === p) ? p : r.plants.find((x) => x.plant)?.plant ?? ''));
     }).catch(() => setWPlants([]));
   }, [sel]);
@@ -65,7 +69,7 @@ export default function WeekPlanManager({ toast, onChanged }: { toast: (m: strin
   const [jobs, setJobs] = useState<Job[]>([]);
   const [auto, setAuto] = useState(true);
   const [week, setWeek] = useState(() => weekIdOf(todayLocal()));
-  const [mode, setMode] = useState<Mode>('replace-week');
+  const [mode, setMode] = useState<Mode>('update');
   const [plant, setPlant] = useState('');
   const [preview, setPreview] = useState<Preview | null>(null);
   const [busy, setBusy] = useState('');
@@ -98,8 +102,15 @@ export default function WeekPlanManager({ toast, onChanged }: { toast: (m: strin
       }
       if (!js.some((j) => j.kind !== 'skip')) { setErr(`Nothing to upload in ${f.name}: no plan sheet (SO, LI, Item Code, QTY) and no ZMMBE / ZMM_TRR / ZINSR / SHADE / ZROLLMGT / KORBER sheet.`); return; }
       const pj = js.find((j) => j.kind === 'plan');
-      const pc = pj ? plantOf(pj.name) : '';
-      setPlant(pc); setMode(pc ? 'replace-plant' : 'replace-week'); setAuto(true);
+      // the plant: from the sheet name (ASIALLINE-23), else the plan's Plant column when it has one plant only
+      let pc = pj ? plantOf(pj.name) : '';
+      if (pj && !pc) {
+        try {
+          const ps = new Set(applyMapping('plan', pj.grid, detectMapping('plan', pj.grid)).map((r) => String((r as Record<string, unknown>).plant ?? '').trim().toUpperCase().replace(/\s+/g, '')).filter(Boolean));
+          if (ps.size === 1) { const v = Array.from(ps)[0]; const hit = plants.find((p) => squash(p.code) === squash(v) || (p.name && squash(p.name) === squash(v))); pc = (hit?.code || v).toUpperCase(); }
+        } catch { /* no plant column */ }
+      }
+      setPlant(pc); setAuto(true);
       setFile({ name: f.name, sheets }); setJobs(js);
     } catch { setErr('Could not read that file. Save it as .xlsx and try again.'); }
   };
@@ -108,13 +119,26 @@ export default function WeekPlanManager({ toast, onChanged }: { toast: (m: strin
     const map = detectMapping('plan', planJob!.grid);
     // the report columns of such a sheet (AVALABALE, ALRADY SEND …) are worked out by the system: not plan fields
     for (const k of ['qi_note', 'status', 'comment']) if ((map.cols as Record<string, number>)[k] !== undefined) (map.cols as Record<string, number>)[k] = -1;
-    return { src: 'plan', planType: 'week', fileName: file!.name, sheetName: planJob!.name, rows: applyMapping('plan', planJob!.grid, map), mode, dryRun,
+    // every line goes to the chosen plant (Settings → Plants), whatever the file's Plant column says
+    const pc = plant.trim().toUpperCase().replace(/\s+/g, '');
+    const rows = applyMapping('plan', planJob!.grid, map).map((r) => (pc ? { ...(r as Record<string, unknown>), plant: pc } : r));
+    return { src: 'plan', planType: 'week', fileName: file!.name, sheetName: planJob!.name, rows, mode: SERVER_MODE[mode], dryRun,
       ...(auto ? {} : { week, forceWeek: true }), ...(plant.trim() ? { plant: plant.trim().toUpperCase() } : {}) };
   };
   const check = async () => {
-    if (mode === 'replace-plant' && !plant.trim()) { setErr('Type the plant to replace.'); return; }
-    setBusy('check'); setErr('');
-    try { setPreview(await api<Preview>('/api/upload', { method: 'POST', body: planBody(true) })); } catch (e) { setErr(e instanceof Error ? e.message : 'Could not check the file.'); }
+    if (!plant.trim()) { setErr('Choose the plant.'); return; }
+    setBusy('check'); setErr(''); setPreview(null);
+    try {
+      const pv = await api<Preview>('/api/upload', { method: 'POST', body: planBody(true) });
+      const pc = plant.trim().toUpperCase().replace(/\s+/g, '');
+      // what the plant already has in the week(s) of the file
+      const have: Record<string, number> = {};
+      for (const w of pv.weeks || []) { try { const r = await api<{ plants: { plant: string; lines: number }[] }>('/api/week-plants?week=' + encodeURIComponent(w)); const x = r.plants.find((p) => p.plant === pc); if (x) have[w] = x.lines; } catch { /* none */ } }
+      const had = Object.entries(have);
+      if (mode === 'add' && had.length) { setErr(`${pc} already has a plan in ${had.map(([w, n]) => `${w} (${n} lines)`).join(', ')} — use Update (only new / changed lines) or Replace.`); return; }
+      if (mode === 'update' && !had.length) { setErr(`${pc} has no plan in ${(pv.weeks || []).join(', ')} yet — use Add.`); return; }
+      setPreview(pv);
+    } catch (e) { setErr(e instanceof Error ? e.message : 'Could not check the file.'); }
     finally { setBusy(''); }
   };
   // the plan first (its week), then ZMMBE, then the pick reports (Korber keeps the week plan's items)
@@ -195,7 +219,13 @@ export default function WeekPlanManager({ toast, onChanged }: { toast: (m: strin
                 {wPlants.filter((x) => x.plant).map((x) => <option key={x.plant} value={x.plant}>{x.plant} · {x.lines} lines</option>)}
               </select>
             </label>}
-            {planJob && <label>Plant<input className="as-search" style={{ width: 130 }} placeholder="e.g. ASIALLINE" value={plant} onChange={(e) => { setPlant(e.target.value); setPreview(null); }} /></label>}
+            {planJob && <label>Plant (Settings)
+              <select value={plant} onChange={(e) => { setPlant(e.target.value); setPreview(null); setErr(''); }}>
+                <option value="">— choose the plant —</option>
+                {plants.map((p) => <option key={p.code} value={p.code.toUpperCase()}>{p.code}{p.name && p.name !== p.code ? ` · ${p.name}` : ''}</option>)}
+                {plant && !plants.some((p) => p.code.toUpperCase() === plant) && <option value={plant}>{plant} (from the file — not in Settings)</option>}
+              </select>
+            </label>}
           </div>
           <table className="mini wk-jobs" data-noexport>
             <thead><tr><th>Sheet</th><th>Goes to</th><th>Result</th></tr></thead>
@@ -209,11 +239,11 @@ export default function WeekPlanManager({ toast, onChanged }: { toast: (m: strin
           </table>
           {planJob && <>
             <div className="seg" role="group" aria-label="How" style={{ marginTop: 8 }}>
-              {MODES.map(([k, t, tip]) => <button key={k} className={mode === k ? 'on' : ''} title={tip} onClick={() => { setMode(k); setPreview(null); }}>{t}</button>)}
+              {MODES.map(([k, t, tip]) => <button key={k} className={mode === k ? 'on' : ''} title={tip} onClick={() => { setMode(k); setPreview(null); setErr(''); }}>{t}</button>)}
             </div>
             <p className="muted small" style={{ margin: '6px 0' }}>{MODES.find((m) => m[0] === mode)![2]}.</p>
           </>}
-          {preview && <div className="notice info small">Check: <b>{fmt(preview.lines)}</b> lines → {(preview.weeks || []).join(', ')} · {fmt(preview.added)} new · {fmt(preview.updated)} updated · {fmt(preview.removed)} removed · {fmt(preview.kept)} unchanged{preview.inFileDups ? ` · ${fmt(preview.inFileDups)} repeated rows (last kept)` : ''}{repJobs.length ? ` · then ${repJobs.length} report${repJobs.length === 1 ? '' : 's'} to ${(preview.weeks || [])[0] || 'that week'}` : ''}</div>}
+          {preview && <div className="notice info small">Check: <b>{fmt(preview.lines)}</b> lines → {(preview.weeks || []).join(', ')} · {fmt(preview.added)} new · {fmt(preview.updated)} changed · {fmt(preview.same ?? 0)} the same{mode === 'replace' ? ` · ${fmt(preview.removed)} removed` : ''}{mode === 'update' ? ` — only the ${fmt(preview.added + preview.updated)} new / changed lines are written` : ''}{preview.inFileDups ? ` · ${fmt(preview.inFileDups)} repeated rows (last kept)` : ''}{repJobs.length ? ` · then ${repJobs.length} report${repJobs.length === 1 ? '' : 's'} to ${(preview.weeks || [])[0] || 'that week'}` : ''}</div>}
           <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
             {planJob && <button className="btn" aria-busy={busy === 'check' || undefined} disabled={!!busy || done} onClick={check}>Check</button>}
             <button className="btn primary" aria-busy={busy === 'up' || undefined} disabled={!!busy || done || (!!planJob && !preview)} title={planJob && !preview ? 'Check the plan first' : ''} onClick={upload}>

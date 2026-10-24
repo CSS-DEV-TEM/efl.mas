@@ -907,4 +907,11 @@ tr.on-hold td { background: color-mix(in srgb, #ef4444 9%, transparent); }
 .kpi.em .v { color: var(--accent); }
 .kpi.warn .v { color: var(--warn, #b7791f); }
 .kpi.bad .v { color: var(--bad, #e03131); }
-@media (min-width: 1100px) { .kpis.compact { grid-template-columns: repeat(7, minmax(0, 1fr)); } }
+@media (min-width: 1100px) { .kpis.compact { grid-template-columns: repeat(8, minmax(0, 1fr)); } }
+
+/* SAP fit of a roll (manual selection): what matches, small under the roll */
+.sap-fit { display: flex; flex-wrap: wrap; gap: 3px 6px; margin-top: 2px; font-family: var(--font-sans, inherit); font-size: 10.5px; line-height: 1.35; font-weight: 400; }
+.sap-fit .sap-ok { color: var(--ok, #2f9e44); }
+.sap-fit .sap-no { color: var(--bad, #e03131); }
+.sap-fit .sap-info { color: var(--ink-3, #888); }
+.sap-fit .sap-best { color: #fff; background: var(--accent); border-radius: 8px; padding: 0 6px; font-weight: 700; }

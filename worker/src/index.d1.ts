@@ -450,7 +450,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 62; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 63; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -629,15 +629,22 @@ async function handleUpload(env: Env, req: Request) {
 
     // what is already there for these weeks
     // a user's plan is their own: only their lines are compared, replaced or removed
-    const existing = (await env.DB.prepare(`SELECT week, key, date, plant FROM plan WHERE week IN (SELECT value FROM json_each(?1)) AND owner = ?2 AND plan_type = ?3`).bind(JSON.stringify(weeks), owner, planType).all<Row>()).results;
+    const existing = (await env.DB.prepare(`SELECT week, key, date, plant, qty, remarks FROM plan WHERE week IN (SELECT value FROM json_each(?1)) AND owner = ?2 AND plan_type = ?3`).bind(JSON.stringify(weeks), owner, planType).all<Row>()).results;
     const existingIds = new Set(existing.map(lineId));
+    const exBy = new Map(existing.map((r) => [lineId(r), r]));
     const incomingIds = new Set(mapped.map(lineId));
-    const updated = mapped.filter((r) => existingIds.has(lineId(r))).length;
-    const added = mapped.length - updated;
+    // a line already there: changed only when its QTY, plant or remarks differ (an unchanged line is not written again)
+    const isChanged = (r: Row) => { const e = exBy.get(lineId(r))!; return Math.abs(Number(e.qty) - Number(r.qty)) > 0.0005 || cleanPlant(e.plant) !== cleanPlant(r.plant) || String(e.remarks ?? '') !== String(r.remarks ?? ''); };
+    const inBoth = mapped.filter((r) => existingIds.has(lineId(r)));
+    const updated = inBoth.filter(isChanged).length;
+    const same = inBoth.length - updated;
+    const added = mapped.length - inBoth.length;
     const removedRows = existing.filter((r) => !incomingIds.has(lineId(r)) && (mode === 'replace-week' || mode === 'replace-round' || (mode === 'replace-plant' && cleanPlant(r.plant) === plant) || (mode === 'replace-day' && days.includes(String(r.date ?? '')))));
-    const kept = existing.length - updated - removedRows.length;
+    const kept = existing.length - updated - removedRows.length; // includes the unchanged lines of the file
+    // merge (Update): only the new and the changed lines are written
+    if (mode === 'merge') mapped = mapped.filter((r) => !existingIds.has(lineId(r)) || isChanged(r));
     const rinfo = rid ? parseRound(rid) : null;
-    const preview = { mode, plant: rinfo?.plant ?? plant, weeks, days: rid ? [rDay] : days.sort(), owner, planType, ...(rinfo ? { round: rinfo.round, rid } : {}), added, updated, removed: removedRows.length, kept, inFileDups, dupQty: dupQty.slice(0, 30), dupQtyCount: dupQty.length, lines: mapped.length };
+    const preview = { mode, plant: rinfo?.plant ?? plant, weeks, days: rid ? [rDay] : days.sort(), owner, planType, ...(rinfo ? { round: rinfo.round, rid } : {}), added, updated, same, removed: removedRows.length, kept, inFileDups, dupQty: dupQty.slice(0, 30), dupQtyCount: dupQty.length, lines: mapped.length };
     if (body.dryRun) return json({ ok: true, dryRun: true, ...preview });
 
     const ids = JSON.stringify(mapped.map(lineId));
@@ -2016,6 +2023,12 @@ async function handlePick(env: Env, req: Request, p: string) {
       if (!r.blocked) { const why = await gate.check(String(r.pallet), null, false); if (why) { r.blocked = why; r.available = 0; } }
       r.picks = pp.picks;
     }
+    // ?key= the SO line: how well each roll fits its SAP data (shown small under the roll, best first)
+    const lkey = String(url.searchParams.get('key') || '');
+    if (lkey.split('|').length === 3) {
+      const fit = await sapFit(kenv, await sapLineCtx(kenv, lkey), rows.map((r) => String(r.pallet)));
+      for (const r of rows) r.sap = fit.get(up(r.pallet)) ?? null;
+    }
     // ?batches= the SO line's ZMMBE batches with UR: a roll of another batch (ZROLLMGT System Batch / ZCOMENT batch) is not offered
     const lineB = new Set(String(url.searchParams.get('batches') || '').split(',').map((x) => normId(x)).filter(Boolean));
     if (lineB.size) for (const r of rows) {
@@ -2603,6 +2616,57 @@ function poMatch(kpo: string | null, lot: Row): boolean {
   if (!z || !kpo) return false;
   const k = up(kpo);
   return k === z || k.endsWith('-' + z) || normId(k) === normId(z) || poCanon(k) === poCanon(z);
+}
+/**
+ * How well a Korber roll fits the SO line by its SAP data (manual selection): the line's ZMMBE batches (UR), its ZINSR lots
+ * (Vendor Batch, Vendor Invoice, Purchasing Document), ZCOMENT VIEW (lot, Vendor Roll No, shade) and ZROLLMGT (System Batch,
+ * bin, status, SO / LI). Each roll gets a score and the fields that match / do not — shown small under the roll.
+ */
+type SapFit = { score: number; hits: string[]; miss: string[]; shade?: string | null };
+async function sapLineCtx(env: Env, key: string) {
+  const [so, li, item] = key.split('|');
+  const plantLocs = new Set(((await getSettings(env)).plantSlocs || []).map((x) => up(normId(x))));
+  const st = (await env.DB.prepare("SELECT batch, sloc, ur FROM stock WHERE src = 'zmmbe' AND key = ?").bind(key).all<Row>()).results.filter((x) => !plantLocs.has(up(normId(x.sloc))) && Number(x.ur) > 0);
+  const batches = new Set(st.map((x) => normId(x.batch)));
+  const lots = (await env.DB.prepare('SELECT lot, batch, vendor_batch, invoice, po, qty FROM zinr WHERE so = ? AND li = ? AND material = ?').bind(so, li, item).all<Row>()).results
+    .filter((l) => !batches.size || batches.has(normId(l.batch)));
+  const lotIds = lots.map((l) => String(l.lot));
+  const zvb = lotIds.length ? (await env.DB.prepare('SELECT DISTINCT vendor_batch FROM zcoment WHERE lot IN (SELECT value FROM json_each(?))').bind(JSON.stringify(lotIds)).all<Row>()).results.map((x) => up(x.vendor_batch)) : [];
+  return { so: normId(so), li: normId(li), item: normId(item), batches, lots, lotIds: new Set(lotIds),
+    vbs: new Set([...lots.map((l) => up(l.vendor_batch)), ...zvb].filter(Boolean)), invs: new Set(lots.map((l) => invRoot(l.invoice)).filter(Boolean)) };
+}
+async function sapFit(env: Env, ctx: Awaited<ReturnType<typeof sapLineCtx>>, pallets: string[]): Promise<Map<string, SapFit>> {
+  const out = new Map<string, SapFit>();
+  const ps = Array.from(new Set(pallets.map(up).filter(Boolean)));
+  if (!ps.length) return out;
+  const J = JSON.stringify(ps);
+  const ks = new Map((await env.DB.prepare('SELECT * FROM korber WHERE pallet IN (SELECT value FROM json_each(?))').bind(J).all<Row>()).results.map((k) => [up(k.pallet), k]));
+  const zcs = (await env.DB.prepare('SELECT barcode, lot, batch, vendor_batch, roll_no, shade FROM zcoment WHERE barcode IN (SELECT value FROM json_each(?))').bind(J).all<Row>()).results;
+  const zrs = (await env.DB.prepare('SELECT barcode, batch, bin, status, so, li FROM zroll WHERE barcode IN (SELECT value FROM json_each(?))').bind(J).all<Row>()).results;
+  const st = await getSettings(env);
+  const bin = up(st.pickBin || 'EXPO-FIX').replace(/\s+/g, '');
+  for (const p of ps) {
+    const k = ks.get(p); if (!k) continue;
+    const zc = zcs.filter((z) => up(z.barcode) === p), zr = zrs.filter((z) => up(z.barcode) === p);
+    const hits: string[] = [], miss: string[] = []; let score = 0;
+    const add = (ok: boolean | null, w: number, hit: string, no: string) => { if (ok === null) return; if (ok) { score += w; hits.push(hit); } else { score -= Math.round(w / 2); miss.push(no); } };
+    add(normId(k.item) === ctx.item, 40, 'Item', `Item ${k.item}`);
+    const rb = Array.from(new Set([...zr.map((z) => normId(z.batch)), ...zc.map((z) => normId(z.batch))].filter(Boolean)));
+    add(rb.length ? rb.some((b) => ctx.batches.has(b)) : null, 30, `Batch ${rb.find((b) => ctx.batches.has(b)) ?? ''}`, `Batch ${rb.join('/')} ≠ ZMMBE`);
+    const zl = zc.map((z) => String(z.lot)).find((l) => ctx.lotIds.has(l));
+    add(zc.length ? !!zl : null, 25, `ZINSR lot ${zl}`, 'ZCOMENT lot of another SO line');
+    add(ctx.vbs.size ? ctx.vbs.has(up(k.lot)) : null, 15, `Vendor Batch ${k.lot}`, `Lot ${k.lot ?? '–'} ≠ Vendor Batch`);
+    add(ctx.invs.size && k.invoice ? ctx.invs.has(invRoot(k.invoice)) : null, 10, 'Invoice', `Invoice ${k.invoice}`);
+    const kpo = await korberPo(env, k);
+    add(ctx.lots.some((l) => l.po) && kpo ? ctx.lots.some((l) => poMatch(kpo, l)) : null, 8, 'Po', `Po ${kpo}`);
+    const hu = zc.map((z) => up(z.roll_no)).filter(Boolean);
+    add(hu.length && k.supplier_hu ? hu.includes(up(k.supplier_hu)) : null, 6, `HU ${k.supplier_hu}`, `HU ${k.supplier_hu} ≠ roll ${hu[0]}`);
+    const zso = zr.find((z) => z.so || z.li);
+    add(zso ? (!zso.so || normId(zso.so) === ctx.so) && (!zso.li || normId(zso.li) === ctx.li) : null, 6, 'SO / LI', `ZROLLMGT SO ${zso?.so ?? ''}/${zso?.li ?? ''}`);
+    add(zr.length ? zr.some((z) => up(z.bin).replace(/\s+/g, '') === bin) : null, 4, bin, `Bin ${zr[0]?.bin ?? ''}`);
+    out.set(p, { score, hits, miss, shade: (zc.find((z) => z.shade)?.shade as string) ?? null });
+  }
+  return out;
 }
 /** For a roll that is not matched: Korber rolls of the same item with the same Lot Number, Supplier Hu, Invoice and Po (any pallet). */
 async function suggestKorber(env: Env, sh: Row, lot: Row) {
@@ -3241,6 +3305,13 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
     }
     for (const m of nobarcode) m.options = (m.options as Row[]).filter((o) => !gate.locWhy(locs.get(up(o.pallet))));
     for (let i = nobarcode.length - 1; i >= 0; i--) if (!(nobarcode[i].options as Row[]).length) nobarcode.splice(i, 1);
+  }
+  // SAP fit of every roll that can be chosen by hand (matched rolls and the no-barcode / invoice + item options)
+  {
+    const ctx = await sapLineCtx(env, key);
+    const fit = await sapFit(env, ctx, [...Array.from(rolls.keys()), ...nobarcode.flatMap((m) => (m.options as Row[]).map((o) => String(o.pallet)))]);
+    for (const r of rolls.values()) (r as Candidate & { sap?: SapFit }).sap = fit.get(up(r.pallet));
+    for (const m of nobarcode) for (const o of m.options as Row[]) o.sap = fit.get(up(o.pallet));
   }
   // ZROLLMGT Available Quantity: a roll with a Reserved part in SAP is picked only up to what SAP has available
   if (gate.on) {
