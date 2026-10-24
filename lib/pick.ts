@@ -17,6 +17,8 @@ export const PICK_SRCS: { src: PickSrc; title: string; hint: string; needs: stri
 ];
 
 export interface Candidate {
+  /** Korber Fifo Date (yyyy-mm-dd): rolls chosen by hand are listed oldest first */
+  fifo?: string | null;
   pallet: string; item: string; lot: string | null; supplier_hu: string | null; location: string | null; uom: string | null; invoice: string | null;
   actual_qty: number; base_qty: number; picked_before: number; available: number; roll_qty: number; shade: string | null;
   insp_lots: string[]; batches: string[]; checks: Record<string, boolean | null>; warnings: string[]; needsConfirm: boolean;
@@ -43,12 +45,12 @@ export interface Candidate {
   /** how much of the roll is in each batch of this line */
   parts?: { batch: string; lot: string; qty: number }[];
 }
-export interface LotInfo { via?: string | null; noShade?: boolean; /** rolls found straight from ZINR to Korber */ direct?: number; lot: string; batch: string; qty: number; ur: number; qty_ok: boolean; invoice: string | null; vendor_batch: string | null; sloc: string | null; rolls: number; roll_sum: number }
+export interface LotInfo { /** what this SO line may still take from the lot (ZINSR QTY less its picks) */ need?: number; picked?: number; /** the lot's ZINSR QTY less what this line already took from it */ cap?: number; via?: string | null; noShade?: boolean; /** rolls found straight from ZINR to Korber */ direct?: number; lot: string; batch: string; qty: number; ur: number; qty_ok: boolean; invoice: string | null; vendor_batch: string | null; sloc: string | null; rolls: number; roll_sum: number }
 /** A shade-report roll whose Korber pallet does not agree on Pallet, Lot, Supplier Hu, Invoice and Po: the Korber roll is chosen by hand. */
 export interface ManualRoll { /** a Korber pallet added by hand for a shortage of the pick */ free?: boolean; lot: string; batch: string; material: string; vendor_batch: string | null; roll_no: string | null; barcode: string | null; roll_qty: number; shade: string | null; invoice: string | null; po?: string | null; reason: string;
   /** Korber rolls with the same item, Lot Number, Supplier Hu, Invoice and Po (another pallet). */
   suggest?: KorberRow[] }
-export interface KorberRow { /** not pickable: Korber Pick Id not 0, or rejected */ blocked?: string; pick_id?: string | null; pallet: string; item: string; lot: string | null; qty: number; uom: string | null; invoice: string | null; location: string | null; supplier_hu: string | null; status: string | null; available: number; /** ZROLLMGT Reserved part (Available Quantity is less than the roll) */ reserved?: number; picked_before: number; picks?: PalletPick[] }
+export interface KorberRow { /** Korber Fifo Date (yyyy-mm-dd) */ fifo?: string | null; /** not pickable: Korber Pick Id not 0, or rejected */ blocked?: string; pick_id?: string | null; pallet: string; item: string; lot: string | null; qty: number; uom: string | null; invoice: string | null; location: string | null; supplier_hu: string | null; status: string | null; available: number; /** ZROLLMGT Reserved part (Available Quantity is less than the roll) */ reserved?: number; picked_before: number; picks?: PalletPick[] }
 /** an earlier pick of a pallet: QTY, the plan it went to (day plan round / week), SO / LI, HJ Pick No, day, who */
 export interface PalletPick { day: string; by_user: string; qty: number; plan?: string; so?: string; li?: string; pick_no?: string | null; at?: string }
 /** "64.46 · 20 Oct · VAANAVIL Pick 1 · E101698226 / 10 · HJ 5501 · admin" */

@@ -7,7 +7,7 @@ import { fmt, fmtDate, fmtQty } from '@/lib/calc';
 
 export interface PlanReportRow {
   unic: string; so: string; li: string; item: string; date: string | null; pick_date: string | null; qty: number; avail: number; sent: number; pending: number; possible: number | null;
-  qi: number; block: number; tn: string | null; tn_qty: number | null; tn_status: string | null; wh: number; wh_ur: number; picked: number; /** QTY − ALRADY SEND − picks after the ZMMBE upload */ left?: number; rolls: number; key: string; plant: string | null; remarks: string | null;
+  qi: number; block: number; tn: string | null; tn_qty: number | null; tn_status: string | null; wh: number; wh_ur: number; /** ZMMBE Assigned Qty (not free to send) */ assigned?: number; picked: number; /** QTY − ALRADY SEND − picks after the ZMMBE upload */ left?: number; rolls: number; key: string; plant: string | null; remarks: string | null;
 }
 export interface PlanReportRes {
   rid: string; name: string; day: string; plant: string | null; week?: boolean; plants?: string[]; hasZmmbe: boolean; hasSent: boolean; hasTrr: boolean; rows: PlanReportRow[];
@@ -18,11 +18,11 @@ type View = 'all' | 'pending' | 'possible' | 'tn' | 'qiblock';
 /** The Pick's plan report as an Excel file — the same sheet and columns as the "ASIALLINE-23" workbook. */
 export async function downloadPlanReport(r: PlanReportRes) {
   const XLSX = await import('xlsx-js-style');
-  const head = ['UNIC', 'SO', 'LI', 'ITEM CODE', 'DATE', 'QTY', 'AVALABALE', 'ALRADY SEND', 'Pending', 'POSIBAL PENDING', 'QI', 'BLOCK', 'TRANSFER NOTE', 'PICKED (system)', 'BALANCE (system)'];
+  const head = ['UNIC', 'SO', 'LI', 'ITEM CODE', 'DATE', 'QTY', 'AVALABALE', 'ALRADY SEND', 'Pending', 'POSIBAL PENDING', 'QI', 'BLOCK', 'TRANSFER NOTE', 'PICKED (system)', 'BALANCE (system)', 'ASSIGNED (system)'];
   const num = (v: string) => (/^\d{1,15}$/.test(v) ? Number(v) : v);
   // an Excel date serial (no time zone shift: a JS Date would land on the previous day in UTC+5:30)
   const xd = (d: string | null) => (d ? Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10)) / 86400000 + 25569 : '');
-  const body = r.rows.map((x) => [x.unic, x.so, num(String(x.li)), num(String(x.item)), xd(x.date), x.qty, x.avail, x.sent, x.pending, x.possible ?? '', x.qi, x.block, x.tn ?? '#N/A', x.picked || '', x.left ?? '']);
+  const body = r.rows.map((x) => [x.unic, x.so, num(String(x.li)), num(String(x.item)), xd(x.date), x.qty, x.avail, x.sent, x.pending, x.possible ?? '', x.qi, x.block, x.tn ?? '#N/A', x.picked || '', x.left ?? '', x.assigned || '']);
   const ws = XLSX.utils.aoa_to_sheet([head, ...body]);
   const hs = { font: { bold: true, color: { rgb: 'FFFFFF' } }, fill: { fgColor: { rgb: '1F3A5F' } }, alignment: { horizontal: 'center', vertical: 'center', wrapText: true } };
   head.forEach((_, i) => { const a = XLSX.utils.encode_cell({ r: 0, c: i }); if (ws[a]) ws[a].s = hs; });
@@ -36,7 +36,7 @@ export async function downloadPlanReport(r: PlanReportRes) {
       if (x.possible) ws[a].s = { fill: { fgColor: { rgb: 'FFF2CC' } } };
     }
   });
-  ws['!cols'] = [26, 13, 6, 12, 11, 11, 12, 12, 11, 15, 9, 9, 15, 13, 14].map((w) => ({ wch: w }));
+  ws['!cols'] = [26, 13, 6, 12, 11, 11, 12, 12, 11, 15, 9, 9, 15, 13, 14, 14].map((w) => ({ wch: w }));
   ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: r.rows.length, c: head.length - 1 } }) };
   ws['!freeze'] = { xSplit: 0, ySplit: 1 };
   const wb = XLSX.utils.book_new();
@@ -76,7 +76,7 @@ export default function PlanReport({ rid, onClose }: { rid: string; onClose: () 
         <div className="modal-head">
           <div>
             <h2 id="prr-title">{r ? r.name : 'Plan report'} {r && <span className="muted small" style={{ fontWeight: 400 }}>· {fmtDate(r.day)}</span>}</h2>
-            <p className="sub" style={{ margin: 0 }}>From this Pick&apos;s reports: AVALABALE = SO UR stock in ZMMBE (every storage location) · ALRADY SEND = the same at the plant storage locations · Pending = QTY − ALRADY SEND · POSIBAL PENDING = Pending the warehouse has UR for · QI / BLOCK = SO QI / SO Blocked · TRANSFER NOTE = ZMM_TRR.</p>
+            <p className="sub" style={{ margin: 0 }}>From this Pick&apos;s reports: AVALABALE = SO UR stock in ZMMBE (every storage location) · ALRADY SEND = the same at the plant storage locations · Pending = QTY − ALRADY SEND · POSIBAL PENDING = Pending the warehouse has free UR for (Assigned Qty is not free) · QI / BLOCK = SO QI / SO Blocked · TRANSFER NOTE = ZMM_TRR.</p>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="btn primary" disabled={!r} onClick={() => r && void downloadPlanReport(r)}>⤓ Excel</button>

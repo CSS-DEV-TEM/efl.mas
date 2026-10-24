@@ -147,7 +147,7 @@ const thisWeek = () => weekId(new Date(Date.now() + 5.5 * 3600 * 1000).toISOStri
  * adds plan.week, fills it from the dates, and moves dashboard edits to week-scoped keys ("2026-W42#SO|LI|Item").
  */
 let schemaReady = false;
-const SCHEMA_V = '32';
+const SCHEMA_V = '33';
 async function ensureSchema(env: Env) {
   if (schemaReady || !env.DB) return;
   try {
@@ -272,6 +272,23 @@ async function ensureSchema(env: Env) {
       FROM plan WHERE plan_type = 'day' AND instr(week, '~') > 0 GROUP BY week`),
     env.DB.prepare("INSERT OR IGNORE INTO plan_day (day, created_by, created_at) SELECT DISTINCT day, created_by, created_at FROM pick_round"),
   ]);
+  // v33: Korber Fifo Date (yyyy-mm-dd) — rolls chosen by hand are listed oldest first; the rolls uploaded before get it from their raw row
+  try { await env.DB.prepare('ALTER TABLE korber ADD COLUMN fifo TEXT').run(); } catch { /* already there */ }
+  try {
+    const kh = (await env.DB.prepare("SELECT v FROM config WHERE k = 'korber_header'").first<{ v: string }>())?.v;
+    const fi = kh ? (JSON.parse(kh) as unknown[]).findIndex((h) => String(h ?? '').trim().toLowerCase().replace(/\s+/g, ' ') === 'fifo date') : -1;
+    if (fi >= 0) {
+      const v = `trim(CAST(json_extract(raw, '$[${fi}]') AS TEXT))`;
+      await env.DB.prepare(`UPDATE korber SET fifo = CASE
+          WHEN ${v} GLOB '[0-9][0-9]/[0-9][0-9]/[0-9][0-9][0-9][0-9]*' THEN substr(${v}, 7, 4) || '-' || substr(${v}, 4, 2) || '-' || substr(${v}, 1, 2)
+          WHEN ${v} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*' THEN substr(${v}, 1, 10)
+          WHEN ${v} GLOB '[0-9][0-9][0-9][0-9][0-9]*' AND CAST(${v} AS REAL) BETWEEN 20000 AND 80000 THEN date(julianday('1899-12-30') + CAST(${v} AS REAL))
+          ELSE NULL END
+        WHERE fifo IS NULL AND json_valid(raw) AND json_type(raw) = 'array'`).run();
+      // 01/01/1900 = no date in Korber
+      await env.DB.prepare("UPDATE korber SET fifo = NULL WHERE fifo < '2000'").run();
+    }
+  } catch { /* no Korber yet */ }
   // v32: Korber Wh Id (Settings → blocked Wh Id + Location Id); the rolls uploaded before get it from their raw row
   try { await env.DB.prepare('ALTER TABLE korber ADD COLUMN wh TEXT').run(); } catch { /* already there */ }
   try {
@@ -433,7 +450,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 61; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 62; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -461,7 +478,8 @@ function mapStock(src: string, rows: Row[]) {
     const hasTotal = !(r.total === undefined || r.total === null || r.total === '');
     // UR = Total stock − SO QI stock − SO Blocked stock − Assigned Qty (Total = SO UR + SO QI + SO Blocked): QI and Block are
     // never UR (the SAP "Sales order UR Stock" column is not used when Total is there)
-    const ur = hasTotal ? Math.max(0, Math.round((num(r.total) - qi - block - assigned) * 1000) / 1000) : num(r.ur);
+    // no Total column: SAP's "Sales order UR Stock" still holds the Assigned Qty — taken off, it is never picked
+    const ur = hasTotal ? Math.max(0, Math.round((num(r.total) - qi - block - assigned) * 1000) / 1000) : Math.max(0, Math.round((num(r.ur) - assigned) * 1000) / 1000);
     out.push({
       src, key: lineKey(so, li, mat), plant: txt(r.plant), sloc: txt(normId(r.sloc)), so_plant: txt(r.so_plant), so, li,
       material: mat, batch: txt(normId(r.batch)), style: txt(r.style), ur, qi, block, assigned,
@@ -708,6 +726,16 @@ async function handleUpload(env: Env, req: Request) {
           .bind(src, from, body.sheetName || null, n, s.u, now(), body.mode === 'add' ? 'add' : null, srid));
       }
       mapped = zRows.length ? zRows : mapped;
+    } else if (body.src === 'zmmbe') {
+      // the plant storage locations (40, 70, 75) are ALRADY SEND (stock in the plant already) — never warehouse UR to pick
+      const plantSet = new Set(rules.plantSlocs.map(up));
+      const plantRows = mapped.filter((r) => plantSet.has(up(r.sloc)));
+      const zRows = mapped.filter((r) => !plantSet.has(up(r.sloc)));
+      const d = await write('zmmbe', zRows), dsent = await write('sent', plantRows);
+      stmts.push(...d.stmts, ...dsent.stmts);
+      stockDiff = d;
+      plantOut = plantRows.length;
+      mapped = zRows.length ? zRows : mapped;
     } else {
       const d = await write(body.src, mapped);
       stmts.push(...d.stmts);
@@ -837,6 +865,22 @@ function plantPairs(v: unknown): Settings['zmmbePlants'] {
     out.push({ plant, soPlant, link: String((x as Row)?.link ?? '').trim().toUpperCase() });
   }
   return out.slice(0, 200);
+}
+/** a Korber Fifo Date → yyyy-mm-dd: dd/mm/yyyy (with or without a time), d/m/yyyy, yyyy-mm-dd or an Excel date number */
+function fifoIso(v: unknown): string | null {
+  const d = fifoIso0(v);
+  return d && d >= '2000' ? d : null; // 01/01/1900 = no date in Korber
+}
+function fifoIso0(v: unknown): string | null {
+  if (v === null || v === undefined || v === '') return null;
+  if (typeof v === 'number' && v > 20000 && v < 80000) return new Date(Date.UTC(1899, 11, 30) + Math.round(v) * 86400000).toISOString().slice(0, 10);
+  const t = String(v).trim();
+  let m = /^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})/.exec(t);
+  if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+  m = /^(\d{4})-(\d{2})-(\d{2})/.exec(t);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  if (/^\d{5}(\.\d+)?$/.test(t)) return fifoIso0(Number(t));
+  return null;
 }
 /** Settings → blocked Korber locations: upper case, no blanks, each pair once */
 const locKey = (v: unknown) => String(v ?? '').trim().toUpperCase().replace(/\s+/g, '');
@@ -1155,8 +1199,9 @@ async function handlePlanReport(env: Env, req: Request) {
     const senv = await envFor(env, sr);
     const keys = JSON.stringify(Array.from(new Set(lines.filter((l) => ridOf(l) === sr).map((l) => String(l.key)))));
     const st = new Map((await senv.DB.prepare(`SELECT key, ROUND(SUM(${SO_UR}), 3) avail, ROUND(SUM(CASE WHEN src = 'sent' THEN ${SO_UR} ELSE 0 END), 3) sent,
-        ROUND(SUM(COALESCE(qi, 0)), 3) qi, ROUND(SUM(COALESCE(block, 0)), 3) block, ROUND(SUM(CASE WHEN src = 'zmmbe' THEN ur ELSE 0 END), 3) wh_ur
-      FROM (SELECT src, key, total, qi, block, ur FROM stock WHERE src = 'zmmbe' UNION ALL SELECT src, key, total, qi, block, ur FROM stock_sent) WHERE key IN (SELECT value FROM json_each(?)) GROUP BY key`).bind(keys).all<Row>()).results.map((x) => [String(x.key), x]));
+        ROUND(SUM(COALESCE(qi, 0)), 3) qi, ROUND(SUM(COALESCE(block, 0)), 3) block, ROUND(SUM(CASE WHEN src = 'zmmbe' THEN ur ELSE 0 END), 3) wh_ur,
+        ROUND(SUM(CASE WHEN src = 'zmmbe' THEN COALESCE(assigned, 0) ELSE 0 END), 3) assigned
+      FROM (SELECT src, key, total, qi, block, ur, assigned FROM stock WHERE src = 'zmmbe' UNION ALL SELECT src, key, total, qi, block, ur, assigned FROM stock_sent) WHERE key IN (SELECT value FROM json_each(?)) GROUP BY key`).bind(keys).all<Row>()).results.map((x) => [String(x.key), x]));
     const tn = new Map<string, Row>();
     for (const x of (await senv.DB.prepare(`SELECT to_so, to_li, material, GROUP_CONCAT(DISTINCT tn) tn, ROUND(SUM(qty), 3) tn_qty, ROUND(SUM(tqty), 3) tn_tqty, GROUP_CONCAT(DISTINCT status) tn_status FROM ztrr GROUP BY to_so, to_li, material`).all<Row>()).results)
       tn.set(`${x.to_so}|${x.to_li}|${x.material}`, x);
@@ -1172,7 +1217,8 @@ async function handlePlanReport(env: Env, req: Request) {
     const x = S.st.get(String(l.key)), t = S.tn.get(String(l.key)), p0 = S.pk.get(`${l.key}|${l.date ?? ''}`);
     const avail = Number(x?.avail ?? 0), sent = Number(x?.sent ?? 0), qty = Number(l.qty);
     const pending = r3(qty - sent);
-    const possible = pending > 1e-4 && avail - sent > 1e-4 ? pending : null;
+    // POSIBAL PENDING: the warehouse has free UR for it — UR = Total − QI − Block − Assigned (an Assigned Qty is not free to send)
+    const possible = pending > 1e-4 && avail - sent > 1e-4 && Number(x?.wh_ur ?? 0) > 1e-4 ? pending : null;
     // the balance still to send: QTY − ALRADY SEND (this line's share: earlier days of the same SO / LI / Item first)
     // − the picks the ZMMBE does not show yet
     const pq = p0 ? Number(p0.q) : 0, after = p0 ? Number(p0.qa) : 0, before = Math.max(0, r3(pq - after));
@@ -1181,7 +1227,7 @@ async function handlePlanReport(env: Env, req: Request) {
     const left = Math.max(0, r3(qty - Math.max(sentMine, before) - after));
     return { left, unic: `${l.so}${l.li}${l.item}A`, so: l.so, li: l.li, item: l.item, date: l.plan_date, pick_date: l.date, qty, avail: r3(avail), sent: r3(sent), pending, possible,
       qi: r3(Number(x?.qi ?? 0)), block: r3(Number(x?.block ?? 0)), tn: t?.tn ?? null, tn_qty: t ? Number(t.tn_qty) : null, tn_status: t?.tn_status ?? null,
-      wh: r3(avail - sent), wh_ur: r3(Number(x?.wh_ur ?? 0)), picked: p0 ? Number(p0.q) : 0, rolls: p0 ? Number(p0.n) : 0, key: l.key, plant: l.plant, remarks: l.remarks };
+      wh: r3(avail - sent), wh_ur: r3(Number(x?.wh_ur ?? 0)), assigned: r3(Number(x?.assigned ?? 0)), picked: p0 ? Number(p0.q) : 0, rolls: p0 ? Number(p0.n) : 0, key: l.key, plant: l.plant, remarks: l.remarks };
   });
   const sum = (f: (r: typeof rows[number]) => number) => r3(rows.reduce((t0, r) => t0 + f(r), 0));
   const weekPlants = isWeek ? (await env.DB.prepare("SELECT DISTINCT upper(COALESCE(plant, '')) p FROM plan WHERE week = ? AND plan_type = 'week' ORDER BY 1").bind(rid).all<{ p: string }>()).results.map((x) => x.p).filter(Boolean) : [];
@@ -1785,7 +1831,7 @@ const PICK_COLS: Record<'zinr' | 'zcoment' | 'korber' | 'zroll' | 'ztrr', Record
   },
   korber: {
     pallet: ['Pallet'], item: ['Item Number'], display: ['Display Item Number'], lot: ['Lot Number'], qty: ['Actual Qty'], uom: ['Uom'], invoice: ['Invoice Number'], location: ['Location Id'],
-    supplier_hu: ['Supplier Hu'], status: ['Status'], po: ['Po Number'], pick_id: ['Pick Id'], wh: ['Wh Id', 'Warehouse Id', 'Wh'],
+    supplier_hu: ['Supplier Hu'], status: ['Status'], po: ['Po Number'], pick_id: ['Pick Id'], wh: ['Wh Id', 'Warehouse Id', 'Wh'], fifo: ['Fifo Date', 'FIFO Date', 'Fifo'],
   },
 };
 const REQUIRED: Record<string, string[]> = { ztrr: ['tn', 'to_so', 'to_li', 'material'], zroll: ['barcode', 'bin'], zinr: ['lot', 'batch', 'material', 'qty', 'so', 'li'], zcoment: ['lot', 'roll_no', 'shade'], korber: ['pallet', 'item', 'lot', 'qty'] };
@@ -1891,7 +1937,7 @@ async function handlePick(env: Env, req: Request, p: string) {
         seen.set(pallet, { pallet, item: korberItem(g(r, 'display'), g(r, 'item')), lot: txt(g(r, 'lot')), qty: num(g(r, 'qty')), uom: txt(g(r, 'uom')), invoice: txt(up(g(r, 'invoice'))),
           location: txt(g(r, 'location')), supplier_hu: txt(up(g(r, 'supplier_hu'))), status: txt(g(r, 'status')), po: txt(up(g(r, 'po'))), pcore: palletCore(pallet), raw: JSON.stringify(r),
           // Korber's own Pick Id: a roll is pickable only while it is 0 (another number = already on a WMS pick)
-          pick_id: ix.pick_id >= 0 ? (normId(g(r, 'pick_id')) || '0') : '0', wh: txt(up(g(r, 'wh'))) });
+          pick_id: ix.pick_id >= 0 ? (normId(g(r, 'pick_id')) || '0') : '0', wh: txt(up(g(r, 'wh'))), fifo: fifoIso(g(r, 'fifo')) });
       }
       rows = Array.from(seen.values());
     }
@@ -1949,9 +1995,9 @@ async function handlePick(env: Env, req: Request, p: string) {
     const item = normId(url.searchParams.get('item')), qs = up(url.searchParams.get('q'));
     const kenv = await envFor(env, url.searchParams.get('rid'));
     const rows = qs
-      ? (await kenv.DB.prepare('SELECT pallet, item, lot, qty, uom, invoice, location, wh, supplier_hu, status, pick_id FROM korber WHERE pallet = ? OR (item = ? AND (upper(lot) LIKE ? OR supplier_hu LIKE ? OR pallet LIKE ? OR upper(invoice) LIKE ?)) LIMIT 80')
+      ? (await kenv.DB.prepare('SELECT pallet, item, lot, qty, uom, invoice, location, wh, fifo, supplier_hu, status, pick_id FROM korber WHERE pallet = ? OR (item = ? AND (upper(lot) LIKE ? OR supplier_hu LIKE ? OR pallet LIKE ? OR upper(invoice) LIKE ?)) LIMIT 80')
         .bind(qs, item, `%${qs}%`, `%${qs}%`, `%${qs}%`, `%${qs}%`).all<Row>()).results
-      : (await kenv.DB.prepare('SELECT pallet, item, lot, qty, uom, invoice, location, wh, supplier_hu, status, pick_id FROM korber WHERE item = ? ORDER BY lot, supplier_hu LIMIT 200').bind(item).all<Row>()).results;
+      : (await kenv.DB.prepare('SELECT pallet, item, lot, qty, uom, invoice, location, wh, fifo, supplier_hu, status, pick_id FROM korber WHERE item = ? ORDER BY fifo IS NULL, fifo, lot, supplier_hu LIMIT 200').bind(item).all<Row>()).results;
     const rej = new Map((await env.DB.prepare('SELECT pallet, reason FROM pick_reject').all<{ pallet: string; reason: string }>()).results.map((x) => [up(x.pallet), x.reason]));
     const gate = await makeGate(kenv);
     for (const r of rows) {
@@ -1966,6 +2012,15 @@ async function handlePick(env: Env, req: Request, p: string) {
       if (rej.has(up(r.pallet))) r.blocked = `Rejected: ${rej.get(up(r.pallet))}`;
       if (!r.blocked) { const why = await gate.check(String(r.pallet), null, false); if (why) { r.blocked = why; r.available = 0; } }
       r.picks = pp.picks;
+    }
+    // ?batches= the SO line's ZMMBE batches with UR: a roll of another batch (ZROLLMGT System Batch / ZCOMENT batch) is not offered
+    const lineB = new Set(String(url.searchParams.get('batches') || '').split(',').map((x) => normId(x)).filter(Boolean));
+    if (lineB.size) for (const r of rows) {
+      if (r.blocked) continue;
+      const zb = gate.loaded ? await gate.batchOf(String(r.pallet)) : null;
+      const zcB = (await kenv.DB.prepare('SELECT DISTINCT batch FROM zcoment WHERE barcode = ?').bind(up(r.pallet)).all<Row>()).results.map((z) => normId(z.batch)).filter(Boolean);
+      const known = Array.from(new Set([normId(zb), ...zcB].filter(Boolean)));
+      if (known.length && !known.some((bt) => lineB.has(bt))) { r.blocked = `Batch ${known.join(' / ')} — not this SO line's ZMMBE batch`; r.available = 0; }
     }
     // the same cap as the save: ZROLLMGT Available Quantity (a roll with a Reserved part has less)
     if (gate.on) {
@@ -2051,6 +2106,16 @@ async function handlePick(env: Env, req: Request, p: string) {
         r.needsConfirm = miss.length > 0;
       }
       if (!r) throw new HttpError(400, `Roll ${x.pallet} is not a candidate for this line (refresh and try again).`);
+      // a roll chosen by hand (manual / manual pallet / no barcode / invoice + item): its own batch (ZROLLMGT System Batch, else its
+      // ZCOMENT barcode's batch) must be one of this SO line's ZMMBE batches with UR — a roll of another batch is never picked
+      if (!byPallet.has(r.pallet)) {
+        const lineB = new Set(cand.stock.filter((z) => Number(z.ur) > 0).map((z) => normId(z.batch)));
+        const zb = gate.loaded ? await gate.batchOf(r.pallet) : null;
+        const zcB = (await senv.DB.prepare('SELECT DISTINCT batch FROM zcoment WHERE barcode = ?').bind(up(r.pallet)).all<Row>()).results.map((z) => normId(z.batch)).filter(Boolean);
+        const known = Array.from(new Set([normId(zb), ...zcB].filter(Boolean)));
+        if (lineB.size && known.length && !known.some((bt) => lineB.has(bt)))
+          throw new HttpError(409, `Pallet ${r.pallet} is batch ${known.join(' / ')} — not a ZMMBE batch of ${line.so} / ${line.li} (${Array.from(lineB).join(', ')}). A roll of another batch cannot be picked for this SO line.`);
+      }
       // a roll chosen by hand: at most its ZROLLMGT Available Quantity too (a Reserved part in SAP is not picked)
       if (!byPallet.has(up(x.pallet)) && gate.on) { const a = (await gate.availOf([r.pallet])).get(up(r.pallet)); if (a !== undefined && a < r.available - 1e-6) r.available = Math.max(0, r3(a)); }
       // Korber Pick Id must be 0 (another number: the roll is already on a WMS pick); a rejected roll is not picked again
@@ -2080,6 +2145,25 @@ async function handlePick(env: Env, req: Request, p: string) {
     // Offsite: neither — never more than the balance, and a short pick leaves the line open.
     const left = Math.max(0, r3(Number(cand.need) - Number(cand.picked)));
     const lastP = picks[picks.length - 1];
+    // ZINSR: a lot (Vendor Batch) gives this SO line at most its Insp. Lot Quantity (less what the line already took from it)
+    {
+      const lotCap = new Map((cand.lots as Row[]).map((l) => [String(l.lot), { need: Number(l.cap ?? l.need) || 0, vb: up(l.vendor_batch), qty: Number(l.qty) || 0 }]));
+      if (lotCap.size) {
+        const used = new Map<string, number>();
+        for (const p of picks) {
+          let l0 = String(p.insp_lot ?? '').split(',').map((t) => t.trim()).find((t) => lotCap.has(t));
+          if (!l0) { const kl = up(p.lot); l0 = Array.from(lotCap).find(([, v]) => v.vb && v.vb === kl)?.[0]; if (l0) p.insp_lot = l0; }
+          if (!l0) throw new HttpError(409, `Pallet ${p.pallet}: Korber Lot Number ${p.lot ?? '–'} is not a ZINSR lot / Vendor Batch of ${line.so} / ${line.li} — it cannot be picked for this SO line.`);
+          used.set(l0, r3((used.get(l0) ?? 0) + Number(p.qty)));
+        }
+        // a full roll sent over the plan (confirmed) may go over its lot by that much only
+        const overOk = b.overConfirmed && kind === 'normal' ? Math.max(0, r3(picks.reduce((t, x) => t + Number(x.qty), 0) - left)) : 0;
+        for (const [l0, q] of used) {
+          const cap = lotCap.get(l0)!;
+          if (q > cap.need + overOk + 0.0005) throw new HttpError(400, `Lot ${l0} (Vendor Batch ${cap.vb || '–'}): ZINSR gives ${line.so} / ${line.li} ${cap.qty}${cap.qty - cap.need > 0.0005 ? `, ${r3(cap.qty - cap.need)} already picked` : ''} — only ${cap.need} more can come from it, this pick takes ${q}. Cut the roll to ${cap.need}.`);
+        }
+      }
+    }
     let closed = 0, short: number | null = null;
     if (total > left + 0.0005) {
       if (kind === 'offsite') throw new HttpError(400, `Offsite pick: ${r3(total - left)} over the plan balance of ${left}. Cut the last roll to the exact QTY.`);
@@ -2244,6 +2328,16 @@ async function handlePick(env: Env, req: Request, p: string) {
     { const lw = locBlocker(await getSettings(env))(k); if (lw) throw new HttpError(409, `Pallet ${pallet} cannot be picked — ${lw}.`); }
     if (await env.DB.prepare('SELECT 1 FROM pick_reject WHERE pallet = ?').bind(pallet).first()) throw new HttpError(409, `Pallet ${pallet} was rejected itself.`);
     { const why = await (await makeGate(senv)).check(pallet, null, false); if (why) throw new HttpError(409, `Pallet ${pallet} cannot be picked — ${why}.`); }
+    // the replacement must be of the same SO line's batch (the rejected roll's, or a ZMMBE batch of the line with UR)
+    {
+      const lkey = String(reqRow.line ?? '').split('|').slice(0, 3).join('|');
+      const okB = new Set([...String(rj.batch ?? '').split(','), ...(await senv.DB.prepare("SELECT batch FROM stock WHERE src = 'zmmbe' AND key = ? AND ur > 0").bind(lkey).all<Row>()).results.map((z) => String(z.batch ?? ''))].map((x) => normId(x)).filter(Boolean));
+      const g2 = await makeGate(senv);
+      const zb = g2.loaded ? await g2.batchOf(pallet) : null;
+      const zcB = (await senv.DB.prepare('SELECT DISTINCT batch FROM zcoment WHERE barcode = ?').bind(pallet).all<Row>()).results.map((z) => normId(z.batch)).filter(Boolean);
+      const known = Array.from(new Set([normId(zb), ...zcB].filter(Boolean)));
+      if (okB.size && known.length && !known.some((bt) => okB.has(bt))) throw new HttpError(409, `Pallet ${pallet} is batch ${known.join(' / ')} — not the batch of ${rj.so} / ${rj.li} (${Array.from(okB).join(', ')}).`);
+    }
     const pp = await palletPicks(env, pallet);
     const base = pp.base ?? Number(k.qty);
     const avail = Math.max(0, r3(base - pp.before));
@@ -2617,7 +2711,7 @@ async function manualCandidate(env: Env, pallet: string, m: ManualFor, lineItem:
   const before = pp.before;
   return {
     pallet: String(k.pallet), item: String(k.item), lot: k.lot as string | null, supplier_hu: k.supplier_hu as string | null, location: k.location as string | null, uom: k.uom as string | null,
-    invoice: k.invoice as string | null, actual_qty: Number(k.qty), base_qty: base, picked_before: before, available: Math.max(0, r3(base - before)), roll_qty: Number(m.roll_qty ?? k.qty),
+    invoice: k.invoice as string | null, fifo: (k.fifo as string | null) ?? null, actual_qty: Number(k.qty), base_qty: base, picked_before: before, available: Math.max(0, r3(base - before)), roll_qty: Number(m.roll_qty ?? k.qty),
     shade: m.shade ?? null, insp_lots: m.lot ? [String(m.lot)] : [], batches: m.batch ? [String(m.batch)] : [], checks, warnings, needsConfirm: true, raw: k.raw as string | null,
     picks: pp.picks,
   };
@@ -2625,6 +2719,8 @@ async function manualCandidate(env: Env, pallet: string, m: ManualFor, lineItem:
 
 interface Candidate {
   pallet: string; item: string; lot: string | null; supplier_hu: string | null; location: string | null; uom: string | null; invoice: string | null;
+  /** Korber Fifo Date (yyyy-mm-dd): rolls chosen by hand are listed oldest first */
+  fifo?: string | null;
   actual_qty: number; base_qty: number; picked_before: number; available: number; roll_qty: number; shade: string | null;
   insp_lots: string[]; batches: string[]; checks: Record<string, boolean | null>; warnings: string[]; needsConfirm: boolean; raw: string | null;
   picks: PalletPick[];
@@ -2754,7 +2850,11 @@ async function makeGate(env: Env) {
 async function pickCandidates(env: Env, week: string, key: string, date: string, line: Row, srid: string = week) {
   const steps: string[] = [];
   const lineId = `${key}|${date}`;
-  const stock = (await env.DB.prepare("SELECT plant, sloc, so_plant, so, li, material, batch, style, ur, qi, block, assigned, total FROM stock WHERE src = 'zmmbe' AND key = ? ORDER BY batch").bind(key).all<Row>()).results;
+  // the warehouse stock of the line (ZMMBE): plant storage locations (40, 70, 75) are ALRADY SEND, not UR to pick;
+  // UR = Total − SO QI − SO Blocked − Assigned (an Assigned Qty is never picked)
+  const plantLocs = new Set(((await getSettings(env)).plantSlocs || []).map((x) => up(normId(x))));
+  const stock = (await env.DB.prepare("SELECT plant, sloc, so_plant, so, li, material, batch, style, ur, qi, block, assigned, total FROM stock WHERE src = 'zmmbe' AND key = ? ORDER BY batch").bind(key).all<Row>()).results
+    .filter((x) => !plantLocs.has(up(normId(x.sloc))));
   const pickedLine = Number((await env.DB.prepare('SELECT COALESCE(SUM(qty), 0) q FROM picks WHERE week = ? AND line = ? AND cancelled_at IS NULL').bind(week, lineId).first<{ q: number }>())?.q ?? 0);
   const urTotal = r3(stock.reduce((t, x) => t + Math.max(0, Number(x.ur) || 0), 0));
   const planQty = r3(Number(line.qty));
@@ -2812,14 +2912,27 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
   }
   // every ZINSR lot of this SO + Line Item + Material (its batches with UR)
   const lineLots = new Set(lotsByBatch.flatMap((x) => x.z.map((l) => String(l.lot))));
+  // a lot gives this SO line at most its ZINSR Insp. Lot Quantity: what this line already picked from it comes off
+  const pickedLot = new Map<string, number>();
+  for (const p of (await env.DB.prepare('SELECT insp_lot, qty FROM picks WHERE week = ? AND line = ? AND cancelled_at IS NULL').bind(week, lineId).all<Row>()).results) {
+    const l0 = String(p.insp_lot ?? '').split(',').map((x) => x.trim()).find((x) => lineLots.has(x));
+    if (l0) pickedLot.set(l0, r3((pickedLot.get(l0) ?? 0) + Number(p.qty)));
+  }
   for (const { st, z } of lotsByBatch) {
     let batchLeft = Math.min(left, Number(st.ur));
     for (const x of z) {
       if (lots.some((l) => l.lot === x.lot)) continue;
-      const take = r3(Math.max(0, Math.min(batchLeft, Number(x.qty) || 0)));
-      lots.push({ ...x, zmmbe_ur: st.ur, zmmbe_sloc: st.sloc, lot_need: take, qty_ok: true });
+      const cap = Math.max(0, r3((Number(x.qty) || 0) - (pickedLot.get(String(x.lot)) ?? 0)));
+      const take = r3(Math.max(0, Math.min(batchLeft, cap)));
+      lots.push({ ...x, zmmbe_ur: st.ur, zmmbe_sloc: st.sloc, lot_need: take, lot_picked: pickedLot.get(String(x.lot)) ?? 0, qty_ok: true });
       batchLeft = r3(batchLeft - take); left = r3(left - take);
     }
+  }
+  // ZINSR lots of this SO line cover less than the QTY to pick: only what the lots have is picked (a Vendor Batch never gives more)
+  if (lots.length && left > 1e-9) {
+    const lotsSum = r3(lots.reduce((t, l) => t + Number(l.lot_need), 0));
+    steps.push(`ZINSR lots of this SO / LI give ${lotsSum} more (${lots.map((l) => `lot ${l.lot} · ${l.vendor_batch ?? '–'}: ${l.qty}${Number(l.lot_picked) ? ` − ${l.lot_picked} picked` : ''}`).join(', ')}) — ${left} of the QTY to pick has no ZINSR lot and is not picked.`);
+    need = r3(pickedLine + lotsSum);
   }
   const rolls = new Map<string, Candidate>();
   const lotInfo: Row[] = [];
@@ -2827,7 +2940,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
   const nobarcode: Row[] = [];
   const korberBase = async (k: Row, lot: Row, extra: Partial<Candidate>): Promise<Candidate> => ({
     pallet: String(k.pallet), item: String(k.item), lot: k.lot as string | null, supplier_hu: k.supplier_hu as string | null, location: k.location as string | null, uom: k.uom as string | null,
-    invoice: k.invoice as string | null, actual_qty: Number(k.qty), base_qty: Number(k.qty), picked_before: 0, available: Number(k.qty), roll_qty: Number(k.qty),
+    invoice: k.invoice as string | null, fifo: (k.fifo as string | null) ?? null, actual_qty: Number(k.qty), base_qty: Number(k.qty), picked_before: 0, available: Number(k.qty), roll_qty: Number(k.qty),
     shade: null, insp_lots: [String(lot.lot)], batches: [String(lot.batch)], checks: {}, warnings: [], needsConfirm: false, raw: k.raw as string | null, picks: [],
     parts: [{ batch: String(lot.batch), lot: String(lot.lot), qty: Number(k.qty) }], ...extra,
   });
@@ -2841,7 +2954,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
   let notPickable = 0, rejectedSkip = 0;
   for (const lot of lots) {
     const rows0 = (await env.DB.prepare('SELECT * FROM zcoment WHERE lot = ? ORDER BY sys_roll, roll_no').bind(lot.lot).all<Row>()).results;
-    lotInfo.push({ lot: lot.lot, batch: lot.batch, qty: lot.qty, need: lot.lot_need, ur: lot.zmmbe_ur, qty_ok: true, invoice: lot.invoice, po: lot.po, vendor_batch: lot.vendor_batch, sloc: lot.sloc, rolls: rows0.length, roll_sum: 0, noShade: !rows0.length });
+    lotInfo.push({ lot: lot.lot, batch: lot.batch, qty: lot.qty, need: lot.lot_need, picked: lot.lot_picked, cap: Math.max(0, r3((Number(lot.qty) || 0) - (Number(lot.lot_picked) || 0))), ur: lot.zmmbe_ur, qty_ok: true, invoice: lot.invoice, po: lot.po, vendor_batch: lot.vendor_batch, sloc: lot.sloc, rolls: rows0.length, roll_sum: 0, noShade: !rows0.length });
     // the Korber rolls of this lot's invoice + item (must), Pick Id 0
     const base0 = (await env.DB.prepare(`SELECT * FROM korber WHERE item = ? AND ${PICKABLE}`).bind(normId(lot.material)).all<Row>()).results.filter((k) => !lot.invoice || invRoot(k.invoice) === invRoot(lot.invoice));
     // ZROLLMGT check: a roll without a ZCOMENT barcode is picked only when its Korber Pallet is in ZROLLMGT at the bin
@@ -3173,7 +3286,7 @@ async function nbOptions(env: Env, ks: Row[], lot: Row, sh: Row | null, limit = 
     const pp = await palletPicks(env, k.pallet);
     const base = pp.base ?? Number(k.qty), before = pp.before;
     const score = (checks.lot ? 40 : 0) + (checks.hu ? 30 : 0) + (checks.po ? 20 : 0) + (checks.qty ? 5 : 0) + (base - before > 1e-9 ? 3 : 0);
-    out.push({ pallet: k.pallet, item: k.item, lot: k.lot, supplier_hu: k.supplier_hu, qty: k.qty, uom: k.uom, invoice: k.invoice, location: k.location, status: k.status,
+    out.push({ pallet: k.pallet, item: k.item, lot: k.lot, supplier_hu: k.supplier_hu, qty: k.qty, uom: k.uom, invoice: k.invoice, location: k.location, status: k.status, fifo: k.fifo ?? null,
       picked_before: before, available: Math.max(0, r3(base - before)), checks, exact: !!(checks.lot && checks.hu), score, picks: pp.picks });
   }
   const used = out.filter((o) => Number(o.picked_before) > 0 && Number(o.available) > 1e-9);

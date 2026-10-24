@@ -899,3 +899,12 @@ tr.on-hold td { background: color-mix(in srgb, #ef4444 9%, transparent); }
 @media (max-width: 640px) { .brand-text { font-size: 14px; } }
 .brand .brand-text { font-size: 14px; letter-spacing: .01em; }
 .brand { gap: 8px; }
+
+/* plan report KPI cards */
+.kpi.kpi-btn { text-align: left; font: inherit; color: inherit; cursor: pointer; }
+.kpi.kpi-btn:disabled { cursor: default; }
+.kpi.em { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+.kpi.em .v { color: var(--accent); }
+.kpi.warn .v { color: var(--warn, #b7791f); }
+.kpi.bad .v { color: var(--bad, #e03131); }
+@media (min-width: 1100px) { .kpis.compact { grid-template-columns: repeat(6, minmax(0, 1fr)); } }

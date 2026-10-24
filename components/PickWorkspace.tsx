@@ -415,6 +415,11 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
 const CHECK_LABELS: [string, string][] = [['barcode', 'Barcode = Pallet'], ['lot', 'Vendor Batch = Lot Number'], ['hu', 'Vendor Roll No = Supplier Hu'], ['invoice', 'Invoice'], ['po', 'Purchasing Document = Po Number'], ['item', 'Item'], ['qty', 'ZCOMENT Roll qty = Korber Actual Qty (Korber is used)']];
 const checkText = (c: Record<string, boolean | null>) => CHECK_LABELS.map(([k, l]) => `${c[k] === true ? '✓' : c[k] === false ? '✗' : '–'} ${l}`).join('\n');
 const r3 = (n: number) => Math.round(n * 1000) / 1000;
+/** FIFO: rolls chosen by hand are listed oldest Korber Fifo Date first (no date last); a pickable roll before a used-up one */
+const fifoKey = (x: { fifo?: string | null }) => x.fifo || '9999-12-31';
+const byFifo = <T extends { fifo?: string | null; available: number; blocked?: string }>(a: T, b: T) =>
+  Number(b.available > 1e-9 && !b.blocked) - Number(a.available > 1e-9 && !a.blocked) || fifoKey(a).localeCompare(fifoKey(b));
+const fifoText = (d?: string | null) => (d ? d.split('-').reverse().join('-') : '–');
 /** the reports a line reads: a week plan line → its week + plant; a Pick → the Pick */
 const lineScope = (week: string, plant: string | null | undefined) => (/^\d{4}-W\d{2}$/.test(week) && (plant || '').trim() ? `${week}@${(plant || '').trim().toUpperCase().replace(/\s+/g, '')}` : week);
 
@@ -460,9 +465,14 @@ function autoPlan(c: Candidates, withPool = false): { sel: Sel; last: LastRoll |
   const anySuggested = c.rolls.some((r) => r.suggested);
   const avail = c.rolls.filter((r) => r.available > 1e-9 && (!r.pool || (withPool && (!anySuggested || r.suggested))));
   let last: LastRoll | null = null;
+  // a ZINSR lot (Vendor Batch) gives this SO line at most its own QTY (less what it already gave): never more from one lot
+  const lotLeft = new Map((c.lots || []).filter((l) => (l.cap ?? l.need) != null).map((l) => [String(l.lot), Number(l.cap ?? l.need)]));
+  const lotsOf = (r: Candidate) => Array.from(new Set((r.parts?.length ? r.parts.map((p) => p.lot) : r.insp_lots).map(String))).filter((l) => lotLeft.has(l));
+  const room = (r: Candidate) => { const ls = lotsOf(r); return ls.length ? r3(ls.reduce((t, l) => t + (lotLeft.get(l) ?? 0), 0)) : Infinity; };
   const take = (r: Candidate, q: number, need: Map<string, number> | null) => {
     sel[r.pallet] = { qty: String(r3(q)) };
     left = r3(left - q);
+    { let rest = q; for (const l of lotsOf(r)) { if (rest <= 1e-9) break; const t = Math.min(lotLeft.get(l) ?? 0, rest); lotLeft.set(l, r3((lotLeft.get(l) ?? 0) - t)); rest = r3(rest - t); } }
     if (need) {
       let rest = q;
       for (const p of rollParts(r)) { if (rest <= 1e-9) break; const t = Math.min(p.qty, rest); need.set(p.batch, Math.max(0, r3((need.get(p.batch) ?? 0) - t))); rest = r3(rest - t); }
@@ -478,36 +488,41 @@ function autoPlan(c: Candidates, withPool = false): { sel: Sel; last: LastRoll |
       // rolls whose QTY adds up to exactly what the batch needs: no cut at all
       {
         const nb0 = Math.min(need.get(batch) ?? 0, left);
-        const whole = rs().filter((r) => partOf(r) >= r.available - 1e-9 && r.available <= nb0 + 1e-9);
+        const whole = rs().filter((r) => partOf(r) >= r.available - 1e-9 && r.available <= nb0 + 1e-9 && r.available <= room(r) + 1e-9);
         const exact = exactSubset(whole.map((r) => ({ id: r.pallet, q: r.available })), nb0);
         if (exact) { for (const r of whole) if (exact.has(r.pallet)) take(r, r.available, need); continue; }
       }
       for (const r of rs()) {
         const nb = need.get(batch) ?? 0;
         if (nb <= 1e-9 || left <= 1e-9) break;
-        if (partOf(r) <= nb + 1e-9 && r.available <= left + 1e-9) take(r, r.available, need);
+        if (partOf(r) <= nb + 1e-9 && r.available <= left + 1e-9 && r.available <= room(r) + 1e-9) take(r, r.available, need);
       }
       const nb = Math.min(need.get(batch) ?? 0, left);
       if (nb > 1e-9) {
         // the roll to cut: one already cut (no new cut roll on the shelf), else the smallest that covers the rest
-        const fit = rs().filter((r) => partOf(r) >= nb - 1e-9).sort((a, b) => Number(b.picked_before > 0) - Number(a.picked_before > 0) || partOf(a) - partOf(b) || a.available - b.available)[0];
+        const fit = rs().filter((r) => partOf(r) >= nb - 1e-9 && room(r) >= nb - 1e-9).sort((a, b) => Number(b.picked_before > 0) - Number(a.picked_before > 0) || partOf(a) - partOf(b) || a.available - b.available)[0];
         if (fit) { last = { pallet: fit.pallet, hu: fit.supplier_hu, full: r3(fit.available), cut: r3(nb) }; take(fit, nb, need); }
       }
     }
   }
   // whatever the batches do not explain: any matched roll, full rolls first (an exact set first: no cut), then the best fit
   if (left > 1e-9) {
-    const rest = avail.filter((r) => !sel[r.pallet] && r.available <= left + 1e-9);
+    const rest = avail.filter((r) => !sel[r.pallet] && r.available <= left + 1e-9 && r.available <= room(r) + 1e-9);
     const exact = exactSubset(rest.map((r) => ({ id: r.pallet, q: r.available })), left);
     if (exact) for (const r of rest) if (exact.has(r.pallet)) take(r, r.available, null);
   }
   for (const r of [...avail].sort((a, b) => Number(b.picked_before > 0) - Number(a.picked_before > 0))) {
     if (left <= 1e-9) break;
-    if (!sel[r.pallet] && r.available <= left + 1e-9) take(r, r.available, null);
+    if (!sel[r.pallet] && r.available <= left + 1e-9 && r.available <= room(r) + 1e-9) take(r, r.available, null);
   }
   if (left > 1e-9) {
-    const fit = avail.filter((r) => !sel[r.pallet] && r.available >= left).sort((a, b) => Number(b.picked_before > 0) - Number(a.picked_before > 0) || a.available - b.available)[0];
+    const fit = avail.filter((r) => !sel[r.pallet] && r.available >= left && room(r) >= left - 1e-9).sort((a, b) => Number(b.picked_before > 0) - Number(a.picked_before > 0) || a.available - b.available)[0];
     if (fit) { last = { pallet: fit.pallet, hu: fit.supplier_hu, full: r3(fit.available), cut: left }; take(fit, left, null); }
+    else {
+      // no roll covers the rest inside its lot: cut the one with the most room in its lot (only what that lot still gives)
+      const f2 = avail.filter((r) => !sel[r.pallet] && room(r) > 1e-9).sort((a, b) => room(b) - room(a))[0];
+      if (f2) { const q = r3(Math.min(left, room(f2), f2.available)); if (q > 1e-9) { if (q < f2.available - 1e-9) last = { pallet: f2.pallet, hu: f2.supplier_hu, full: r3(f2.available), cut: q }; take(f2, q, null); } }
+    }
   }
   return { sel, last };
 }
@@ -596,10 +611,28 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
     setKindS(k); try { localStorage.setItem('mas-pick-kind', k); } catch { /* private mode */ }
     if (k === 'offsite') { if (lastMode !== 'cut') setLastTo('cut'); setCloseShort(false); setOverOk(false); }
   };
+  // what a ZINSR lot (Vendor Batch) still gives this SO line, less the rolls of that lot already ticked
+  const lotRoom = (r: Candidate, n: Sel) => {
+    const caps = new Map((c?.lots || []).filter((l) => (l.cap ?? l.need) != null).map((l) => [String(l.lot), Number(l.cap ?? l.need)]));
+    const ls = Array.from(new Set((r.parts?.length ? r.parts.map((p) => p.lot) : r.insp_lots).map(String))).filter((l) => caps.has(l));
+    if (!ls.length) return Infinity;
+    let room = ls.reduce((t, l) => t + (caps.get(l) ?? 0), 0);
+    for (const [p, x] of Object.entries(n)) {
+      const o = c?.rolls.find((y) => y.pallet === p);
+      if (o && Array.from(new Set((o.parts?.length ? o.parts.map((q) => q.lot) : o.insp_lots).map(String))).some((l) => ls.includes(l))) room -= Number(x.qty) || 0;
+    }
+    return Math.max(0, r3(room));
+  };
   const toggle = (r: Candidate) => setSel((s) => {
     const n = { ...s };
     if (n[r.pallet]) delete n[r.pallet];
-    else { const left = r3(remaining - Object.values(n).reduce((t, x) => t + (Number(x.qty) || 0), 0)); n[r.pallet] = { qty: String(r3(left > 1e-9 ? Math.min(r.available, left) : r.available)) }; }
+    else {
+      const left = r3(remaining - Object.values(n).reduce((t, x) => t + (Number(x.qty) || 0), 0));
+      const want = r3(left > 1e-9 ? Math.min(r.available, left) : r.available);
+      // never more than the roll's lot still gives this SO line
+      n[r.pallet] = { qty: String(r3(Math.min(want, lotRoom(r, n)))) };
+      if (!(Number(n[r.pallet].qty) > 0)) delete n[r.pallet];
+    }
     return n;
   });
   // manual pick is only for the balance the matched rolls cannot cover
@@ -722,7 +755,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
             <div className="pk-chain">
               {c.lots.map((l) => (
                 <span key={l.lot} className={`pk-lot ${l.qty_ok ? '' : 'warn'}`} title={`Batch ${l.batch}${l.sloc ? ' · St Loc ' + l.sloc : ''}${l.invoice ? ' · invoice ' + l.invoice : ''}`}>
-                  Lot <b>{l.lot}</b> · batch {l.batch} · {fmtQty(l.qty)} {l.qty_ok ? '= UR ✓' : `≠ UR ${fmtQty(l.ur)}`} · {l.direct ? `${l.direct} Korber roll${l.direct === 1 ? '' : 's'} (ZINR → Korber)` : l.noShade ? 'no Shade Report' : `${l.rolls} roll${l.rolls === 1 ? '' : 's'}${l.via ? ' (by batch)' : ''}`}
+                  Lot <b>{l.lot}</b>{l.vendor_batch ? <> ({l.vendor_batch})</> : null} · batch {l.batch} · {fmtQty(l.qty)} {l.qty_ok ? '= UR ✓' : `≠ UR ${fmtQty(l.ur)}`}{Number(l.picked) > 0 ? <> · <span title="ZINSR QTY of this SO line less what it already took from this lot">{fmtQty(Number(l.picked))} picked, {fmtQty(Number(l.cap ?? 0))} left</span></> : null} · {l.direct ? `${l.direct} Korber roll${l.direct === 1 ? '' : 's'} (ZINR → Korber)` : l.noShade ? 'no Shade Report' : `${l.rolls} roll${l.rolls === 1 ? '' : 's'}${l.via ? ' (by batch)' : ''}`}
                 </span>
               ))}
               {!c.lots.length && <span className="pk-lot warn">No ZINR lot matched</span>}
@@ -745,15 +778,15 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
               {!c.rolls.length ? <p className="muted">No Korber roll matched on Barcode for this line.{c.nobarcode?.some((m) => m.invChoice) ? ' Choose rolls under “Invoice + Item match” below.' : c.nobarcode?.length ? ' Rolls without a barcode: choose them under “No Barcode” below.' : c.manual?.length ? ' See “Not matched” below.' : ' Check that ZINR, ZCOMENT VIEW and Korber are uploaded and current.'}</p> : (
                 <div className="table-wrap" style={{ maxHeight: 360 }}>
                   <table className="mini pk-table">
-                    <thead><tr><th /><th>Supplier HU</th><th>Pallet</th><th>Location</th><th>Shade</th><th className="n">Available</th><th className="n">Pick qty</th><th>Match</th></tr></thead>
-                    <tbody>{[...open, ...gone].map((r) => {
+                    <thead><tr><th /><th>Supplier HU</th><th>Pallet</th><th>Location</th><th title="Korber Fifo Date — oldest first">FIFO</th><th>Shade</th><th className="n">Available</th><th className="n">Pick qty</th><th>Match</th></tr></thead>
+                    <tbody>{[...[...open].sort(byFifo), ...gone].map((r) => {
                       const s = sel[r.pallet], isGone = r.available <= 1e-9, isLast = lastOn && last!.pallet === r.pallet;
                       return (
                         <tr key={r.pallet} className={`${s ? 'picked' : ''} ${isGone ? 'gone' : ''}`} onClick={(e) => { if (!isGone && (e.target as HTMLElement).tagName !== 'INPUT') toggle(r); }}>
                           <td><input type="checkbox" disabled={isGone} checked={!!s} onChange={() => toggle(r)} aria-label={`Pick ${r.pallet}`} /></td>
                           <td><b>{r.supplier_hu}</b></td>
                           <td className="mono">{r.pallet}{r.borrowed && <span className="pill info" style={{ marginLeft: 4 }} title={r.qtyNote || ''}>barcode from same roll</span>}{r.via && <span className="pill accent" style={{ marginLeft: 4 }} title={r.byHu ? `ZCOMENT Barcode Number ${r.barcode} is not a Korber pallet — found by Supplier Hu ${r.supplier_hu} = Vendor Roll No, with the same Lot, Invoice and Po` : `ZCOMENT Barcode Number ${r.barcode} — the same roll number in Korber under pallet ${r.via}`}>{r.byHu ? `roll no ${r.supplier_hu} · barcode ${r.barcode}` : `barcode ${r.barcode}`}</span>}
-                            {r.picks.length > 0 && <div className="pk-prev">{isGone ? 'Picked in full' : `Cut roll · ${fmtQty(r.available)} left of ${fmtQty(r.base_qty)}`} — {r.picks.map(pickNote).join(' | ')}</div>}</td><td>{r.location}</td><td><b>{r.shade}</b></td>
+                            {r.picks.length > 0 && <div className="pk-prev">{isGone ? 'Picked in full' : `Cut roll · ${fmtQty(r.available)} left of ${fmtQty(r.base_qty)}`} — {r.picks.map(pickNote).join(' | ')}</div>}</td><td>{r.location}</td><td className="small">{fifoText(r.fifo)}</td><td><b>{r.shade}</b></td>
                           <td className="n">{isGone ? <span className="pill mute" title={r.picks.map(pickNote).join('\n')}>picked</span>
                             : <>{fmtQty(r.available)}{r.picked_before > 0 && <span className="pill accent" style={{ marginLeft: 4 }} title={`Cut before: ${r.picks.map(pickNote).join(' | ')}`}>balance</span>}</>}</td>
                           <td className="n">{s ? <span className="pk-qty">
@@ -829,14 +862,14 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
                   <h3>Invoice + Item match <span className="pill info">{m.options.length}</span> <span className="muted small">lot {m.lot} · batch {m.batch} · Lot Number {m.vendor_batch || '–'} · invoice {m.invoice || '–'}{m.po ? ` · Po ${m.po}` : ''} · lot QTY {fmtQty(m.roll_qty)}{mine.length ? ` · ${mine.length} ticked = ${fmtQty(tot)}` : ''}</span></h3>
                   <p className="sub" style={{ margin: '0 0 6px' }}>This inspection lot has no rolls in ZCOMENT VIEW. Korber rolls of the <b>same Invoice + Item</b> with <b>another Lot Number</b>{m.po ? <> — <b>Po</b> matches first</> : ''}{''} (in ZROLLMGT at the bin, not another roll&apos;s barcode). Tick the rolls to pick for this lot; each needs “I checked” because its Lot Number differs.</p>
                   <div className="table-wrap pk-tbl" style={{ maxHeight: 280 }}><table className="mini">
-                    <thead><tr><th /><th>Pallet</th><th>Korber Lot Number</th><th>Supplier HU</th><th>Location</th><th>Po</th><th className="n">Available</th><th className="n">Pick qty</th></tr></thead>
-                    <tbody>{m.options.map((o) => {
+                    <thead><tr><th /><th>Pallet</th><th>Korber Lot Number</th><th>Supplier HU</th><th>Location</th><th title="Korber Fifo Date — oldest first">FIFO</th><th>Po</th><th className="n">Available</th><th className="n">Pick qty</th></tr></thead>
+                    <tbody>{[...m.options].sort(byFifo).map((o) => {
                       const s0 = sel[o.pallet], mineSel = s0?.nb === m, other = !!s0 && !mineSel, gone = o.available <= 1e-9;
                       return (
                         <tr key={o.pallet} className={`${mineSel ? 'picked' : ''} ${gone ? 'gone' : ''}`} onClick={(e) => { if (!gone && !other && (e.target as HTMLElement).tagName !== 'INPUT') toggleInv(m, o); }}>
                           <td><input type="checkbox" checked={mineSel} disabled={gone || other} onChange={() => toggleInv(m, o)} aria-label={`Pick ${o.pallet}`} /></td>
                           <td className="mono">{o.pallet}{o.picked_before > 0 && <div className="pk-prev">{gone ? 'Picked in full' : `Cut roll · ${fmtQty(o.available)} left`} — {(o.picks || []).map(pickNote).join(' | ')}</div>}</td>
-                          <td>{o.lot ?? '–'}</td><td>{o.supplier_hu ?? '–'}</td><td>{o.location ?? ''}</td>
+                          <td>{o.lot ?? '–'}</td><td>{o.supplier_hu ?? '–'}</td><td>{o.location ?? ''}</td><td className="small">{fifoText(o.fifo)}</td>
                           <td>{o.checks.po === null ? '–' : <span className={`pill ${o.checks.po ? 'ok' : 'warn'}`}>{o.checks.po ? '✓ Po' : '✗ Po'}</span>}</td>
                           <td className="n">{gone ? <span className="pill mute">picked</span> : other ? <span className="pill mute">chosen elsewhere</span> : fmtQty(o.available)}</td>
                           <td className="n">{mineSel ? <input className="as-search" type="number" step="0.001" min="0.001" max={o.available} style={{ width: 92 }} value={s0.qty} onClick={(e) => e.stopPropagation()}
@@ -865,11 +898,11 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
                         <td>{m.done ? <span className="pill mute">picked · {m.options[0]?.pallet}</span> : <>
                           <select className="as-search nb-select" value={chosen?.[0] ?? ''} onChange={(e) => chooseNb(m, e.target.value)} aria-label={`Korber roll for ${m.roll_no || 'roll'}`}>
                             <option value="">— choose a Korber roll ({m.options.length} match{m.options.length === 1 ? '' : 'es'}) —</option>
-                            {m.options.map((o) => {
+                            {[...m.options].sort(byFifo).map((o) => {
                               const miss = nbMiss(o, m);
                               const ok = (['lot', 'hu', 'invoice', 'po', 'qty'] as const).filter((k) => o.checks[k]).map((k) => ({ lot: 'Lot', hu: 'HU', invoice: 'Inv', po: 'Po', qty: 'Qty' })[k]);
                               return <option key={o.pallet} value={o.pallet} disabled={o.available <= 1e-9 || takenElsewhere(o.pallet)}>
-                                {o.pallet} · Lot {o.lot ?? '–'} · HU {o.supplier_hu ?? '–'} · {fmtQty(o.available)}{o.picked_before > 0 ? ` left (picked ${(o.picks || []).map((p) => `${p.qty} · ${p.plan || p.day}`).join(', ')})` : ''} · {o.location ?? ''} · {o.available <= 1e-9 ? 'picked' : takenElsewhere(o.pallet) ? 'chosen for another roll' : `✓ ${ok.join(' ')}${miss.length ? ` · ✗ ${miss.map((k) => ({ lot: 'Lot', hu: 'HU', qty: 'Qty' })[k]).join(' ')}` : ''}`}
+                                {o.pallet} · FIFO {fifoText(o.fifo)} · Lot {o.lot ?? '–'} · HU {o.supplier_hu ?? '–'} · {fmtQty(o.available)}{o.picked_before > 0 ? ` left (picked ${(o.picks || []).map((p) => `${p.qty} · ${p.plan || p.day}`).join(', ')})` : ''} · {o.location ?? ''} · {o.available <= 1e-9 ? 'picked' : takenElsewhere(o.pallet) ? 'chosen for another roll' : `✓ ${ok.join(' ')}${miss.length ? ` · ✗ ${miss.map((k) => ({ lot: 'Lot', hu: 'HU', qty: 'Qty' })[k]).join(' ')}` : ''}`}
                               </option>;
                             })}
                           </select>
@@ -913,7 +946,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
             {(c.manual?.length ?? 0) > 0 && shortfall <= 1e-9 && (
               <p className="muted small" style={{ margin: 0 }}>{c.manual!.length} shade-report roll{c.manual!.length === 1 ? ' does' : 's do'} not match a Korber roll, but the matched rolls cover the line — nothing to pick by hand.</p>
             )}
-            {choosing && <KorberChooser item={line.item} rid={lineScope(week, line.plant)} roll={choosing} taken={Object.keys(sel).filter((p) => sel[p].manual !== choosing)} mine={chosenFor(choosing).map(([p]) => p)}
+            {choosing && <KorberChooser item={line.item} rid={lineScope(week, line.plant)} batches={(c?.stock || []).filter((z) => Number(z.ur) > 0).map((z) => String(z.batch))} roll={choosing} taken={Object.keys(sel).filter((p) => sel[p].manual !== choosing)} mine={chosenFor(choosing).map(([p]) => p)}
               chosenQty={chosenFor(choosing).reduce((t, [, x]) => t + (Number(x.qty) || 0), 0)} open={manualLeft} rollOpen={rollLeft(choosing)} onUse={(k) => useKorber(choosing, k)} onClose={() => setChoosing(null)} />}
 
             {(freeOpen || freeSel.length > 0) && (
@@ -932,7 +965,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
                     </tr>
                   ))}</tbody>
                 </table></div>}
-                {freeOpen ? <KorberChooser item={line.item} rid={lineScope(week, line.plant)} roll={FREE} title="Manual pallet for the shortage" taken={Object.keys(sel).filter((p) => sel[p].manual !== FREE)} mine={freeSel.map(([p]) => p)}
+                {freeOpen ? <KorberChooser item={line.item} rid={lineScope(week, line.plant)} batches={(c?.stock || []).filter((z) => Number(z.ur) > 0).map((z) => String(z.batch))} roll={FREE} title="Manual pallet for the shortage" taken={Object.keys(sel).filter((p) => sel[p].manual !== FREE)} mine={freeSel.map(([p]) => p)}
                   chosenQty={freeSel.reduce((t, [, x]) => t + (Number(x.qty) || 0), 0)} open={short} onUse={useFree} onClose={() => setFreeOpen(false)} />
                   : short > 1e-9 && <button className="btn sm" onClick={() => setFreeOpen(true)}>+ Add another pallet</button>}
               </div>
@@ -982,7 +1015,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
  * Korber rolls for a shade-report roll that was not matched. Several can be used (one roll / lot QTY made up of
  * several pallets): Use adds one and the list stays open; a used one shows Remove.
  */
-function KorberChooser({ item, rid, roll, title, taken, mine = [], chosenQty = 0, open = Infinity, rollOpen = Infinity, onUse, onClose }: { item: string; rid?: string; roll: ManualRoll; title?: string; taken: string[]; mine?: string[]; chosenQty?: number; open?: number; rollOpen?: number; onUse: (k: KorberRow) => void; onClose: () => void }) {
+function KorberChooser({ item, rid, batches, roll, title, taken, mine = [], chosenQty = 0, open = Infinity, rollOpen = Infinity, onUse, onClose }: { item: string; rid?: string; /** the SO line's ZMMBE batches with UR: a roll of another batch is not offered */ batches?: string[]; roll: ManualRoll; title?: string; taken: string[]; mine?: string[]; chosenQty?: number; open?: number; rollOpen?: number; onUse: (k: KorberRow) => void; onClose: () => void }) {
   const full = open <= 1e-9 || rollOpen <= 1e-9;
   const first = roll.vendor_batch || '';
   const [q, setQ] = useState(first);
@@ -990,10 +1023,11 @@ function KorberChooser({ item, rid, roll, title, taken, mine = [], chosenQty = 0
   const [wide, setWide] = useState(false);
   useEffect(() => {
     const t = setTimeout(() => {
-      const get = (qq: string) => api<{ rows: KorberRow[] }>(`/api/pick/korber?item=${encodeURIComponent(item)}&q=${encodeURIComponent(qq)}${rid ? '&rid=' + encodeURIComponent(rid) : ''}`).then((r) => r.rows);
+      const get = (qq: string) => api<{ rows: KorberRow[] }>(`/api/pick/korber?item=${encodeURIComponent(item)}&q=${encodeURIComponent(qq)}${rid ? '&rid=' + encodeURIComponent(rid) : ''}${batches?.length ? '&batches=' + encodeURIComponent(batches.join(',')) : ''}`).then((r) => r.rows);
       const ok = (k: KorberRow) => !k.blocked && k.available > 1e-9;
       // usable rolls first; the roll's own vendor batch has none → every roll of the item
-      const sort = (rs: KorberRow[]) => [...rs].sort((a, b) => Number(ok(b)) - Number(ok(a)));
+      // pickable first, then FIFO: the oldest Korber Fifo Date on top, the newest at the bottom
+      const sort = (rs: KorberRow[]) => [...rs].sort((a, b) => Number(ok(b)) - Number(ok(a)) || fifoKey(a).localeCompare(fifoKey(b)));
       void (async () => {
         try {
           let rs = await get(q.trim());
@@ -1004,7 +1038,7 @@ function KorberChooser({ item, rid, roll, title, taken, mine = [], chosenQty = 0
       })();
     }, 250);
     return () => clearTimeout(t);
-  }, [item, q, rid, first]);
+  }, [item, q, rid, first, batches?.join(',')]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <div className="kchooser">
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -1017,12 +1051,12 @@ function KorberChooser({ item, rid, roll, title, taken, mine = [], chosenQty = 0
       <div className="table-wrap" style={{ maxHeight: 300, marginTop: 6 }}>
         {rows === null ? <Loader label="Searching Korber…" /> : !rows.length ? <p className="muted">No Korber roll found{q ? ` for “${q}”` : ''}.</p> : (
           <table className="mini">
-            <thead><tr><th>Pallet</th><th>Item</th><th>Location</th><th>Lot</th><th>Supplier HU</th><th>Invoice</th><th>Pick Id</th><th className="n">Actual qty</th><th className="n">Available</th><th /></tr></thead>
+            <thead><tr><th>Pallet</th><th>Item</th><th>Location</th><th title="Korber Fifo Date — oldest first">FIFO</th><th>Lot</th><th>Supplier HU</th><th>Invoice</th><th>Pick Id</th><th className="n">Actual qty</th><th className="n">Available</th><th /></tr></thead>
             <tbody>{rows.map((k) => {
               const used = taken.includes(k.pallet), gone = k.available <= 1e-9, isMine = mine.includes(k.pallet);
               return (
                 <tr key={k.pallet} className={`${gone ? 'gone' : ''} ${isMine ? 'picked' : ''}`}>
-                  <td className="mono">{k.pallet}</td><td>{k.item}</td><td>{k.location}</td><td>{k.lot}</td><td>{k.supplier_hu}</td><td className="mono small">{k.invoice}</td><td className={String(k.pick_id ?? '0') !== '0' ? 'kb-short' : 'muted'}>{k.pick_id ?? '0'}</td><td className="n">{fmtQty(k.qty)}</td>
+                  <td className="mono">{k.pallet}</td><td>{k.item}</td><td>{k.location}</td><td className="small">{fifoText(k.fifo)}</td><td>{k.lot}</td><td>{k.supplier_hu}</td><td className="mono small">{k.invoice}</td><td className={String(k.pick_id ?? '0') !== '0' ? 'kb-short' : 'muted'}>{k.pick_id ?? '0'}</td><td className="n">{fmtQty(k.qty)}</td>
                   <td className="n">{k.blocked ? <span className="pill bad" title={k.blocked}>{k.blocked.startsWith('Rejected') ? 'rejected' : k.blocked.startsWith('Korber Pick Id') ? 'WMS pick' : k.blocked}</span> : gone ? <span className="pill mute">picked</span> : fmtQty(k.available)}
                     {!k.blocked && Number(k.reserved) > 0 && <div className="muted small" title="ZROLLMGT Reserved Quantity: only the Available Quantity can be picked">{fmtQty(Number(k.reserved))} reserved</div>}
                     {(k.picks?.length ?? 0) > 0 && <div className="pk-prev">{gone ? 'Picked in full' : 'Cut roll — balance only'}: {k.picks!.map(pickNote).join(' | ')}</div>}</td>

@@ -14,7 +14,7 @@ import { COVERAGES, periodOf, type DispatchSummary, ago, compact, coverage, fmt,
 import { exportPullPlan } from '@/lib/export';
 import { CountUp } from '@/components/Brand';
 import InsightDrawer from '@/components/InsightDrawer';
-import PlanReport from '@/components/PlanReport';
+import PlanReport, { type PlanReportRes, type PlanReportRow } from '@/components/PlanReport';
 import EditLine from '@/components/EditLine';
 import { SRC_INFO, SRC_ORDER } from '@/lib/mapping';
 import { ACTION_HELP, insights, matchView, todayLocal, type Action, type Insight, type View } from '@/lib/smart';
@@ -143,6 +143,29 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
   const pickedQty = useMemo(() => scoped.reduce((x, r) => x + (r.picked ?? 0), 0), [scoped]);
   const pickedLines = useMemo(() => scoped.filter((r) => (r.picked ?? 0) > 0).length, [scoped]);
   const pickedRolls = useMemo(() => scoped.reduce((x, r) => x + (r.picked_rolls ?? 0), 0), [scoped]);
+  // the plan report of what is on screen (each Pick of the day, or the week / its plant): ALRADY SEND, QI, BLOCK, POSIBAL PENDING
+  const repIds = useMemo(() => (!data ? [] : isDay ? (round ? [round] : (data.rounds || []).map((r) => String(r.id))) : data.week ? [data.week] : []), [data, isDay, round]);
+  const [repMap, setRepMap] = useState<Map<string, PlanReportRow> | null>(null);
+  useEffect(() => {
+    let stop = false;
+    if (!repIds.length) { setRepMap(null); return; }
+    Promise.all(repIds.map((id) => api<PlanReportRes>(`/api/plan-report?rid=${encodeURIComponent(id)}${!isDay && wPlant ? '&plant=' + encodeURIComponent(wPlant) : ''}`)
+      .then((r) => r.rows.map((x) => [`${id}|${x.key}|${x.pick_date ?? ''}`, x] as [string, PlanReportRow])).catch(() => [] as [string, PlanReportRow][])))
+      .then((all) => { if (!stop) setRepMap(new Map(all.flat())); });
+    return () => { stop = true; };
+  }, [repIds.join(','), wPlant, data?.generatedAt]); // eslint-disable-line react-hooks/exhaustive-deps
+  const rep = useMemo(() => {
+    if (!repMap) return null;
+    const xs = scoped.map((l) => repMap.get(`${l.week}|${l.key}|${l.date ?? ''}`)).filter(Boolean) as PlanReportRow[];
+    if (!xs.length) return null;
+    // ALRADY SEND, QI and BLOCK are per SO / LI / Item (the same one on two days counts once); POSIBAL PENDING per line
+    const byKey = new Map(xs.map((x) => [`${x.plant}|${x.key}`, x]));
+    const u = Array.from(byKey.values());
+    const sumU = (f: (x: PlanReportRow) => number) => u.reduce((t0, x) => t0 + (f(x) || 0), 0);
+    const pp = xs.filter((x) => x.possible);
+    return { sent: sumU((x) => x.sent), sentN: u.filter((x) => x.sent > 1e-9).length, qi: sumU((x) => x.qi), qiN: u.filter((x) => x.qi > 1e-9).length,
+      block: sumU((x) => x.block), blockN: u.filter((x) => x.block > 1e-9).length, possible: pp.reduce((t0, x) => t0 + Number(x.possible), 0), possibleN: pp.length };
+  }, [repMap, scoped]);
   const tips = useMemo(() => insights(scoped, data?.uploads || [], today, data?.dispatch), [scoped, data?.uploads, today, data?.dispatch]);
   const viewCounts = useMemo(() => {
     const c: Record<string, number> = {};
@@ -334,6 +357,14 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
         <div className="kpi"><span className="k">Required QTY</span><span className="v"><CountUp value={t.qty} format={compact} /></span><span className="s" title="QTY − Assigned">Variance {compact(t.variance)}</span>{unfiltered && prevW && thisW && <span className="s">vs {weekLabel(prevW.week)}: {compact(prevW.qty)} {delta(thisW.qty, prevW.qty, false, true)}</span>}</div>
         <div className="kpi"><span className="k">Full UR stock</span><span className="v"><CountUp value={t.ur} format={compact} /></span><span className="s">QI {compact(t.qi)} · Block {compact(t.block)}</span></div>
         <div className="kpi"><span className="k">KFC / PFC UR</span><span className="v"><CountUp value={t.kfc_ur} format={compact} /></span><span className="s">PFC {compact(t.pfc_ur)}</span></div>
+        {rep && <>
+          <div className="kpi"><span className="k">Alrady send</span><span className="v"><CountUp value={rep.sent} format={compact} /></span><span className="s" title="ZMMBE at the plant storage locations (40 / 70 / 75)">{fmt(rep.sentN)} SO/LI lines · at the plant</span></div>
+          <div className={`kpi ${rep.qiN ? 'warn' : ''}`}><span className="k">QI</span><span className="v"><CountUp value={rep.qi} format={compact} /></span><span className="s" title="SO QI stock (ZMMBE) — not picked until released">{fmt(rep.qiN)} SO/LI lines</span></div>
+          <div className={`kpi ${rep.blockN ? 'bad' : ''}`}><span className="k">Block</span><span className="v"><CountUp value={rep.block} format={compact} /></span><span className="s" title="SO Blocked stock (ZMMBE) — not picked until released">{fmt(rep.blockN)} SO/LI lines</span></div>
+          <button type="button" className="kpi kpi-btn em" disabled={repIds.length !== 1} onClick={() => repIds.length === 1 && setReportRid(repIds[0])}
+            title={repIds.length === 1 ? 'Open the plan report — the lines the warehouse can send now' : 'Choose one Pick to open its plan report'}>
+            <span className="k">Posibal pending</span><span className="v"><CountUp value={rep.possible} format={compact} /></span><span className="s">{fmt(rep.possibleN)} line{rep.possibleN === 1 ? '' : 's'} can be sent now</span></button>
+        </>}
         <div className="kpi"><span className="k">Picked</span><span className="v"><CountUp value={pickedQty} format={compact} /></span><span className="s">{fmt(pickedLines)} SO/LI lines · {fmt(pickedRolls)} rolls</span></div>
         {(
           <div className="kpi ok"><span className="k">Dispatched</span><span className="v"><CountUp value={t.dispatched} format={compact} /></span>
