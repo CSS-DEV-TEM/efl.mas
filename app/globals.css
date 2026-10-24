@@ -915,3 +915,15 @@ tr.on-hold td { background: color-mix(in srgb, #ef4444 9%, transparent); }
 .sap-fit .sap-no { color: var(--bad, #e03131); }
 .sap-fit .sap-info { color: var(--ink-3, #888); }
 .sap-fit .sap-best { color: #fff; background: var(--accent); border-radius: 8px; padding: 0 6px; font-weight: 700; }
+
+/* chip rows (Ongoing / Plant / Pick / Plan for): one label column, chips in even columns top to bottom */
+.weeks > .weeks-label, .days > .weeks-label { flex: 0 0 92px; width: 92px; margin-right: 0; }
+.weeks .week-chip, .weeks .day-chip, .days .day-chip { flex: 0 0 168px; width: 168px; min-width: 0; box-sizing: border-box; }
+.weeks .day-chip b, .days .day-chip b, .weeks .day-chip span, .days .day-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 640px) {
+  .weeks > .weeks-label, .days > .weeks-label { flex-basis: 100%; width: auto; }
+  .weeks .week-chip, .weeks .day-chip, .days .day-chip { flex: 1 1 140px; width: auto; }
+}
+.days { gap: 8px; }
+.plan-groups > .btn { justify-self: start; margin-left: 100px; }
+@media (max-width: 640px) { .plan-groups > .btn { margin-left: 0; } }
