@@ -41,6 +41,33 @@ export default function Shell({ children, admin, allowGuest }: { children: React
     setUser(s.user);
   }, [router, admin, allowGuest]);
 
+  // macOS-style close: React removes a window at once, so a copy of it is shown for a moment while it shrinks and fades
+  useEffect(() => {
+    if (typeof window === 'undefined' || !('MutationObserver' in window)) return;
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+    const isWin = (n: Node): n is HTMLElement => n instanceof HTMLElement && (n.classList.contains('modal-back') || n.classList.contains('drawer-back')) && !n.classList.contains('mac-closing');
+    const mo = new MutationObserver((recs) => {
+      for (const r of recs) r.removedNodes.forEach((n) => {
+        const wins: HTMLElement[] = isWin(n) ? [n] : n instanceof HTMLElement ? Array.from(n.querySelectorAll<HTMLElement>('.modal-back, .drawer-back')).filter(isWin) : [];
+        for (const w of wins) {
+          if (!w.firstElementChild) continue;
+          const ghost = w.cloneNode(true) as HTMLElement;
+          ghost.classList.add('mac-closing');
+          ghost.setAttribute('aria-hidden', 'true');
+          ghost.setAttribute('inert', '');
+          ghost.querySelectorAll('[id]').forEach((e) => e.removeAttribute('id'));
+          ghost.scrollTop = w.scrollTop;
+          document.body.appendChild(ghost);
+          const done = () => ghost.remove();
+          ghost.addEventListener('animationend', (e) => { if (e.target === ghost) done(); });
+          setTimeout(done, 400);
+        }
+      });
+    });
+    mo.observe(document.body, { childList: true, subtree: true });
+    return () => mo.disconnect();
+  }, []);
+
   // warn when the website was updated but the Cloudflare Worker was not
   const [oldApi, setOldApi] = useState<number | null>(null);
   useEffect(() => {

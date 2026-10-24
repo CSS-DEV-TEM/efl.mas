@@ -927,3 +927,25 @@ tr.on-hold td { background: color-mix(in srgb, #ef4444 9%, transparent); }
 .days { gap: 8px; }
 .plan-groups > .btn { justify-self: start; margin-left: 100px; }
 @media (max-width: 640px) { .plan-groups > .btn { margin-left: 0; } }
+
+/* macOS-style window open / close: the window springs up from a smaller scale, and shrinks + fades when it closes */
+.plc-h { margin: 4px 0 0; font-size: 13.5px; }
+.plc-h.err { color: var(--bad, #c0392b); }
+.plc-h.warn { color: var(--warn, #b7791f); }
+@keyframes macBackIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes macBackOut { from { opacity: 1; } to { opacity: 0; } }
+@keyframes macWinIn { 0% { opacity: 0; transform: scale(.86) translateY(14px); } 60% { opacity: 1; } 100% { opacity: 1; transform: none; } }
+@keyframes macWinOut { from { opacity: 1; transform: none; } to { opacity: 0; transform: scale(.86) translateY(10px); } }
+@keyframes macDrawerIn { from { transform: translateX(40px) scale(.97); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes macDrawerOut { from { transform: none; opacity: 1; } to { transform: translateX(40px) scale(.97); opacity: 0; } }
+.modal-back, .drawer-back, .page.anim > .modal-back, .page.anim > .drawer-back { animation: macBackIn .22s ease-out both; }
+.modal-back > .modal, .modal-back > form.modal, .modal-back > div > .modal { transform-origin: 50% 30%; animation: macWinIn .34s cubic-bezier(.2, 1.2, .35, 1) both; will-change: transform, opacity; }
+.drawer-back > .drawer { animation: macDrawerIn .3s cubic-bezier(.2, 1.1, .35, 1) both; }
+.mac-closing { pointer-events: none !important; animation: macBackOut .2s ease-in both !important; }
+.mac-closing .modal { animation: macWinOut .2s cubic-bezier(.4, 0, 1, 1) both !important; }
+.mac-closing .drawer { animation: macDrawerOut .2s cubic-bezier(.4, 0, 1, 1) both !important; }
+@media (prefers-reduced-motion: reduce) {
+  .modal-back, .drawer-back, .modal-back .modal, .drawer-back > .drawer { animation: none !important; }
+  .mac-closing { display: none !important; }
+}
+.plc-list td:last-child { white-space: normal; min-width: 280px; }

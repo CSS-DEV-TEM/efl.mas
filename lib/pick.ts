@@ -223,7 +223,9 @@ function rollBatches0(r: PickReq, m: Match, p: PickRoll): { batch: string; qty: 
  * On a sheet the rolls are in one table per Asn Number + Po Number + Lot Number; under each table its SAP lines
  * (SO | LI | Qty | Material | Batch), the Qty adding up to the table's Actual Qty. Plus a Summary and the Korber Inventory rows.
  */
-export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolean; ids?: Set<number> | number[]; combined?: boolean; pfcSlocs?: string[]; /** the Pick's plan lines (dashboard table) → a "Plan" sheet */ plan?: Line[]; planTitle?: string } = {}) {
+/** a problem found in the Packing List data before it is downloaded */
+export interface PLIssue { level: 'error' | 'warn'; pallet: string; so: string; li: string; item: string; what: string }
+export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolean; ids?: Set<number> | number[]; combined?: boolean; pfcSlocs?: string[]; /** the Pick's plan lines (dashboard table) → a "Plan" sheet */ plan?: Line[]; planTitle?: string; /** filled with the problems found (SAP and Korber data checked) */ issues?: PLIssue[] } = {}) {
   const only = opts.ids ? new Set(opts.ids) : null;
   const reqs = h.requests.filter((r) => !r.cancelled_at && (!only || !only.size || only.has(r.id)));
   const header = (h.korberHeader || []).map(hn);
@@ -297,6 +299,40 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
     palFull.set(e.p.pallet, Math.max(palFull.get(e.p.pallet) ?? 0, fullOf(e)));
   }
   const isCut = (pallet: string) => { const full = palFull.get(pallet) ?? 0; return full > 0 ? (palTotal.get(pallet) ?? 0) < full - 0.0005 : false; };
+
+  // check every roll before the file is made: the Korber row and the SAP lines must be right
+  const issues: PLIssue[] = opts.issues ?? [];
+  {
+    const r3q = (x: number) => Math.round(x * 1000) / 1000;
+    const nItem = (v: unknown) => String(v ?? '').trim().toUpperCase().replace(/^[A-Z]{2,10}-(?=[A-Z0-9])/, '').replace(/^0+(?=\d)/, '');
+    const add = (e: Entry, level: PLIssue['level'], what: string) => issues.push({ level, pallet: e.p.pallet, so: String(e.r.so), li: String(e.r.li), item: String(e.r.item), what });
+    for (const e of entries) {
+      const v = (c: string) => { const i = col(PL_SRC[c] ?? []); return i >= 0 ? e.raw[i] : null; };
+      // Korber: the row saved with the pick
+      if (!e.raw.length) { add(e, 'error', 'No Korber Inventory row saved with this pick (Pallet, Lot, Asn, Po are empty)'); continue; }
+      if (String(v('Pallet') ?? '').trim().toUpperCase() !== String(e.p.pallet).trim().toUpperCase()) add(e, 'error', `Korber row is pallet ${v('Pallet') ?? '–'}, not ${e.p.pallet}`);
+      const ki = nItem(v('Item Number'));
+      if (ki && ki !== nItem(e.r.item)) add(e, 'error', `Korber Item Number ${v('Item Number')} ≠ plan item ${e.r.item}`);
+      for (const c of ['Lot Number', 'Asn Number', 'Po Number', 'Location Id']) if (!String(v(c) ?? '').trim()) add(e, 'warn', `Korber ${c} is empty`);
+      // SAP: the roll's batches must be the SO line's ZMMBE batches and add up to the picked QTY
+      const m = parseMatch(e.r);
+      const lineB = new Set([...(m.zmmbe || []), ...(e.r.zstock || [])].map((z) => bkey((z as Record<string, unknown>).batch)).filter(Boolean));
+      const bs = e.batches.filter((b) => b.qty > 1e-9);
+      if (!bs.length || bs.some((b) => !String(b.batch ?? '').trim())) add(e, 'error', 'No SAP batch for this roll');
+      else if (lineB.size && bs.some((b) => !lineB.has(bkey(b.batch)))) add(e, 'error', `SAP batch ${bs.filter((b) => !lineB.has(bkey(b.batch))).map((b) => b.batch).join(', ')} is not a ZMMBE batch of ${e.r.so} / ${e.r.li} (${Array.from(lineB).join(', ')})`);
+      // the batch saved with the roll (the pick / its SAP allocation): the file puts a wrong one on the line's batch, so it is shown here
+      const saved = [...String(e.p.batch ?? '').split(','), ...(m.alloc || []).filter((a) => a.pallet === e.p.pallet).map((a) => String(a.batch))].map((x) => x.trim()).filter(Boolean);
+      const wrong = Array.from(new Set(saved.filter((b) => !lineB.has(bkey(b)))));
+      if (lineB.size && saved.length && wrong.length) add(e, 'error', `Roll batch ${wrong.join(', ')} (saved with the pick) is not a ZMMBE batch of ${e.r.so} / ${e.r.li} — the file shows ${bs.map((b) => b.batch).join(', ')}`);
+      const sq = r3q(bs.reduce((t, b) => t + b.qty, 0));
+      if (Math.abs(sq - Number(e.p.qty)) > 0.0005) add(e, 'error', `SAP lines ${sq} ≠ picked QTY ${e.p.qty}`);
+      if (!String(e.p.insp_lot ?? '').trim()) add(e, 'warn', 'No ZINSR inspection lot saved with this roll');
+      if (!String(e.p.shade ?? '').trim()) add(e, 'warn', 'No shade (ZCOMENT VIEW) for this roll');
+      if (e.clientKind && e.clientKind !== e.sapKind) add(e, 'warn', `Korber client ${e.client} (${e.clientKind}) but the SAP location of its batch is ${e.sapKind}`);
+    }
+    // a pallet picked for more than the roll
+    for (const [pal, q] of palTotal) { const full = palFull.get(pal) ?? 0; if (full > 0 && q > full + 0.0005) { const e = entries.find((x) => x.p.pallet === pal)!; add(e, 'error', `Picked ${r3q(q)} — more than the roll (${full})`); } }
+  }
   interface Merged { e: Entry; parts: Entry[]; qty: number }
   const mergeByPallet = (list: Entry[]) => {
     const by = new Map<string, Merged>();
@@ -442,6 +478,14 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
   for (let r = 1; r < tn; r++) { const ref = U.encode_cell({ r, c: 11 }); if (tws[ref] && tally[r][11] !== '✓') (tws[ref] as { s?: unknown }).s = ST.cut; }
   tws['!cols'] = [10, 13, 5, 12, 11, 7, 10, 10, 13, 36, 26, 14].map((w) => ({ wch: w }));
   U.book_append_sheet(wb, tws, 'Tally');
+  // the checks of the SAP and Korber data (only when something was found)
+  if (issues.length) {
+    const cws = U.aoa_to_sheet([['Level', 'Pallet', 'SO', 'LI', 'Item', 'Check'], ...issues.map((x) => [x.level === 'error' ? 'ERROR' : 'CHECK', x.pallet, x.so, num(x.li), num(x.item), x.what])]);
+    for (let i = 0; i < 6; i++) { const ref = U.encode_cell({ r: 0, c: i }); (cws[ref] as { s?: unknown }).s = ST.head; }
+    issues.forEach((x, i) => { const ref = U.encode_cell({ r: i + 1, c: 0 }); (cws[ref] as { s?: unknown }).s = x.level === 'error' ? ST.cut : ST.key; });
+    cws['!cols'] = [8, 18, 13, 5, 12, 80].map((w) => ({ wch: w }));
+    U.book_append_sheet(wb, cws, 'Checks');
+  }
   // the dashboard's plan table of the Pick(s): what was planned, picked, still open, UR / Korber on the shelf
   if (opts.plan?.length) {
     const aoa = planTableAoa(opts.plan);

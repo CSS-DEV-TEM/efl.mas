@@ -7,7 +7,7 @@ import PlanReport, { type PlanReportRes } from '@/components/PlanReport';
 import { ago, avail, fmt, fmtDate, fmtQty, isDispatched, isDone, need, periodOf, type Line } from '@/lib/calc';
 import { action } from '@/lib/smart';
 import {
-  PICK_SRCS, korberWorkbook, ordinal, packingListWorkbook, saveWorkbook, uploadPickFile,
+  PICK_SRCS, type PLIssue, korberWorkbook, ordinal, packingListWorkbook, saveWorkbook, uploadPickFile,
   pickNote, type Candidate, type Candidates, type KorberRow, type SapFit, type ManualRoll, type NbOption, type NoBarcodeRoll, type PickHistory, type PickSrc,
 } from '@/lib/pick';
 
@@ -1154,9 +1154,15 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
       for (const w of weeks.filter((x) => /^\d{4}-W\d{2}$/.test(x))) {
         try { plan.push(...(await api<{ rows: LineP[] }>(`/api/pullplan?week=${encodeURIComponent(w)}`)).rows.filter((l) => lineIds.has(`${l.key}|${l.date ?? ''}`))); } catch { /* plan not available */ }
       }
-      saveWorkbook(packingListWorkbook(h!, { ids: new Set(target.map((r) => r.id)), combined: oneSheet, pfcSlocs, plan, planTitle: `Plan · ${weeks.map(pickName).join(', ')}` }), `Packing_List_${day}${ptag}${tag}.xlsx`);
+      // the SAP and Korber data of every roll is checked first: problems are shown before the file is saved
+      const issues: PLIssue[] = [];
+      const wb = packingListWorkbook(h!, { ids: new Set(target.map((r) => r.id)), combined: oneSheet, pfcSlocs, plan, planTitle: `Plan · ${weeks.map(pickName).join(', ')}`, issues });
+      const file = `Packing_List_${day}${ptag}${tag}.xlsx`;
+      if (issues.length) setPlCheck({ wb, file, issues });
+      else { saveWorkbook(wb, file); toast(`Packing List checked ✓ — ${target.length} pick${target.length === 1 ? '' : 's'}: SAP lines and Korber rows are right`); }
     } finally { setPlBusy(false); }
   };
+  const [plCheck, setPlCheck] = useState<{ wb: ReturnType<typeof packingListWorkbook>; file: string; issues: PLIssue[] } | null>(null);
   const downloadKorber = () => saveWorkbook(korberWorkbook(h!, new Set(target.map((r) => r.id))), `Korber_Picked_${day}${ptag}${tag}.xlsx`);
   const markedQty = marked.reduce((t, r) => t + r.qty, 0);
   const cancel = async (path: string, what: string) => {
@@ -1225,6 +1231,27 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
           {marked.length > 0 && <button className="btn sm" onClick={() => setSel(new Set())}>Clear marks</button>}
         </div>
       )}
+      {plCheck && (() => {
+        const errs = plCheck.issues.filter((i) => i.level === 'error'), warns = plCheck.issues.filter((i) => i.level === 'warn');
+        const list = (xs: PLIssue[]) => (
+          <div className="table-wrap plc-list" style={{ maxHeight: 260 }}><table className="mini">
+            <thead><tr><th>Pallet</th><th>SO / LI</th><th>Item</th><th>Check</th></tr></thead>
+            <tbody>{xs.slice(0, 200).map((i, k) => <tr key={k}><td className="mono">{i.pallet || '—'}</td><td>{i.so}{i.li ? ` / ${i.li}` : ''}</td><td>{i.item}</td><td>{i.what}</td></tr>)}</tbody>
+          </table></div>);
+        return (
+          <div className="modal-back">
+            <div className="modal wide" role="dialog" aria-modal="true" aria-labelledby="plc-title">
+              <div className="modal-head"><h2 id="plc-title">Packing List check — {errs.length ? `${errs.length} error${errs.length === 1 ? '' : 's'}` : 'warnings only'}</h2>
+                <button className="btn sm" aria-label="Close" onClick={() => setPlCheck(null)}>✕</button></div>
+              <p className="muted" style={{ margin: 0 }}>Every roll was checked against its Korber row (pallet, item, lot, ASN, PO, location) and its SAP lines (ZMMBE batch, picked QTY, inspection lot, shade). The file also gets a <b>Checks</b> sheet with this list.</p>
+              {errs.length > 0 && <><h3 className="plc-h err">Errors — wrong or missing data ({errs.length})</h3>{list(errs)}</>}
+              {warns.length > 0 && <><h3 className="plc-h warn">Checks — empty fields to look at ({warns.length})</h3>{list(warns)}</>}
+              <div className="modal-foot"><span style={{ flex: 1 }} />
+                <button className="btn" onClick={() => setPlCheck(null)}>Cancel</button>
+                <button className={`btn ${errs.length ? 'danger' : 'primary'}`} onClick={() => { saveWorkbook(plCheck.wb, plCheck.file); setPlCheck(null); }}>Download anyway</button></div>
+            </div>
+          </div>);
+      })()}
       {!h ? <Loader label="Loading the pick history…" /> : !h.requests.length ? <p className="muted">No picks on {fmtDate(day)}.</p> : (
         <div className="table-wrap" style={{ maxHeight: 'none' }}>
           <table className="mini">
