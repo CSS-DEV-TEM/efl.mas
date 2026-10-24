@@ -1537,7 +1537,10 @@ async function handlePullPlan(env: Env, req: Request) {
   let rev: string | null = null;
   try { rev = (await env.DB.prepare("SELECT v FROM config WHERE k = 'rev'").first<{ v: string }>())?.v ?? null; } catch { /* none yet */ }
   const st = await getSettings(env);
-  return json({ type: ptype, day, days, rounds, week, prevWeek, owner, weeks, rev, time: { soliPerHour: st.soliPerHour, lateGraceMin: st.lateGraceMin, defaultTarget: st.defaultTarget }, rows: plan, weekPlants, weekPlant: wPlant || null, dispatch, stockAt: zAt ?? null, releases, plants, received, uploads: uploads.results, counts: counts.results, generatedAt: now() });
+  // the rolls picked for the lines on screen (Packing List roll count and cut rolls on the dashboard)
+  let pickRolls: Row[] = [];
+  try { if (periods.length) pickRolls = (await env.DB.prepare('SELECT week, line, pallet, ROUND(SUM(qty), 3) qty, MAX(roll_qty) roll_qty FROM picks WHERE cancelled_at IS NULL AND week IN (SELECT value FROM json_each(?1)) GROUP BY week, line, pallet').bind(JSON.stringify(periods)).all<Row>()).results; } catch { /* no picks yet */ }
+  return json({ type: ptype, day, days, rounds, week, prevWeek, owner, weeks, rev, time: { soliPerHour: st.soliPerHour, lateGraceMin: st.lateGraceMin, defaultTarget: st.defaultTarget }, rows: plan, pickRolls, weekPlants, weekPlant: wPlant || null, dispatch, stockAt: zAt ?? null, releases, plants, received, uploads: uploads.results, counts: counts.results, generatedAt: now() });
 }
 
 /**

@@ -907,4 +907,4 @@ tr.on-hold td { background: color-mix(in srgb, #ef4444 9%, transparent); }
 .kpi.em .v { color: var(--accent); }
 .kpi.warn .v { color: var(--warn, #b7791f); }
 .kpi.bad .v { color: var(--bad, #e03131); }
-@media (min-width: 1100px) { .kpis.compact { grid-template-columns: repeat(6, minmax(0, 1fr)); } }
+@media (min-width: 1100px) { .kpis.compact { grid-template-columns: repeat(7, minmax(0, 1fr)); } }

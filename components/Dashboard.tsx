@@ -21,7 +21,7 @@ import { ACTION_HELP, insights, matchView, todayLocal, type Action, type Insight
 
 
 export interface RoundInfo { id: string; plant: string | null; round: number; lines: number; qty: number; done: number; src_at: string | null; src_user: string | null }
-interface PullPlan { weekPlants?: string[]; weekPlant?: string | null; type?: 'week' | 'day'; day?: string | null; days?: { day: string; week: string; lines: number; done: number; qty: number }[]; rounds?: RoundInfo[]; week: string | null; prevWeek?: string | null; rev?: string | null; weeks: WeekInfo[]; rows: Line[]; dispatch?: DispatchSummary; plants?: PlantInfo[]; received?: { period?: string; code: string; received: string | null }[]; releases?: { key: string; qi: number; block: number; by_user: string; at: string; active: boolean }[]; uploads: Upload[]; counts: { src: string; n: number }[]; generatedAt: string; time?: { soliPerHour?: number; lateGraceMin?: number; defaultTarget?: string } }
+interface PullPlan { pickRolls?: { week: string; line: string; pallet: string; qty: number; roll_qty: number | null }[]; weekPlants?: string[]; weekPlant?: string | null; type?: 'week' | 'day'; day?: string | null; days?: { day: string; week: string; lines: number; done: number; qty: number }[]; rounds?: RoundInfo[]; week: string | null; prevWeek?: string | null; rev?: string | null; weeks: WeekInfo[]; rows: Line[]; dispatch?: DispatchSummary; plants?: PlantInfo[]; received?: { period?: string; code: string; received: string | null }[]; releases?: { key: string; qi: number; block: number; by_user: string; at: string; active: boolean }[]; uploads: Upload[]; counts: { src: string; n: number }[]; generatedAt: string; time?: { soliPerHour?: number; lateGraceMin?: number; defaultTarget?: string } }
 
 /** "2026-W42" → "Week 42" */
 const weekLabel = (w: string | null | undefined) => (w ? `Week ${Number(w.slice(-2))}` : '');
@@ -143,6 +143,19 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
   const pickedQty = useMemo(() => scoped.reduce((x, r) => x + (r.picked ?? 0), 0), [scoped]);
   const pickedLines = useMemo(() => scoped.filter((r) => (r.picked ?? 0) > 0).length, [scoped]);
   const pickedRolls = useMemo(() => scoped.reduce((x, r) => x + (r.picked_rolls ?? 0), 0), [scoped]);
+  // the Packing List of the lines on screen: its rolls (a pallet picked in pieces counts once) and the cut ones (pieces < the roll)
+  const plRolls = useMemo(() => {
+    const ids = new Set(scoped.map((l) => `${l.week}|${l.key}|${l.date ?? ''}`));
+    const by = new Map<string, { q: number; full: number }>();
+    for (const p of data?.pickRolls || []) {
+      if (!ids.has(`${p.week}|${p.line}`)) continue;
+      const x = by.get(p.pallet) || { q: 0, full: 0 };
+      x.q += Number(p.qty) || 0; x.full = Math.max(x.full, Number(p.roll_qty) || 0); by.set(p.pallet, x);
+    }
+    const all = Array.from(by.values());
+    const cut = all.filter((x) => x.full > 0 && x.q < x.full - 0.0005);
+    return { rolls: all.length, cut: cut.length, cutQty: cut.reduce((t0, x) => t0 + x.q, 0), qty: all.reduce((t0, x) => t0 + x.q, 0) };
+  }, [data, scoped]);
   // the plan report of what is on screen (each Pick of the day, or the week / its plant): ALRADY SEND, QI, BLOCK, POSIBAL PENDING
   const repIds = useMemo(() => (!data ? [] : isDay ? (round ? [round] : (data.rounds || []).map((r) => String(r.id))) : data.week ? [data.week] : []), [data, isDay, round]);
   const [repMap, setRepMap] = useState<Map<string, PlanReportRow> | null>(null);
@@ -365,6 +378,8 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
             title={repIds.length === 1 ? 'Open the plan report — the lines the warehouse can send now' : 'Choose one Pick to open its plan report'}>
             <span className="k">Posibal pending</span><span className="v"><CountUp value={rep.possible} format={compact} /></span><span className="s">{fmt(rep.possibleN)} line{rep.possibleN === 1 ? '' : 's'} can be sent now</span></button>
         </>}
+        <div className="kpi"><span className="k">PL rolls</span><span className="v"><CountUp value={plRolls.rolls} format={(n) => fmt(n)} /></span><span className="s" title="Rolls on the Packing List of these lines (a pallet picked in pieces counts once)">{compact(plRolls.qty)} QTY on the Packing List</span></div>
+        <div className={`kpi ${plRolls.cut ? 'warn' : ''}`}><span className="k">Cut rolls</span><span className="v"><CountUp value={plRolls.cut} format={(n) => fmt(n)} /></span><span className="s" title="Rolls picked for less than the whole roll (they go on the KFC / PFC Cut Roll sheets)">{plRolls.rolls ? `${Math.round((plRolls.cut / plRolls.rolls) * 100)}% of the rolls · ${compact(plRolls.cutQty)} QTY` : 'no rolls picked'}</span></div>
         <div className="kpi"><span className="k">Picked</span><span className="v"><CountUp value={pickedQty} format={compact} /></span><span className="s">{fmt(pickedLines)} SO/LI lines · {fmt(pickedRolls)} rolls</span></div>
         {(
           <div className="kpi ok"><span className="k">Dispatched</span><span className="v"><CountUp value={t.dispatched} format={compact} /></span>
