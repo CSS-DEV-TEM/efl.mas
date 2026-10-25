@@ -147,7 +147,7 @@ const thisWeek = () => weekId(new Date(Date.now() + 5.5 * 3600 * 1000).toISOStri
  * adds plan.week, fills it from the dates, and moves dashboard edits to week-scoped keys ("2026-W42#SO|LI|Item").
  */
 let schemaReady = false;
-const SCHEMA_V = '33';
+const SCHEMA_V = '34';
 async function ensureSchema(env: Env) {
   if (schemaReady || !env.DB) return;
   try {
@@ -343,6 +343,13 @@ async function ensureSchema(env: Env) {
       replaced_by TEXT, replaced_qty REAL, replaced_pick INTEGER, replaced_user TEXT, replaced_at TEXT)`),
     env.DB.prepare('CREATE INDEX IF NOT EXISTS pick_reject_pallet ON pick_reject(pallet)'),
   ]);
+  // v34: the uploaded Excel files as they were (base64 in parts) — downloaded again exactly the same
+  await env.DB.batch([
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS upload_file (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, mime TEXT, size INTEGER, sha TEXT,
+      srcs TEXT, rid TEXT, uploaded_by TEXT, uploaded_at TEXT, parts INTEGER, complete INTEGER DEFAULT 0)`),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS upload_file_at ON upload_file(complete, uploaded_at)'),
+    env.DB.prepare('CREATE TABLE IF NOT EXISTS upload_file_part (file_id INTEGER NOT NULL, n INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (file_id, n))'),
+  ]);
   await env.DB.prepare("INSERT INTO config (k, v) VALUES ('schema_v', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(SCHEMA_V).run();
   schemaReady = true;
 }
@@ -450,7 +457,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 63; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 64; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -956,7 +963,8 @@ async function cached<T>(env: Env, k: string, make: () => Promise<T>): Promise<T
  *   POST /api/restore/end {file}              → caches cleared, every open page reloads
  * Never in a backup: the users and their passwords, the login key and the database link (config).
  */
-const BACKUP_SKIP = new Set(['users', 'sqlite_sequence', '_cf_METADATA', '_cf_KV']);
+// the original Excel files are not in a backup (they are big; the reports' data is)
+const BACKUP_SKIP = new Set(['users', 'sqlite_sequence', '_cf_METADATA', '_cf_KV', 'upload_file', 'upload_file_part']);
 const CONFIG_SECRET = "k IN ('jwt_secret', 'database_url', 'schema_v', 'rev') OR k LIKE 'c\\_%' ESCAPE '\\'";
 async function backupTables(env: Env) {
   const t = (await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\' ORDER BY name").all<{ name: string }>()).results;
@@ -1756,7 +1764,103 @@ const CLEAR_GROUPS: Record<string, { label: string; tables: string[] }> = {
   dispatch: { label: 'Old dispatch uploads', tables: ['dispatch'] },
   settings: { label: 'Plant settings', tables: ['plant_info'] },
   history: { label: 'Upload history + activity log', tables: ['uploads', 'activity'] },
+  files: { label: 'Uploaded Excel files (the originals kept for download)', tables: ['upload_file_part', 'upload_file'] },
 };
+/**
+ * The uploaded Excel files, kept exactly as they were so they can be downloaded again (base64, 1 MB parts):
+ *   POST /api/files/start {name, size, mime, sha, srcs, rid, parts} → {id} (the same file again for the same scope: {id, dup})
+ *   POST /api/files/part {id, n, data}   POST /api/files/done {id}
+ *   GET  /api/files?rid=&src=            → the files, newest first (an editor sees their own)
+ *   GET  /api/files/part?id=&n=          → {data}        DELETE /api/files?id=
+ * The newest 15 files of each report and scope are kept, and 150 MB in all (the oldest go first; the D1 free plan holds 500 MB).
+ */
+const FILE_MAX = 40 * 1024 * 1024, FILE_KEEP = 15, FILES_TOTAL = 150 * 1024 * 1024;
+async function handleFiles(env: Env, req: Request, p: string) {
+  const url = new URL(req.url);
+  const fileOf = async (id: unknown) => {
+    const f = await env.DB.prepare('SELECT * FROM upload_file WHERE id = ?').bind(Number(id) || 0).first<Row>();
+    if (!f) throw new HttpError(404, 'That file is no longer kept.');
+    return f;
+  };
+  if (p === '/api/files' && req.method === 'GET') {
+    const s = await requireUser(env, req);
+    const rid = url.searchParams.get('rid'), src = url.searchParams.get('src');
+    const mine = s.role === 'editor' ? s.u : null;
+    const rows = (await env.DB.prepare(`SELECT id, name, mime, size, srcs, rid, uploaded_by, uploaded_at, parts FROM upload_file WHERE complete = 1
+        AND (?1 IS NULL OR COALESCE(rid, '') = ?1) AND (?2 IS NULL OR (',' || srcs || ',') LIKE '%,' || ?2 || ',%') AND (?3 IS NULL OR uploaded_by = ?3)
+        ORDER BY uploaded_at DESC, id DESC LIMIT 300`).bind(rid === null ? null : rid, src || null, mine).all<Row>()).results;
+    const tot = await env.DB.prepare('SELECT COUNT(*) n, COALESCE(SUM(size), 0) size FROM upload_file WHERE complete = 1').first<Row>();
+    return json({ files: rows, total: tot, keep: FILE_KEEP, max: FILES_TOTAL });
+  }
+  if (p === '/api/files/part' && req.method === 'GET') {
+    const s = await requireUser(env, req);
+    const f = await fileOf(url.searchParams.get('id'));
+    if (s.role === 'editor' && f.uploaded_by !== s.u) throw new HttpError(403, 'This file was uploaded by another user.');
+    const x = await env.DB.prepare('SELECT data FROM upload_file_part WHERE file_id = ? AND n = ?').bind(f.id, Number(url.searchParams.get('n')) || 0).first<Row>();
+    if (!x) throw new HttpError(404, 'A part of this file is missing.');
+    return json({ data: x.data });
+  }
+  if (p === '/api/files' && req.method === 'DELETE') {
+    const s = await requireUser(env, req, 'editor');
+    const f = await fileOf(url.searchParams.get('id'));
+    if (s.role !== 'admin' && f.uploaded_by !== s.u) throw new HttpError(403, 'Only an admin can delete another user\'s file.');
+    await env.DB.batch([env.DB.prepare('DELETE FROM upload_file_part WHERE file_id = ?').bind(f.id), env.DB.prepare('DELETE FROM upload_file WHERE id = ?').bind(f.id)]);
+    await logActivity(env, s.u, 'file', `Deleted the kept file ${String(f.name).slice(0, 120)}`);
+    return json({ ok: true });
+  }
+  const s = await requireUser(env, req, 'editor');
+  const b = (await req.json()) as { id?: number; name?: string; size?: number; mime?: string; sha?: string; srcs?: string[]; rid?: string | null; parts?: number; n?: number; data?: string };
+  if (p === '/api/files/start' && req.method === 'POST') {
+    const name = String(b.name || '').trim().slice(0, 200), size = Number(b.size) || 0, parts = Number(b.parts) || 0;
+    if (!name) throw new HttpError(400, 'No file name.');
+    if (!(size > 0) || size > FILE_MAX) throw new HttpError(400, `The file must be 1 byte to ${FILE_MAX / 1024 / 1024} MB.`);
+    if (!(parts >= 1) || parts > 80) throw new HttpError(400, 'Wrong number of parts.');
+    const srcs = Array.from(new Set((b.srcs || []).map((x) => String(x).trim().toLowerCase()).filter((x) => /^[a-z0-9_-]{1,20}$/.test(x)))).sort().join(',');
+    const rid = b.rid ? String(b.rid).slice(0, 60) : null, sha = String(b.sha || '').slice(0, 80) || null;
+    // the same file uploaded again (same content, name and scope): kept once, its date and reports updated
+    const dup = sha ? await env.DB.prepare("SELECT id, srcs FROM upload_file WHERE complete = 1 AND sha = ? AND name = ? AND COALESCE(rid, '') = COALESCE(?, '') AND uploaded_by = ?").bind(sha, name, rid, s.u).first<Row>() : null;
+    if (dup) {
+      const all = Array.from(new Set([...String(dup.srcs || '').split(','), ...srcs.split(',')].filter(Boolean))).sort().join(',');
+      await env.DB.prepare('UPDATE upload_file SET srcs = ?, uploaded_at = ? WHERE id = ?').bind(all, now(), dup.id).run();
+      return json({ id: dup.id, dup: true });
+    }
+    // parts left by an upload that never finished
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM upload_file_part WHERE file_id IN (SELECT id FROM upload_file WHERE complete = 0 AND uploaded_at < ?)").bind(new Date(Date.now() - 3600_000).toISOString()),
+      env.DB.prepare("DELETE FROM upload_file WHERE complete = 0 AND uploaded_at < ?").bind(new Date(Date.now() - 3600_000).toISOString()),
+    ]);
+    const r = await env.DB.prepare('INSERT INTO upload_file (name, mime, size, sha, srcs, rid, uploaded_by, uploaded_at, parts, complete) VALUES (?,?,?,?,?,?,?,?,?,0) RETURNING id')
+      .bind(name, String(b.mime || '').slice(0, 120) || null, size, sha, srcs, rid, s.u, now(), parts).first<Row>();
+    return json({ id: r?.id });
+  }
+  const f = await fileOf(b.id);
+  if (f.uploaded_by !== s.u) throw new HttpError(403, 'This upload belongs to another user.');
+  if (p === '/api/files/part' && req.method === 'POST') {
+    const n = Number(b.n), data = String(b.data || '');
+    if (Number(f.complete)) throw new HttpError(409, 'This file is already saved.');
+    if (!Number.isInteger(n) || n < 0 || n >= Number(f.parts)) throw new HttpError(400, 'Wrong part number.');
+    if (!data || data.length > 1_500_000 || !/^[A-Za-z0-9+/=]+$/.test(data)) throw new HttpError(400, 'Wrong part data.');
+    await env.DB.prepare('INSERT INTO upload_file_part (file_id, n, data) VALUES (?,?,?) ON CONFLICT(file_id, n) DO UPDATE SET data = excluded.data').bind(f.id, n, data).run();
+    return json({ ok: true });
+  }
+  if (p === '/api/files/done' && req.method === 'POST') {
+    const got = await env.DB.prepare('SELECT COUNT(*) n, COALESCE(SUM(length(data)), 0) len, SUM(CASE WHEN substr(data, -2) = \'==\' THEN 2 WHEN substr(data, -1) = \'=\' THEN 1 ELSE 0 END) pad FROM upload_file_part WHERE file_id = ?').bind(f.id).first<Row>();
+    const bytes = (Number(got?.len) / 4) * 3 - Number(got?.pad || 0);
+    if (Number(got?.n) !== Number(f.parts) || Math.abs(bytes - Number(f.size)) > 0) throw new HttpError(400, `The file did not arrive in full (${got?.n} of ${f.parts} parts) — upload it again.`);
+    await env.DB.prepare('UPDATE upload_file SET complete = 1, uploaded_at = ? WHERE id = ?').bind(now(), f.id).run();
+    // keep the newest files of each report + scope, and the total under the limit (the oldest go first)
+    const old = (await env.DB.prepare(`SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY srcs, COALESCE(rid, '') ORDER BY uploaded_at DESC, id DESC) rn FROM upload_file WHERE complete = 1) WHERE rn > ?`).bind(FILE_KEEP).all<Row>()).results.map((x) => Number(x.id));
+    const byAge = (await env.DB.prepare('SELECT id, size FROM upload_file WHERE complete = 1 ORDER BY uploaded_at DESC, id DESC').all<Row>()).results;
+    let t = 0; for (const x of byAge) { t += Number(x.size) || 0; if (t > FILES_TOTAL && Number(x.id) !== Number(f.id)) old.push(Number(x.id)); }
+    if (old.length) {
+      const J = JSON.stringify(Array.from(new Set(old)));
+      await env.DB.batch([env.DB.prepare('DELETE FROM upload_file_part WHERE file_id IN (SELECT value FROM json_each(?))').bind(J), env.DB.prepare('DELETE FROM upload_file WHERE id IN (SELECT value FROM json_each(?))').bind(J)]);
+    }
+    return json({ ok: true, id: f.id, pruned: old.length });
+  }
+  throw new HttpError(404, 'Not found.');
+}
+
 async function handleClearDb(env: Env, req: Request) {
   const s = await requireUser(env, req, 'admin');
   const b = (await req.json()) as { groups?: string[]; confirm?: string };
@@ -3873,6 +3977,7 @@ export default {
       else if (p === '/api/days') res = await handleDays(env, req);
       else if (p === '/api/backup' || p.startsWith('/api/backup/') || p.startsWith('/api/restore/')) res = await handleBackup(env, req, p);
       else if (p === '/api/upload' && req.method === 'POST') res = await handleUpload(env, req);
+      else if (p === '/api/files' || p.startsWith('/api/files/')) res = await handleFiles(env, req, p);
       else if (p === '/api/status' && req.method === 'PATCH') res = await handleStatus(env, req);
       else if (p === '/api/activity') {
         await requireUser(env, req);

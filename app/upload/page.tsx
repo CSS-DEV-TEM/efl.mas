@@ -14,6 +14,8 @@ import { TEMPLATES, downloadTemplate } from '@/lib/templates';
 import DayPickBar, { useDayPick } from '@/components/DayPickBar';
 import PlanReport from '@/components/PlanReport';
 import { todayLocal, weekDays, weekIdOf, weekOptions } from '@/lib/smart';
+import { keepFile } from '@/lib/files';
+import UploadedFiles from '@/components/UploadedFiles';
 import { PICK_SRCS, PLAN_SHEET, pickSrcOf, squash, uploadPickSheets, type PickSrc } from '@/lib/pick';
 import {
   FIELDS, SRC_INFO, SRC_ORDER, applyMapping, colLetter, detectMapping, guessSrc, guessSrcFromGrid, isHelpSheet, readWorkbook, usableCount,
@@ -116,6 +118,7 @@ function Uploads() {
     const skipped: string[] = [];
     for (const f of Array.from(files)) {
       try {
+        fileObj.current[f.name] = f;
         const sheets = readWorkbook(await f.arrayBuffer());
         // a dispatch / pick file (Display Item Number + Actual Qty) belongs on the Dispatch page
         // dispatch files are no longer uploaded: picks count as dispatched
@@ -169,6 +172,8 @@ function Uploads() {
 
   // the Pick a workbook's plan sheet went to: its other report sheets go there too
   const fileRid = useRef<Record<string, string>>({});
+  // the files as chosen: after a sheet is saved, its original file is kept for download (Uploaded files)
+  const fileObj = useRef<Record<string, File>>({});
   async function send(j: SheetJob) {
     if (j.pickSrc) {
       const to = fileRid.current[j.file] || rid;
@@ -177,6 +182,7 @@ function Uploads() {
       try {
         const r = await uploadPickSheets(j.pickSrc, [{ name: j.sheet, grid: j.grid }], j.file, to);
         setJob(j.id, { state: 'done', msg: `${PICK_SRCS.find((x) => x.src === j.pickSrc)!.title}: ${fmt(r.rows)} rows saved to ${roundName(to, plantNames)}${r.total > r.rows ? ` (of ${fmt(r.total)} in the sheet)` : ''}.` });
+        await keepFile(fileObj.current[j.file], [j.pickSrc], to);
         setBarKey((k) => k + 1);
       } catch (e) { setJob(j.id, { state: 'error', msg: e instanceof Error ? e.message : 'Upload failed.' }); }
       return;
@@ -207,6 +213,7 @@ function Uploads() {
       const plan = j.src === 'plan' && r.added !== undefined ? `${fmt(r.added)} new, ${fmt(r.updated)} updated${r.removed ? `, ${fmt(r.removed)} removed` : ''}${r.inFileDups ? `, ${fmt(r.inFileDups)} repeated rows (last row kept${r.dupQtyCount ? `; ${fmt(r.dupQtyCount)} had a different QTY` : ''})` : ''}` : `${fmt(r.accepted)} rows saved — ${j.stockMode === 'add' ? 'added to the current report' : 'whole report replaced, no duplicates'}${r.stockDups ? ` · ${fmt(r.stockDups)} repeated rows counted once` : ''}${r.changes ? ` · ${fmt(r.changes.unchanged)} unchanged, ${fmt(r.changes.added)} new or changed, ${fmt(r.changes.removed)} removed` : ''}${r.derived ? ` · also built ZMMBE KFC (${fmt(r.derived.kfc)}) and PFC (${fmt(r.derived.pfc)})${r.derived.plant ? ` · ${fmt(r.derived.plant)} plant-location row${r.derived.plant === 1 ? '' : 's'} left out` : ''}` : ''}`;
       // Plant + SO Plant pairs not in Settings → ZMMBE plants: left out, listed so they can be added
       const notSet = r.notInSetup?.length ? ` · ${fmt(r.setupOut || 0)} row${r.setupOut === 1 ? '' : 's'} left out — Plant + SO Plant not in Settings → ZMMBE plants: ${r.notInSetup.map((m) => `${m.plant} + ${m.soPlant || '–'} (${fmt(m.rows)} rows, UR ${fmt(m.ur, 2)})`).join(', ')}` : '';
+      await keepFile(fileObj.current[j.file], [j.src], rid || null);
       setJob(j.id, { state: 'done', msg: `${plan}${wk}${notSet}${r.skipped > 0 ? ` · ${fmt(r.skipped)} rows without SO/LI/Material skipped` : ''}. Every open dashboard has updated.` });
     } catch (e) {
       setJob(j.id, { state: 'error', msg: e instanceof Error ? e.message : 'Upload failed.' });
@@ -378,6 +385,7 @@ function Uploads() {
           </div>
         </section>
       )}
+      <UploadedFiles toast={toast} />
       </>}
     </main>
   );

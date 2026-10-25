@@ -6,6 +6,8 @@ import CompleteLine from '@/components/CompleteLine';
 import PlanReport, { type PlanReportRes } from '@/components/PlanReport';
 import { ago, avail, fmt, fmtDate, fmtQty, isDispatched, isDone, need, periodOf, type Line } from '@/lib/calc';
 import { action } from '@/lib/smart';
+import { downloadLatest } from '@/lib/files';
+import { smartBest, smartSuggest, type Suggestion } from '@/lib/rollSuggest';
 import {
   PICK_SRCS, type PLIssue, korberWorkbook, ordinal, packingListWorkbook, saveWorkbook, uploadPickFile,
   pickNote, type Candidate, type Candidates, type KorberRow, type SapFit, type ManualRoll, type NbOption, type NoBarcodeRoll, type PickHistory, type PickSrc,
@@ -232,6 +234,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
                 <div><b>{p.title}</b> <span className="pill mute">{fmt(cnt(p.src))} rows</span>{' '}
                   {(() => { const u0 = status?.reports?.find((x) => x.src === p.src)?.uses; return rid && u0 ? <span className={`pill ${u0 === 'own' ? 'ok' : u0 === 'shared' ? 'warn' : 'bad'}`}>{u0 === 'own' ? 'this Pick' : u0 === 'shared' ? 'shared' : 'missing'}</span> : null; })()}</div>
                 <span className="muted small">{u ? `${u.file_name || ''} · ${u.uploaded_by} · ${ago(u.uploaded_at)}` : p.hint}</span>
+                {u && <button className="btn sm" title="Download the Excel file as it was uploaded" onClick={() => downloadLatest(p.src, rid || '').then((n) => toast(`${n} downloaded`)).catch((e) => toast(e instanceof Error ? e.message : 'Could not download.'))}>⬇ Original</button>}
                 {canEdit && <>
                   <button className="btn sm primary" aria-busy={busy === p.src || undefined} disabled={!!busy || !rid} title={rid ? `Upload to ${label || rid}` : isWk ? 'Choose the plant first: a week plan\'s reports belong to one plant' : 'Choose a Pick first'} onClick={() => inputs.current[p.src]?.click()}>{busy === p.src ? 'Uploading…' : `Upload ${p.title}`}</button>
                   <input ref={(el) => { inputs.current[p.src] = el; }} type="file" hidden accept=".xlsx,.xls,.xlsm,.csv" onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(p.src, f); e.target.value = ''; }} />
@@ -428,15 +431,6 @@ const fifoText = (d?: string | null) => (d ? d.split('-').reverse().join('-') : 
 /** manual selection: pickable first, then the best SAP fit to the SO line, then FIFO (oldest first) */
 const byFit = <T extends { fifo?: string | null; available: number; blocked?: string; sap?: SapFit | null }>(a: T, b: T) =>
   Number(b.available > 1e-9 && !b.blocked) - Number(a.available > 1e-9 && !a.blocked) || (b.sap?.score ?? 0) - (a.sap?.score ?? 0) || fifoKey(a).localeCompare(fifoKey(b));
-/** the rolls to suggest: best fit first, until they cover the QTY still open */
-function bestSet<T extends { pallet: string; available: number; blocked?: string; sap?: SapFit | null; fifo?: string | null }>(rows: T[], open: number): Set<string> {
-  const out = new Set<string>(); let left = open;
-  if (!(left > 1e-9) || !Number.isFinite(left)) return out;
-  // a lot shared by several SO lines: this line's suggested rolls (its share) come first, so another line's rolls are not taken
-  const sug = (r: T) => Number(!!(r as T & { suggested?: boolean }).suggested);
-  for (const r of [...rows].sort((a, b) => sug(b) - sug(a) || byFit(a, b))) { if (left <= 1e-9) break; if (r.available <= 1e-9 || r.blocked || (r.sap && r.sap.miss.length && (r.sap.score ?? 0) < 40)) continue; out.add(r.pallet); left -= r.available; }
-  return out;
-}
 /** the SAP fields a roll matches (✓) and does not (✗), small under the roll */
 function SapFitLine({ f, best }: { f?: SapFit | null; best?: boolean }) {
   if (!f) return null;
@@ -449,6 +443,48 @@ function SapFitLine({ f, best }: { f?: SapFit | null; best?: boolean }) {
     </div>
   );
 }
+/**
+ * The smart suggestion: the best set of rolls for the QTY (shade, lot, cut, FIFO, SAP fit, lot QTY — see lib/rollSuggest),
+ * why it is the best, two other good sets, and how the rolls ticked now compare. Nothing is ticked until "Use".
+ */
+function SmartPanel({ smart, rolls, sel, lotCaps, onUse }: { smart: ReturnType<typeof smartSuggest>; rolls: Candidate[]; sel: Sel; lotCaps: Map<string, number>; onUse: (x: Suggestion) => void }) {
+  const [more, setMore] = useState(false);
+  const b = smart.best!;
+  const mine = rolls.filter((r) => sel[r.pallet] && !sel[r.pallet].manual && !sel[r.pallet].nb);
+  const same = mine.length === b.picks.length && b.picks.every((p) => Math.abs((Number(sel[p.pallet]?.qty) || 0) - p.qty) < 0.0005);
+  const shadesOf = (rs: Candidate[]) => new Set(rs.map((r) => String(r.shade ?? '').trim().toUpperCase()).filter(Boolean)).size;
+  const cutsMine = mine.filter((r) => (Number(sel[r.pallet].qty) || 0) < r.available - 0.0005).length;
+  // the ticked rolls against each ZINSR lot's QTY
+  const use = new Map<string, number>();
+  for (const r of mine) { const ls = Array.from(new Set((r.parts?.length ? r.parts.map((p) => p.lot) : r.insp_lots).map(String))).filter((l) => lotCaps.has(l)); if (ls.length) use.set(ls.join(','), (use.get(ls.join(',')) ?? 0) + (Number(sel[r.pallet].qty) || 0)); }
+  const overLot = Array.from(use).filter(([k, q]) => q > k.split(',').reduce((t, l) => t + (lotCaps.get(l) ?? 0), 0) + 0.0005).length;
+  const totMine = r3(mine.reduce((t, r) => t + (Number(sel[r.pallet].qty) || 0), 0));
+  const line = (x: Suggestion) => `${x.picks.length} roll${x.picks.length === 1 ? '' : 's'} · ${fmtQty(x.total)} · ${x.cuts ? `${x.cuts} cut` : 'no cut'} · ${x.shades.length ? `shade ${x.shades.join('+')}` : 'no shade'}${x.short > 0 ? ` · ${fmtQty(x.short)} short` : ''}`;
+  return (
+    <div className={`smart-box ${same ? 'same' : ''}`} role="region" aria-label="Smart roll suggestion">
+      <div className="smart-head">
+        <span className="smart-badge">★ Smart suggestion</span>
+        <b>{line(b)}</b>
+        <span className="muted small">{smart.considered} rolls checked{smart.considered <= 14 ? ' · every combination scored' : ''}</span>
+        <span style={{ flex: 1 }} />
+        {same ? <span className="pill ok">Your selection is the smart suggestion ✓</span>
+          : <button type="button" className="btn sm primary" onClick={() => onUse(b)}>Use smart suggestion</button>}
+      </div>
+      <div className="smart-rolls">{b.picks.map((p) => <span key={p.pallet} className={`smart-roll ${p.cut ? 'cut' : ''}`} title={p.cut ? `Cut: take ${p.qty}, ${p.left} stays` : 'Full roll'}><span className="mono">{p.pallet}</span> {fmtQty(p.qty)}{p.cut ? ' ✂' : ''}</span>)}</div>
+      <ul className="smart-why">{b.reasons.map((r, i) => <li key={i}>{r}</li>)}</ul>
+      {b.warnings.length > 0 && <div className="smart-warn">{b.warnings.map((w, i) => <div key={i}>⚠ {w}</div>)}</div>}
+      {!same && mine.length > 0 && (
+        <div className="smart-vs">Your ticks now: {mine.length} roll{mine.length === 1 ? '' : 's'} · {fmtQty(totMine)} · {cutsMine ? `${cutsMine} cut` : 'no cut'} · {shadesOf(mine) || 'no'} shade{shadesOf(mine) === 1 ? '' : 's'}{overLot ? <b className="bad-t"> · over a ZINSR lot QTY</b> : ''}
+          {shadesOf(mine) > b.shades.length && <b className="bad-t"> · more shades than needed</b>}{cutsMine > b.cuts && <b className="bad-t"> · more cuts than needed</b>}</div>
+      )}
+      {smart.alts.length > 0 && <button type="button" className="linkish" onClick={() => setMore((v) => !v)}>{more ? 'Hide' : 'Show'} {smart.alts.length} other good set{smart.alts.length === 1 ? '' : 's'}</button>}
+      {more && smart.alts.map((a, i) => (
+        <div key={i} className="smart-alt"><span>{line(a)} — {a.picks.map((p) => p.pallet.slice(-6)).join(', ')}</span><button type="button" className="btn sm" onClick={() => onUse(a)}>Use</button></div>
+      ))}
+    </div>
+  );
+}
+
 /** the reports a line reads: a week plan line → its week + plant; a Pick → the Pick */
 const lineScope = (week: string, plant: string | null | undefined) => (/^\d{4}-W\d{2}$/.test(week) && (plant || '').trim() ? `${week}@${(plant || '').trim().toUpperCase().replace(/\s+/g, '')}` : week);
 
@@ -747,6 +783,17 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
 
   const open = c ? c.rolls.filter((r) => r.available > 1e-9) : [];
   const gone = c ? c.rolls.filter((r) => r.available <= 1e-9) : [];
+  // the smart suggestion for the QTY to pick: searched once when the rolls load (not on every click)
+  const lotCaps = useMemo(() => new Map((c?.lots || []).filter((l) => (l.cap ?? l.need) != null).map((l) => [String(l.lot), Number(l.cap ?? l.need)])), [c]);
+  const smart = useMemo(() => (c ? smartSuggest(c.rolls, { need: Math.max(0, r3(c.need - c.picked)), lotCaps, batchNeed: c.batchNeed?.length ? new Map(c.batchNeed.map((b) => [b.batch, b.need])) : undefined }) : null), [c, lotCaps]);
+  const useSmart = (x: Suggestion) => {
+    const keep = Object.fromEntries([...manualSel, ...nbSel]);
+    const n: Sel = { ...keep };
+    for (const p of x.picks) n[p.pallet] = { qty: String(p.qty) };
+    const cut = x.picks.find((p) => p.cut);
+    const cr = cut ? c?.rolls.find((r) => r.pallet === cut.pallet) : undefined;
+    setSel(n); setLast(cut && cr ? { pallet: cut.pallet, hu: cr.supplier_hu, full: r3(cr.available), cut: cut.qty } : null); setLastMode('cut'); setOverOk(false); setCloseShort(false);
+  };
   return (
     <div className="modal-back">{/* the pick window closes only with ✕ / Cancel — a click outside it does not lose the selection */}
       <div className="modal xwide pkm" role="dialog" aria-modal="true" aria-labelledby="pk-title">
@@ -804,11 +851,12 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
                 {nSel > 0 && <button type="button" className="btn sm" onClick={() => { setSel({}); setLast(null); }}>Clear</button>}
                 <button type="button" className="btn sm" disabled={short <= 1e-9} onClick={() => setFreeOpen(true)} title={short <= 1e-9 ? 'No shortage: the selected rolls cover the QTY to pick' : `Add a Korber pallet by hand for the shortage of ${fmtQty(short)}`}>+ Manual pallet{short > 1e-9 ? ` (${fmtQty(short)} short)` : ''}</button>
               </div>
+              {smart?.best && open.length > 1 && <SmartPanel smart={smart} rolls={c.rolls} sel={sel} lotCaps={lotCaps} onUse={useSmart} />}
               {!c.rolls.length ? <p className="muted">No Korber roll matched on Barcode for this line.{c.nobarcode?.some((m) => m.invChoice) ? ' Choose rolls under “Invoice + Item match” below.' : c.nobarcode?.length ? ' Rolls without a barcode: choose them under “No Barcode” below.' : c.manual?.length ? ' See “Not matched” below.' : ' Check that ZINR, ZCOMENT VIEW and Korber are uploaded and current.'}</p> : (
                 <div className="table-wrap" style={{ maxHeight: 360 }}>
                   <table className="mini pk-table">
                     <thead><tr><th /><th>Supplier HU</th><th>Pallet</th><th>Location</th><th title="Korber Fifo Date — oldest first">FIFO</th><th>Shade</th><th className="n">Available</th><th className="n">Pick qty</th><th>Match</th></tr></thead>
-                    <tbody>{(() => { const best = bestSet(open.filter((r) => !sel[r.pallet]), Math.max(0, r3(remaining - total))); return [...[...open].sort((a, b) => Number(!!b.suggested) - Number(!!a.suggested) || byFit(a, b)), ...gone].map((r) => {
+                    <tbody>{(() => { const best = new Set((smart?.best?.picks || []).map((p) => p.pallet).filter((p) => !sel[p])); return [...[...open].sort((a, b) => Number(!!b.suggested) - Number(!!a.suggested) || byFit(a, b)), ...gone].map((r) => {
                       const s = sel[r.pallet], isGone = r.available <= 1e-9, isLast = lastOn && last!.pallet === r.pallet;
                       return (
                         <tr key={r.pallet} className={`${s ? 'picked' : ''} ${isGone ? 'gone' : ''}`} onClick={(e) => { if (!isGone && (e.target as HTMLElement).tagName !== 'INPUT') toggle(r); }}>
@@ -892,7 +940,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
                   <p className="sub" style={{ margin: '0 0 6px' }}>This inspection lot has no rolls in ZCOMENT VIEW. Korber rolls of the <b>same Invoice + Item</b> with <b>another Lot Number</b>{m.po ? <> — <b>Po</b> matches first</> : ''}{''} (in ZROLLMGT at the bin, not another roll&apos;s barcode). Tick the rolls to pick for this lot; each needs “I checked” because its Lot Number differs.</p>
                   <div className="table-wrap pk-tbl" style={{ maxHeight: 280 }}><table className="mini">
                     <thead><tr><th /><th>Pallet</th><th>Korber Lot Number</th><th>Supplier HU</th><th>Location</th><th title="Korber Fifo Date — oldest first">FIFO</th><th>Po</th><th className="n">Available</th><th className="n">Pick qty</th></tr></thead>
-                    <tbody>{(() => { const best = bestSet(m.options.filter((o) => !sel[o.pallet]), Math.max(0, r3(Number(m.roll_qty) - mine.reduce((t, [, x]) => t + (Number(x.qty) || 0), 0)))); return [...m.options].sort(byFit).map((o) => {
+                    <tbody>{(() => { const best = smartBest(m.options.filter((o) => !sel[o.pallet]).map((o) => ({ ...o, shade: o.sap?.shade ?? null })), Math.max(0, r3(Number(m.roll_qty) - mine.reduce((t, [, x]) => t + (Number(x.qty) || 0), 0)))); return [...m.options].sort(byFit).map((o) => {
                       const s0 = sel[o.pallet], mineSel = s0?.nb === m, other = !!s0 && !mineSel, gone = o.available <= 1e-9;
                       return (
                         <tr key={o.pallet} className={`${mineSel ? 'picked' : ''} ${gone ? 'gone' : ''}`} onClick={(e) => { if (!gone && !other && (e.target as HTMLElement).tagName !== 'INPUT') toggleInv(m, o); }}>
@@ -1070,7 +1118,7 @@ function KorberChooser({ item, rid, batches, lineKey, roll, title, taken, mine =
     return () => clearTimeout(t);
   }, [item, q, rid, first, batches?.join(','), lineKey]); // eslint-disable-line react-hooks/exhaustive-deps
   // the rolls to suggest for what is still open (best SAP fit first, then FIFO)
-  const bestC = useMemo(() => bestSet((rows || []).filter((k) => !mine.includes(k.pallet) && !taken.includes(k.pallet)), Math.min(open, rollOpen)), [rows, mine, taken, open, rollOpen]);
+  const bestC = useMemo(() => smartBest((rows || []).filter((k) => !mine.includes(k.pallet) && !taken.includes(k.pallet)).map((k) => ({ ...k, shade: k.sap?.shade ?? null })), Math.min(open, rollOpen)), [rows, mine, taken, open, rollOpen]);
   return (
     <div className="kchooser">
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>

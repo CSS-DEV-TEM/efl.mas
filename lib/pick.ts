@@ -1,4 +1,5 @@
 /** Picking: types, file reading for the three pick reports, and the Packing List workbook. */
+import { keepFile } from './files';
 import * as XLSX from 'xlsx';
 import * as XLSXS from 'xlsx-js-style';
 import { planTableAoa } from './export';
@@ -111,7 +112,10 @@ export function findTable(sheets: { name: string; grid: Grid }[], src: PickSrc) 
 /** Reads a pick report file and uploads it (Korber: only the rolls of items in the plan / shade reports). */
 /** Uploads a ZINR / ZCOMENT VIEW / Korber file — to a Pick (`rid`), or as the shared report (no rid). */
 export async function uploadPickFile(src: PickSrc, file: File, rid?: string | null) {
-  return uploadPickSheets(src, readWorkbook(await file.arrayBuffer()), file.name, rid);
+  const r = await uploadPickSheets(src, readWorkbook(await file.arrayBuffer()), file.name, rid);
+  // the original file is kept as it was: it can be downloaded again (Uploads → Uploaded files)
+  await keepFile(file, [src], rid);
+  return r;
 }
 /** The same, from sheets already read (one sheet of a workbook that has several reports). */
 export async function uploadPickSheets(src: PickSrc, sheets: ReturnType<typeof readWorkbook>, fileName: string, rid?: string | null) {

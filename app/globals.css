@@ -949,3 +949,21 @@ tr.on-hold td { background: color-mix(in srgb, #ef4444 9%, transparent); }
   .mac-closing { display: none !important; }
 }
 .plc-list td:last-child { white-space: normal; min-width: 280px; }
+.uf-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: space-between; margin-bottom: 8px; }
+.uf-bar .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.uf-bar .as-search { flex: 0 1 260px; }
+
+/* smart roll suggestion */
+.smart-box { border: 1px solid color-mix(in srgb, var(--accent, #e8590c) 45%, var(--line)); background: color-mix(in srgb, var(--accent, #e8590c) 6%, var(--panel)); border-radius: 10px; padding: 10px 12px; margin: 6px 0 10px; display: grid; gap: 6px; }
+.smart-box.same { border-color: color-mix(in srgb, var(--ok) 50%, var(--line)); background: color-mix(in srgb, var(--ok) 6%, var(--panel)); }
+.smart-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.smart-badge { font-weight: 700; color: var(--accent, #e8590c); font-size: 13px; }
+.smart-rolls { display: flex; gap: 6px; flex-wrap: wrap; }
+.smart-roll { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); }
+.smart-roll.cut { border-color: color-mix(in srgb, var(--warn, #b7791f) 60%, var(--line)); }
+.smart-why { margin: 0; padding-left: 18px; font-size: 12.5px; color: var(--ink-2); display: grid; gap: 1px; }
+.smart-warn { font-size: 12.5px; color: var(--warn, #b7791f); }
+.smart-vs { font-size: 12.5px; color: var(--ink-2); }
+.smart-vs .bad-t { color: var(--bad, #c0392b); font-weight: 600; }
+.smart-alt { display: flex; gap: 8px; align-items: center; justify-content: space-between; font-size: 12.5px; border-top: 1px dashed var(--line); padding-top: 4px; }
+.smart-box > .linkish { justify-self: start; }

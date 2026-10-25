@@ -1,4 +1,5 @@
 'use client';
+import { downloadLatest } from '@/lib/files';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, getSession, isBossRole } from '@/lib/api';
 import { ago, fmt, fmtDate } from '@/lib/calc';
@@ -146,6 +147,7 @@ export default function DayPickBar({ day, setDay, rid, setRid, toast, refreshKey
                     <button className="btn sm primary" disabled={!!busy} aria-busy={busy === r.src || undefined} onClick={() => inputs.current[r.src]?.click()}>{busy === r.src ? 'Uploading…' : r.own ? 'Upload again' : 'Upload'}</button>
                     <input ref={(el) => { inputs.current[r.src] = el; }} type="file" hidden accept=".xlsx,.xls,.xlsm,.csv" onChange={(e) => { const f = e.target.files?.[0]; if (f) void upload(r.src as PickSrc, f); e.target.value = ''; }} />
                   </>}
+                  {r.own && <button className="btn sm" title="Download the Excel file as it was uploaded for this Pick" onClick={() => downloadLatest(r.src, rid).then((n) => toast(`${n} downloaded`)).catch((e) => toast(e instanceof Error ? e.message : 'Could not download.'))}>⬇ Original</button>}
                   {admin && r.own && r.src !== 'plan' && <button className="btn sm danger" onClick={() => clearOwn(r.src)}>Remove</button>}
                 </div>
               </div>

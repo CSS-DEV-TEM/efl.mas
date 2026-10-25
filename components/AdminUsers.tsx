@@ -96,6 +96,7 @@ const GROUPS: { id: string; label: string; hint: string }[] = [
   { id: 'dispatch', label: 'Old dispatch uploads', hint: 'dispatch files uploaded before picking' },
   { id: 'settings', label: 'Plant settings', hint: 'plant names, responsible, target times' },
   { id: 'history', label: 'Upload history & activity log', hint: 'the "Recent uploads" lists' },
+  { id: 'files', label: 'Uploaded Excel files', hint: 'the original files kept for download (Uploads → Uploaded files)' },
 ];
 
 /** Admin: empty chosen parts of the database. Users and passwords are never removed. */
