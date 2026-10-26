@@ -6,10 +6,8 @@ import CompleteLine from '@/components/CompleteLine';
 import PlanReport, { type PlanReportRes } from '@/components/PlanReport';
 import { ago, avail, fmt, fmtDate, fmtQty, isDispatched, isDone, need, periodOf, type Line } from '@/lib/calc';
 import { action } from '@/lib/smart';
-import { downloadLatest } from '@/lib/files';
-import { smartBest, smartSuggest, type Suggestion } from '@/lib/rollSuggest';
 import {
-  PICK_SRCS, type PLIssue, type NotPicked, notPickedWhy, korberWorkbook, ordinal, packingListWorkbook, saveWorkbook, uploadPickFile,
+  PICK_SRCS, type PLIssue, korberWorkbook, ordinal, packingListWorkbook, saveWorkbook, uploadPickFile,
   pickNote, type Candidate, type Candidates, type KorberRow, type SapFit, type ManualRoll, type NbOption, type NoBarcodeRoll, type PickHistory, type PickSrc,
 } from '@/lib/pick';
 
@@ -234,7 +232,6 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
                 <div><b>{p.title}</b> <span className="pill mute">{fmt(cnt(p.src))} rows</span>{' '}
                   {(() => { const u0 = status?.reports?.find((x) => x.src === p.src)?.uses; return rid && u0 ? <span className={`pill ${u0 === 'own' ? 'ok' : u0 === 'shared' ? 'warn' : 'bad'}`}>{u0 === 'own' ? 'this Pick' : u0 === 'shared' ? 'shared' : 'missing'}</span> : null; })()}</div>
                 <span className="muted small">{u ? `${u.file_name || ''} · ${u.uploaded_by} · ${ago(u.uploaded_at)}` : p.hint}</span>
-                {u && <button className="btn sm" title="Download the Excel file as it was uploaded" onClick={() => downloadLatest(p.src, rid || '').then((n) => toast(`${n} downloaded`)).catch((e) => toast(e instanceof Error ? e.message : 'Could not download.'))}>⬇ Original</button>}
                 {canEdit && <>
                   <button className="btn sm primary" aria-busy={busy === p.src || undefined} disabled={!!busy || !rid} title={rid ? `Upload to ${label || rid}` : isWk ? 'Choose the plant first: a week plan\'s reports belong to one plant' : 'Choose a Pick first'} onClick={() => inputs.current[p.src]?.click()}>{busy === p.src ? 'Uploading…' : `Upload ${p.title}`}</button>
                   <input ref={(el) => { inputs.current[p.src] = el; }} type="file" hidden accept=".xlsx,.xls,.xlsm,.csv" onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(p.src, f); e.target.value = ''; }} />
@@ -261,6 +258,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
         <div className="pick-tabs" role="tablist" aria-label="Plan → Pick views">
           {([
             ['To pick now', [
+              ...(possible.size > 0 ? [['possible', 'Posibal pending', 'POSIBAL PENDING (plan report): QTY − ALRADY SEND, and the warehouse ZMMBE has UR for it — pick these now']] : []),
               ['ready', 'Auto match', 'Lines with All-match rolls — “Pick all matched” picks them (a line they only part cover also shows under Needs manual for the rest)'],
               ['manual', 'Needs manual', 'Lines with UR the matched rolls do not cover: rolls to check, shared lots, no barcode, not matched or Manual pallet — with the reason'],
               ['open', 'All with UR', 'Every open line with UR to pick'],
@@ -430,6 +428,15 @@ const fifoText = (d?: string | null) => (d ? d.split('-').reverse().join('-') : 
 /** manual selection: pickable first, then the best SAP fit to the SO line, then FIFO (oldest first) */
 const byFit = <T extends { fifo?: string | null; available: number; blocked?: string; sap?: SapFit | null }>(a: T, b: T) =>
   Number(b.available > 1e-9 && !b.blocked) - Number(a.available > 1e-9 && !a.blocked) || (b.sap?.score ?? 0) - (a.sap?.score ?? 0) || fifoKey(a).localeCompare(fifoKey(b));
+/** the rolls to suggest: best fit first, until they cover the QTY still open */
+function bestSet<T extends { pallet: string; available: number; blocked?: string; sap?: SapFit | null; fifo?: string | null }>(rows: T[], open: number): Set<string> {
+  const out = new Set<string>(); let left = open;
+  if (!(left > 1e-9) || !Number.isFinite(left)) return out;
+  // a lot shared by several SO lines: this line's suggested rolls (its share) come first, so another line's rolls are not taken
+  const sug = (r: T) => Number(!!(r as T & { suggested?: boolean }).suggested);
+  for (const r of [...rows].sort((a, b) => sug(b) - sug(a) || byFit(a, b))) { if (left <= 1e-9) break; if (r.available <= 1e-9 || r.blocked || (r.sap && r.sap.miss.length && (r.sap.score ?? 0) < 40)) continue; out.add(r.pallet); left -= r.available; }
+  return out;
+}
 /** the SAP fields a roll matches (✓) and does not (✗), small under the roll */
 function SapFitLine({ f, best }: { f?: SapFit | null; best?: boolean }) {
   if (!f) return null;
@@ -442,48 +449,6 @@ function SapFitLine({ f, best }: { f?: SapFit | null; best?: boolean }) {
     </div>
   );
 }
-/**
- * The smart suggestion: the best set of rolls for the QTY (shade, lot, cut, FIFO, SAP fit, lot QTY — see lib/rollSuggest),
- * why it is the best, two other good sets, and how the rolls ticked now compare. Nothing is ticked until "Use".
- */
-function SmartPanel({ smart, rolls, sel, lotCaps, onUse }: { smart: ReturnType<typeof smartSuggest>; rolls: Candidate[]; sel: Sel; lotCaps: Map<string, number>; onUse: (x: Suggestion) => void }) {
-  const [more, setMore] = useState(false);
-  const b = smart.best!;
-  const mine = rolls.filter((r) => sel[r.pallet] && !sel[r.pallet].manual && !sel[r.pallet].nb);
-  const same = mine.length === b.picks.length && b.picks.every((p) => Math.abs((Number(sel[p.pallet]?.qty) || 0) - p.qty) < 0.0005);
-  const shadesOf = (rs: Candidate[]) => new Set(rs.map((r) => String(r.shade ?? '').trim().toUpperCase()).filter(Boolean)).size;
-  const cutsMine = mine.filter((r) => (Number(sel[r.pallet].qty) || 0) < r.available - 0.0005).length;
-  // the ticked rolls against each ZINSR lot's QTY
-  const use = new Map<string, number>();
-  for (const r of mine) { const ls = Array.from(new Set((r.parts?.length ? r.parts.map((p) => p.lot) : r.insp_lots).map(String))).filter((l) => lotCaps.has(l)); if (ls.length) use.set(ls.join(','), (use.get(ls.join(',')) ?? 0) + (Number(sel[r.pallet].qty) || 0)); }
-  const overLot = Array.from(use).filter(([k, q]) => q > k.split(',').reduce((t, l) => t + (lotCaps.get(l) ?? 0), 0) + 0.0005).length;
-  const totMine = r3(mine.reduce((t, r) => t + (Number(sel[r.pallet].qty) || 0), 0));
-  const line = (x: Suggestion) => `${x.picks.length} roll${x.picks.length === 1 ? '' : 's'} · ${fmtQty(x.total)} · ${x.cuts ? `${x.cuts} cut` : 'no cut'} · ${x.shades.length ? `shade ${x.shades.join('+')}` : 'no shade'}${x.short > 0 ? ` · ${fmtQty(x.short)} short` : ''}`;
-  return (
-    <div className={`smart-box ${same ? 'same' : ''}`} role="region" aria-label="Smart roll suggestion">
-      <div className="smart-head">
-        <span className="smart-badge">★ Smart suggestion</span>
-        <b>{line(b)}</b>
-        <span className="muted small">{smart.considered} rolls checked{smart.considered <= 14 ? ' · every combination scored' : ''}</span>
-        <span style={{ flex: 1 }} />
-        {same ? <span className="pill ok">Your selection is the smart suggestion ✓</span>
-          : <button type="button" className="btn sm primary" onClick={() => onUse(b)}>Use smart suggestion</button>}
-      </div>
-      <div className="smart-rolls">{b.picks.map((p) => <span key={p.pallet} className={`smart-roll ${p.cut ? 'cut' : ''}`} title={p.cut ? `Cut: take ${p.qty}, ${p.left} stays` : 'Full roll'}><span className="mono">{p.pallet}</span> {fmtQty(p.qty)}{p.cut ? ' ✂' : ''}</span>)}</div>
-      <ul className="smart-why">{b.reasons.map((r, i) => <li key={i}>{r}</li>)}</ul>
-      {b.warnings.length > 0 && <div className="smart-warn">{b.warnings.map((w, i) => <div key={i}>⚠ {w}</div>)}</div>}
-      {!same && mine.length > 0 && (
-        <div className="smart-vs">Your ticks now: {mine.length} roll{mine.length === 1 ? '' : 's'} · {fmtQty(totMine)} · {cutsMine ? `${cutsMine} cut` : 'no cut'} · {shadesOf(mine) || 'no'} shade{shadesOf(mine) === 1 ? '' : 's'}{overLot ? <b className="bad-t"> · over a ZINSR lot QTY</b> : ''}
-          {shadesOf(mine) > b.shades.length && <b className="bad-t"> · more shades than needed</b>}{cutsMine > b.cuts && <b className="bad-t"> · more cuts than needed</b>}</div>
-      )}
-      {smart.alts.length > 0 && <button type="button" className="linkish" onClick={() => setMore((v) => !v)}>{more ? 'Hide' : 'Show'} {smart.alts.length} other good set{smart.alts.length === 1 ? '' : 's'}</button>}
-      {more && smart.alts.map((a, i) => (
-        <div key={i} className="smart-alt"><span>{line(a)} — {a.picks.map((p) => p.pallet.slice(-6)).join(', ')}</span><button type="button" className="btn sm" onClick={() => onUse(a)}>Use</button></div>
-      ))}
-    </div>
-  );
-}
-
 /** the reports a line reads: a week plan line → its week + plant; a Pick → the Pick */
 const lineScope = (week: string, plant: string | null | undefined) => (/^\d{4}-W\d{2}$/.test(week) && (plant || '').trim() ? `${week}@${(plant || '').trim().toUpperCase().replace(/\s+/g, '')}` : week);
 
@@ -782,17 +747,6 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
 
   const open = c ? c.rolls.filter((r) => r.available > 1e-9) : [];
   const gone = c ? c.rolls.filter((r) => r.available <= 1e-9) : [];
-  // the smart suggestion for the QTY to pick: searched once when the rolls load (not on every click)
-  const lotCaps = useMemo(() => new Map((c?.lots || []).filter((l) => (l.cap ?? l.need) != null).map((l) => [String(l.lot), Number(l.cap ?? l.need)])), [c]);
-  const smart = useMemo(() => (c ? smartSuggest(c.rolls, { need: Math.max(0, r3(c.need - c.picked)), lotCaps, batchNeed: c.batchNeed?.length ? new Map(c.batchNeed.map((b) => [b.batch, b.need])) : undefined }) : null), [c, lotCaps]);
-  const useSmart = (x: Suggestion) => {
-    const keep = Object.fromEntries([...manualSel, ...nbSel]);
-    const n: Sel = { ...keep };
-    for (const p of x.picks) n[p.pallet] = { qty: String(p.qty) };
-    const cut = x.picks.find((p) => p.cut);
-    const cr = cut ? c?.rolls.find((r) => r.pallet === cut.pallet) : undefined;
-    setSel(n); setLast(cut && cr ? { pallet: cut.pallet, hu: cr.supplier_hu, full: r3(cr.available), cut: cut.qty } : null); setLastMode('cut'); setOverOk(false); setCloseShort(false);
-  };
   return (
     <div className="modal-back">{/* the pick window closes only with ✕ / Cancel — a click outside it does not lose the selection */}
       <div className="modal xwide pkm" role="dialog" aria-modal="true" aria-labelledby="pk-title">
@@ -850,12 +804,11 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
                 {nSel > 0 && <button type="button" className="btn sm" onClick={() => { setSel({}); setLast(null); }}>Clear</button>}
                 <button type="button" className="btn sm" disabled={short <= 1e-9} onClick={() => setFreeOpen(true)} title={short <= 1e-9 ? 'No shortage: the selected rolls cover the QTY to pick' : `Add a Korber pallet by hand for the shortage of ${fmtQty(short)}`}>+ Manual pallet{short > 1e-9 ? ` (${fmtQty(short)} short)` : ''}</button>
               </div>
-              {smart?.best && open.length > 1 && <SmartPanel smart={smart} rolls={c.rolls} sel={sel} lotCaps={lotCaps} onUse={useSmart} />}
               {!c.rolls.length ? <p className="muted">No Korber roll matched on Barcode for this line.{c.nobarcode?.some((m) => m.invChoice) ? ' Choose rolls under “Invoice + Item match” below.' : c.nobarcode?.length ? ' Rolls without a barcode: choose them under “No Barcode” below.' : c.manual?.length ? ' See “Not matched” below.' : ' Check that ZINR, ZCOMENT VIEW and Korber are uploaded and current.'}</p> : (
                 <div className="table-wrap" style={{ maxHeight: 360 }}>
                   <table className="mini pk-table">
                     <thead><tr><th /><th>Supplier HU</th><th>Pallet</th><th>Location</th><th title="Korber Fifo Date — oldest first">FIFO</th><th>Shade</th><th className="n">Available</th><th className="n">Pick qty</th><th>Match</th></tr></thead>
-                    <tbody>{(() => { const best = new Set((smart?.best?.picks || []).map((p) => p.pallet).filter((p) => !sel[p])); return [...[...open].sort((a, b) => Number(!!b.suggested) - Number(!!a.suggested) || byFit(a, b)), ...gone].map((r) => {
+                    <tbody>{(() => { const best = bestSet(open.filter((r) => !sel[r.pallet]), Math.max(0, r3(remaining - total))); return [...[...open].sort((a, b) => Number(!!b.suggested) - Number(!!a.suggested) || byFit(a, b)), ...gone].map((r) => {
                       const s = sel[r.pallet], isGone = r.available <= 1e-9, isLast = lastOn && last!.pallet === r.pallet;
                       return (
                         <tr key={r.pallet} className={`${s ? 'picked' : ''} ${isGone ? 'gone' : ''}`} onClick={(e) => { if (!isGone && (e.target as HTMLElement).tagName !== 'INPUT') toggle(r); }}>
@@ -939,7 +892,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
                   <p className="sub" style={{ margin: '0 0 6px' }}>This inspection lot has no rolls in ZCOMENT VIEW. Korber rolls of the <b>same Invoice + Item</b> with <b>another Lot Number</b>{m.po ? <> — <b>Po</b> matches first</> : ''}{''} (in ZROLLMGT at the bin, not another roll&apos;s barcode). Tick the rolls to pick for this lot; each needs “I checked” because its Lot Number differs.</p>
                   <div className="table-wrap pk-tbl" style={{ maxHeight: 280 }}><table className="mini">
                     <thead><tr><th /><th>Pallet</th><th>Korber Lot Number</th><th>Supplier HU</th><th>Location</th><th title="Korber Fifo Date — oldest first">FIFO</th><th>Po</th><th className="n">Available</th><th className="n">Pick qty</th></tr></thead>
-                    <tbody>{(() => { const best = smartBest(m.options.filter((o) => !sel[o.pallet]).map((o) => ({ ...o, shade: o.sap?.shade ?? null })), Math.max(0, r3(Number(m.roll_qty) - mine.reduce((t, [, x]) => t + (Number(x.qty) || 0), 0)))); return [...m.options].sort(byFit).map((o) => {
+                    <tbody>{(() => { const best = bestSet(m.options.filter((o) => !sel[o.pallet]), Math.max(0, r3(Number(m.roll_qty) - mine.reduce((t, [, x]) => t + (Number(x.qty) || 0), 0)))); return [...m.options].sort(byFit).map((o) => {
                       const s0 = sel[o.pallet], mineSel = s0?.nb === m, other = !!s0 && !mineSel, gone = o.available <= 1e-9;
                       return (
                         <tr key={o.pallet} className={`${mineSel ? 'picked' : ''} ${gone ? 'gone' : ''}`} onClick={(e) => { if (!gone && !other && (e.target as HTMLElement).tagName !== 'INPUT') toggleInv(m, o); }}>
@@ -1117,7 +1070,7 @@ function KorberChooser({ item, rid, batches, lineKey, roll, title, taken, mine =
     return () => clearTimeout(t);
   }, [item, q, rid, first, batches?.join(','), lineKey]); // eslint-disable-line react-hooks/exhaustive-deps
   // the rolls to suggest for what is still open (best SAP fit first, then FIFO)
-  const bestC = useMemo(() => smartBest((rows || []).filter((k) => !mine.includes(k.pallet) && !taken.includes(k.pallet)).map((k) => ({ ...k, shade: k.sap?.shade ?? null })), Math.min(open, rollOpen)), [rows, mine, taken, open, rollOpen]);
+  const bestC = useMemo(() => bestSet((rows || []).filter((k) => !mine.includes(k.pallet) && !taken.includes(k.pallet)), Math.min(open, rollOpen)), [rows, mine, taken, open, rollOpen]);
   return (
     <div className="kchooser">
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -1201,55 +1154,14 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
       for (const w of weeks.filter((x) => /^\d{4}-W\d{2}$/.test(x))) {
         try { plan.push(...(await api<{ rows: LineP[] }>(`/api/pullplan?week=${encodeURIComponent(w)}`)).rows.filter((l) => lineIds.has(`${l.key}|${l.date ?? ''}`))); } catch { /* plan not available */ }
       }
-      // the lines the system did not pick (in full), and why: the day Picks' plan lines, and for a week plan its lines of
-      // the same plants and plan dates as the picked lines
-      const scope: LineP[] = plan.filter((l) => !/^\d{4}-W\d{2}$/.test(l.week));
-      for (const w of weeks.filter((x) => /^\d{4}-W\d{2}$/.test(x))) {
-        const picked = target.filter((r) => r.week === w);
-        const dates = new Set(picked.map((r) => r.line.split('|')[3] || ''));
-        const plants = new Set(picked.map((r) => String(r.plant || '').toUpperCase().replace(/\s+/g, '')));
-        try { scope.push(...(await api<{ rows: LineP[] }>(`/api/pullplan?week=${encodeURIComponent(w)}`)).rows.filter((l) => dates.has(l.date ?? '') && (!plants.size || plants.has(String(l.plant || '').toUpperCase().replace(/\s+/g, ''))))); } catch { /* plan not available */ }
-      }
-      const open = scope.filter((l) => !isDone(l) && !isDispatched(l) && need(l) > 1e-9);
-      const notPicked: NotPicked[] = [];
-      let done = 0;
-      const one = async (l: LineP) => {
-        // no UR on the dashboard: nothing the system could pick — no need to read the rolls
-        if (!l.hold && !(Number(l.ur) > 1e-9)) {
-          const parts = [Number(l.qi) > 0 ? `QI ${r3(Number(l.qi))}` : '', Number(l.block) > 0 ? `Block ${r3(Number(l.block))}` : '', Number(l.assigned) > 0 ? `Assigned ${r3(Number(l.assigned))}` : ''].filter(Boolean);
-          notPicked.push({ pick: pickName(l.week), so: l.so, li: l.li, item: l.item, plant: l.plant, date: l.date, planQty: Number(l.qty) || 0, ur: 0, picked: Number(l.picked ?? 0), balance: r3(need(l)), matched: null,
-            reason: 'No UR in ZMMBE', detail: parts.length ? `ZMMBE has no Unrestricted stock: ${parts.join(' · ')}` : 'Not in ZMMBE (no stock for this SO / LI / Item)' });
-          return;
-        }
-        let c: Candidates | null = null, err = '';
-        try { c = await api<Candidates>(`/api/pick/candidates?week=${encodeURIComponent(l.week)}&key=${encodeURIComponent(l.key)}&date=${encodeURIComponent(l.date ?? '')}`); } catch (e) { err = e instanceof Error ? e.message : ''; }
-        const left = c ? r3(c.need - c.picked) : need(l);
-        // what the plan still wants (plan QTY less what was picked): more than the UR lets the system pick
-        const planLeft = c ? r3(Number(c.planQty ?? l.qty) - c.picked) : need(l);
-        let w = notPickedWhy(c, l, err), bal = left;
-        if (c && !(left > 1e-9) && !l.hold) {
-          if (!(planLeft > 1e-9)) return;
-          const ur0 = Number(c.ur ?? 0);
-          w = ur0 > 1e-9 ? { reason: 'Plan QTY more than UR', detail: `UR ${r3(ur0)} is picked; the plan wants ${r3(planLeft)} more — no stock left in ZMMBE UR` } : { reason: 'No UR in ZMMBE', detail: c.sent ? `Already sent ${r3(Number(c.sent))}; ZMMBE has no Unrestricted stock left in the warehouse` : 'ZMMBE has no Unrestricted stock for this SO / LI (QI, Block, Assigned or not in ZMMBE)' };
-          bal = planLeft;
-        }
-        notPicked.push({ pick: pickName(l.week), so: l.so, li: l.li, item: l.item, plant: l.plant, date: l.date, planQty: Number(l.qty) || 0, ur: c ? Number(c.ur ?? 0) : null,
-          picked: c ? r3(c.picked) : Number(l.picked ?? 0), balance: r3(Math.max(0, bal)), matched: c ? r3(c.matchedAvail ?? c.rolls.reduce((t, r) => t + Math.max(0, r.available), 0)) : null, reason: w.reason, detail: w.detail });
-      };
-      // a few lines at a time
-      const queue = [...open];
-      await Promise.all(Array.from({ length: Math.min(5, queue.length) }, async () => { for (let l = queue.shift(); l; l = queue.shift()) { await one(l); done++; setPlProg(`${done} / ${open.length}`); } }));
-      setPlProg('');
-      notPicked.sort((a, b) => a.pick.localeCompare(b.pick) || a.reason.localeCompare(b.reason) || a.so.localeCompare(b.so) || Number(a.li) - Number(b.li));
       // the SAP and Korber data of every roll is checked first: problems are shown before the file is saved
       const issues: PLIssue[] = [];
-      const wb = packingListWorkbook(h!, { ids: new Set(target.map((r) => r.id)), combined: oneSheet, pfcSlocs, plan, planTitle: `Plan · ${weeks.map(pickName).join(', ')}`, issues, notPicked });
+      const wb = packingListWorkbook(h!, { ids: new Set(target.map((r) => r.id)), combined: oneSheet, pfcSlocs, plan, planTitle: `Plan · ${weeks.map(pickName).join(', ')}`, issues });
       const file = `Packing_List_${day}${ptag}${tag}.xlsx`;
       if (issues.length) setPlCheck({ wb, file, issues });
-      else { saveWorkbook(wb, file); toast(`Packing List checked ✓ — ${target.length} pick${target.length === 1 ? '' : 's'}: SAP lines and Korber rows are right${notPicked.length ? ` · ${notPicked.length} line${notPicked.length === 1 ? '' : 's'} not picked (sheet “Not Picked”)` : ''}`); }
-    } finally { setPlBusy(false); setPlProg(''); }
+      else { saveWorkbook(wb, file); toast(`Packing List checked ✓ — ${target.length} pick${target.length === 1 ? '' : 's'}: SAP lines and Korber rows are right`); }
+    } finally { setPlBusy(false); }
   };
-  const [plProg, setPlProg] = useState('');
   const [plCheck, setPlCheck] = useState<{ wb: ReturnType<typeof packingListWorkbook>; file: string; issues: PLIssue[] } | null>(null);
   const downloadKorber = () => saveWorkbook(korberWorkbook(h!, new Set(target.map((r) => r.id))), `Korber_Picked_${day}${ptag}${tag}.xlsx`);
   const markedQty = marked.reduce((t, r) => t + r.qty, 0);
@@ -1312,7 +1224,7 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
             <button className={oneSheet ? 'on' : ''} onClick={() => setOne(true)}>One sheet</button>
             <button className={!oneSheet ? 'on' : ''} onClick={() => setOne(false)}>Sheet per pick</button>
           </div>
-          <button className="btn primary" disabled={plBusy} aria-busy={plBusy || undefined} onClick={downloadPL}>{plBusy ? `Preparing…${plProg ? ` checking lines ${plProg}` : ''}` : `Download Packing List${marked.length ? ` (${marked.length})` : ''}`}</button>
+          <button className="btn primary" disabled={plBusy} aria-busy={plBusy || undefined} onClick={downloadPL}>{plBusy ? 'Preparing…' : `Download Packing List${marked.length ? ` (${marked.length})` : ''}`}</button>
           <button className="btn" disabled={!h.korberHeader} onClick={downloadKorber} title="The picked rolls in the Korber Inventory format (cut rolls with the cut QTY)">Korber Inventory{marked.length ? ` (${marked.length})` : ''}</button>
           {canEdit && marked.length > 0 && <button className="btn danger" disabled={!cancelable.length || !!bulkBusy} aria-busy={!!bulkBusy || undefined} onClick={cancelMarked}
             title={cancelable.length ? 'Cancel the marked picks: deleted from the history, their rolls become pickable again' : 'You can cancel only your own picks'}>{bulkBusy || `Cancel marked (${cancelable.length})`}</button>}

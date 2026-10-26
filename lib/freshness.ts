@@ -1,11 +1,11 @@
 'use client';
 import { useCallback, useEffect, useRef } from 'react';
-import { API_URL, getDiv } from './api';
+import { API_URL } from './api';
 
 /** Asks the Worker "has anything changed?" — one tiny read. null = this Worker has no /api/changes. */
 export async function fetchChanges(): Promise<{ rev: string | null; realtime: boolean } | null> {
   try {
-    const r = await fetch(API_URL + '/api/changes?div=' + getDiv(), { cache: 'no-store' });
+    const r = await fetch(API_URL + '/api/changes', { cache: 'no-store' });
     return r.ok ? ((await r.json()) as { rev: string | null; realtime: boolean }) : null;
   } catch { return null; }
 }

@@ -6,7 +6,6 @@ import { applyMapping, detectMapping, guessSrc, isHelpSheet, readWorkbook, type 
 import { PICK_SRCS, PLAN_SHEET, pickSrcOf, squash, uploadPickSheets, type PickSrc } from '@/lib/pick';
 import { todayLocal, weekDays, weekIdOf, weekOptions } from '@/lib/smart';
 import PlanReport from '@/components/PlanReport';
-import { keepFile } from '@/lib/files';
 import { useShell } from '@/components/Shell';
 
 type Mode = 'add' | 'update' | 'replace';
@@ -66,7 +65,7 @@ export default function WeekPlanManager({ toast, onChanged }: { toast: (m: strin
   const [report, setReport] = useState<string | null>(null);
 
   const fileRef = useRef<HTMLInputElement | null>(null);
-  const [file, setFile] = useState<{ name: string; sheets: ReturnType<typeof readWorkbook>; raw?: File } | null>(null);
+  const [file, setFile] = useState<{ name: string; sheets: ReturnType<typeof readWorkbook> } | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [auto, setAuto] = useState(true);
   const [week, setWeek] = useState(() => weekIdOf(todayLocal()));
@@ -112,7 +111,7 @@ export default function WeekPlanManager({ toast, onChanged }: { toast: (m: strin
         } catch { /* no plant column */ }
       }
       setPlant(pc); setAuto(true);
-      setFile({ name: f.name, sheets, raw: f }); setJobs(js);
+      setFile({ name: f.name, sheets }); setJobs(js);
     } catch { setErr('Could not read that file. Save it as .xlsx and try again.'); }
   };
   const setJob = (name: string, p: Partial<Job>) => setJobs((js) => js.map((j) => (j.name === name ? { ...j, ...p } : j)));
@@ -174,8 +173,6 @@ export default function WeekPlanManager({ toast, onChanged }: { toast: (m: strin
           }
         } catch (e) { setJob(j.name, { state: 'err', msg: e instanceof Error ? e.message : 'failed' }); }
       }
-      // the original file is kept as it was (Uploads → Uploaded files): downloaded again the same
-      await keepFile(file?.raw, [...(planJob ? ['plan'] : []), ...repJobs.map((j) => (j.kind === 'zmmbe' ? 'zmmbe' : j.pick || ''))].filter(Boolean), target || null);
       toast(`Week plan ${target.replace('@', ' · ')}: ${planJob ? 'plan' : ''}${planJob && repJobs.length ? ' + ' : ''}${repJobs.length ? `${repJobs.length} report${repJobs.length === 1 ? '' : 's'}` : ''} uploaded`);
       setPreview(null);
       const [tw, tp] = target.split('@');

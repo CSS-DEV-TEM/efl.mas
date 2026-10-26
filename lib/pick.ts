@@ -1,5 +1,4 @@
 /** Picking: types, file reading for the three pick reports, and the Packing List workbook. */
-import { keepFile } from './files';
 import * as XLSX from 'xlsx';
 import * as XLSXS from 'xlsx-js-style';
 import { planTableAoa } from './export';
@@ -112,10 +111,7 @@ export function findTable(sheets: { name: string; grid: Grid }[], src: PickSrc) 
 /** Reads a pick report file and uploads it (Korber: only the rolls of items in the plan / shade reports). */
 /** Uploads a ZINR / ZCOMENT VIEW / Korber file — to a Pick (`rid`), or as the shared report (no rid). */
 export async function uploadPickFile(src: PickSrc, file: File, rid?: string | null) {
-  const r = await uploadPickSheets(src, readWorkbook(await file.arrayBuffer()), file.name, rid);
-  // the original file is kept as it was: it can be downloaded again (Uploads → Uploaded files)
-  await keepFile(file, [src], rid);
-  return r;
+  return uploadPickSheets(src, readWorkbook(await file.arrayBuffer()), file.name, rid);
 }
 /** The same, from sheets already read (one sheet of a workbook that has several reports). */
 export async function uploadPickSheets(src: PickSrc, sheets: ReturnType<typeof readWorkbook>, fileName: string, rid?: string | null) {
@@ -228,44 +224,8 @@ function rollBatches0(r: PickReq, m: Match, p: PickRoll): { batch: string; qty: 
  * (SO | LI | Qty | Material | Batch), the Qty adding up to the table's Actual Qty. Plus a Summary and the Korber Inventory rows.
  */
 /** a problem found in the Packing List data before it is downloaded */
-/** A plan line of the Packing List's Picks that the system did not pick in full, and why. */
-export interface NotPicked { pick: string; so: string; li: string; item: string; plant: string | null; date: string | null; planQty: number; ur: number | null; picked: number; balance: number; matched: number | null; reason: string; detail: string }
-/**
- * Why a line was not picked (in full) by the system, from its candidates: hold, no UR, no matched roll (and why each roll is
- * blocked), rolls that need a person (shared lot, checks, no barcode), lot QTY limits, or matched rolls that are short.
- */
-export function notPickedWhy(c: Candidates | null, l: { hold?: string | null; status?: string | null }, err?: string): { reason: string; detail: string } {
-  if (l.hold) return { reason: 'On hold', detail: l.hold };
-  if (!c) return { reason: 'Could not check', detail: err || 'The rolls of this line could not be read.' };
-  const open = r3n(c.need - c.picked);
-  const ur = Number(c.ur ?? c.stock.reduce((t, x) => t + (Number(x.ur) || 0), 0));
-  const avail = c.rolls.filter((r) => r.available > 1e-9);
-  const why = new Map<string, number>();
-  for (const b of c.blocked || []) { const k = b.why.split(' — ')[0].replace(/(Barcode|SO) [A-Z0-9]+/g, '$1').slice(0, 70); why.set(k, (why.get(k) ?? 0) + 1); }
-  const blockedTxt = Array.from(why).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([k, n]) => `${k} (${n})`).join('; ');
-  if (!(ur > 1e-9)) return { reason: 'No UR in ZMMBE', detail: c.sent ? `Already sent ${r3n(c.sent)} — nothing left in the warehouse UR` : 'ZMMBE has no Unrestricted stock for this SO / LI (QI, Block or Assigned only, or not in ZMMBE)' };
-  if (!(open > 1e-9)) return { reason: 'Nothing left to pick', detail: `Need ${r3n(c.need)}, picked ${r3n(c.picked)}` };
-  if (!c.lots.length) return { reason: 'No ZINSR inspection lot', detail: 'ZINSR has no lot for this SO / LI / Material and its ZMMBE batch' };
-  if (!avail.length) {
-    if ((c.nobarcode || []).some((m) => !m.done)) return { reason: 'Needs manual choice — no barcode', detail: `${(c.nobarcode || []).filter((m) => !m.done).length} ZCOMENT roll(s) without a Barcode Number: choose the Korber roll by hand` };
-    if ((c.manual || []).length) return { reason: 'Needs manual choice — not matched', detail: `${c.manual!.length} ZCOMENT roll(s) do not match a Korber pallet (Lot / HU / Invoice / Po differ)${blockedTxt ? ' · ' + blockedTxt : ''}` };
-    if (c.gate?.on && !c.gate.loaded) return { reason: 'No ZROLLMGT', detail: 'ZROLLMGT is not uploaded for this Pick' };
-    if (blockedTxt) return { reason: 'Rolls blocked', detail: blockedTxt };
-    return { reason: 'No matching roll', detail: 'No Korber roll matched ZINSR → ZCOMENT VIEW → Korber for this line' };
-  }
-  const autoAvail = r3n(avail.filter((r) => !r.pool && !r.needsConfirm).reduce((t, r) => t + r.available, 0));
-  const lotRoom = r3n(c.lots.reduce((t, x) => t + Math.max(0, Number(x.cap ?? x.need ?? 0)), 0));
-  if (avail.some((r) => r.pool) && autoAvail < open - 1e-9) return { reason: 'Needs manual choice — shared lot', detail: `The Lot Number is shared by ${Math.max(...avail.map((r) => r.pool || 0))} SO lines: tick this line's rolls (${avail.filter((r) => r.suggested).length} suggested)` };
-  if (avail.some((r) => r.needsConfirm) && autoAvail < open - 1e-9) return { reason: 'Needs checking', detail: Array.from(new Set(avail.filter((r) => r.needsConfirm).flatMap((r) => r.warnings))).slice(0, 3).join('; ') };
-  if (c.lots.some((x) => x.cap != null) && lotRoom < open - 1e-9) return { reason: 'ZINSR lot QTY used up', detail: `The ZINSR lots give ${lotRoom} more; ${open} is open` };
-  const matched = r3n(c.matchedAvail ?? avail.reduce((t, r) => t + r.available, 0));
-  if (matched < open - 1e-9) return { reason: 'Matched rolls short', detail: `Matched rolls have ${matched}; ${open} is open${blockedTxt ? ' · blocked: ' + blockedTxt : ''}` };
-  return { reason: 'Not picked yet', detail: `${avail.length} matched roll(s) with ${matched} — pick them (Pick all matched or by hand)` };
-}
-const r3n = (n: number) => Math.round(n * 1000) / 1000;
-
 export interface PLIssue { level: 'error' | 'warn'; pallet: string; so: string; li: string; item: string; what: string }
-export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolean; ids?: Set<number> | number[]; combined?: boolean; pfcSlocs?: string[]; /** the Pick's plan lines (dashboard table) → a "Plan" sheet */ plan?: Line[]; planTitle?: string; /** filled with the problems found (SAP and Korber data checked) */ issues?: PLIssue[]; /** plan lines the system did not pick, and why → a "Not Picked" sheet */ notPicked?: NotPicked[] } = {}) {
+export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolean; ids?: Set<number> | number[]; combined?: boolean; pfcSlocs?: string[]; /** the Pick's plan lines (dashboard table) → a "Plan" sheet */ plan?: Line[]; planTitle?: string; /** filled with the problems found (SAP and Korber data checked) */ issues?: PLIssue[] } = {}) {
   const only = opts.ids ? new Set(opts.ids) : null;
   const reqs = h.requests.filter((r) => !r.cancelled_at && (!only || !only.size || only.has(r.id)));
   const header = (h.korberHeader || []).map(hn);
@@ -518,26 +478,6 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
   for (let r = 1; r < tn; r++) { const ref = U.encode_cell({ r, c: 11 }); if (tws[ref] && tally[r][11] !== '✓') (tws[ref] as { s?: unknown }).s = ST.cut; }
   tws['!cols'] = [10, 13, 5, 12, 11, 7, 10, 10, 13, 36, 26, 14].map((w) => ({ wch: w }));
   U.book_append_sheet(wb, tws, 'Tally');
-  // the plan lines the system could not pick (in full), and why
-  if (opts.notPicked) {
-    const np = opts.notPicked;
-    const head = ['Pick', 'SO', 'LI', 'Item', 'Plant', 'Plan date', 'Plan QTY', 'UR', 'Picked', 'Balance', 'Matched rolls QTY', 'Why not picked', 'Detail'];
-    const rows = np.map((x) => [x.pick, x.so, num(x.li), num(x.item), x.plant ?? '', x.date ? x.date.split('-').reverse().join('-') : '', x.planQty, x.ur, x.picked, x.balance, x.matched, x.reason, x.detail]);
-    // a count per reason on top
-    const byWhy = new Map<string, { n: number; q: number }>();
-    for (const x of np) { const v = byWhy.get(x.reason) ?? { n: 0, q: 0 }; v.n++; v.q = tq(v.q + x.balance); byWhy.set(x.reason, v); }
-    const top: (string | number | null)[][] = [['NOT PICKED BY THE SYSTEM', null, `${np.length} line${np.length === 1 ? '' : 's'}`, null, null, null, null, null, null, tq(np.reduce((t, x) => t + x.balance, 0))],
-      ...Array.from(byWhy).sort((a, b) => b[1].n - a[1].n).map(([k, v]) => [k, null, `${v.n} line${v.n === 1 ? '' : 's'}`, null, null, null, null, null, null, v.q]), []];
-    const nws = U.aoa_to_sheet(np.length ? [...top, head, ...rows] : [['Every plan line of these Picks was picked in full by the system.']]);
-    if (np.length) {
-      const hr = top.length;
-      for (let i = 0; i < head.length; i++) { const ref = U.encode_cell({ r: hr, c: i }); (nws[ref] as { s?: unknown }).s = ST.head; }
-      const t0 = U.encode_cell({ r: 0, c: 0 }); (nws[t0] as { s?: unknown }).s = ST.top;
-      rows.forEach((_, i) => { const ref = U.encode_cell({ r: hr + 1 + i, c: 11 }); if (nws[ref]) (nws[ref] as { s?: unknown }).s = ST.cut; });
-    }
-    nws['!cols'] = [24, 13, 5, 12, 12, 11, 10, 10, 10, 10, 12, 30, 90].map((w) => ({ wch: w }));
-    U.book_append_sheet(wb, nws, 'Not Picked');
-  }
   // the checks of the SAP and Korber data (only when something was found)
   if (issues.length) {
     const cws = U.aoa_to_sheet([['Level', 'Pallet', 'SO', 'LI', 'Item', 'Check'], ...issues.map((x) => [x.level === 'error' ? 'ERROR' : 'CHECK', x.pallet, x.so, num(x.li), num(x.item), x.what])]);
