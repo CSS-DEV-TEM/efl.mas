@@ -10,7 +10,15 @@ export type Role = 'admin' | 'head' | 'editor' | 'viewer';
 export const ROLE_NAME: Record<Role, string> = { admin: 'Admin', head: 'Head', editor: 'User', viewer: 'Viewer' };
 /** Admin and Head see and change everyone's plan and picks; only the Admin changes system settings. */
 export const isBossRole = (r?: Role | null) => r === 'admin' || r === 'head';
-export interface User { username: string; role: Role }
+export interface User { username: string; role: Role; /** the systems the user can open (Admin / Head: both) */ divs?: Div[] }
+/** Two systems in one: MAS Active and MAS Kreeda — each with its own plans, reports, picks and settings. */
+export type Div = 'active' | 'kreeda';
+export const DIV_NAME: Record<Div, string> = { active: 'MAS Active', kreeda: 'MAS Kreeda' };
+const DIV_KEY = 'mas-div';
+export function getDiv(): Div { try { return localStorage.getItem(DIV_KEY) === 'kreeda' ? 'kreeda' : 'active'; } catch { return 'active'; } }
+export function setDiv(d: Div) { try { localStorage.setItem(DIV_KEY, d); } catch { /* private mode */ } }
+/** the systems of the signed-in user (older sessions: MAS Active) */
+export const userDivs = (u?: User | null): Div[] => (u?.role === 'admin' || u?.role === 'head' ? ['active', 'kreeda'] : u?.divs?.length ? u.divs : ['active']);
 interface Stored { token: string; user: User; expires: number }
 
 const KEY = 'shade-tracker-session';
@@ -52,19 +60,26 @@ export async function api<T = unknown>(path: string, opts: { method?: string; bo
 async function apiCall<T>(path: string, opts: { method?: string; body?: unknown }): Promise<T> {
   const s = getSession();
   let res: Response;
-  try {
-    res = await fetch(API_URL + path, {
-      method: opts.method || 'GET',
-      headers: { 'Content-Type': 'application/json', ...(s ? { Authorization: 'Bearer ' + s.token } : {}) },
-      body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
-    });
-  } catch {
-    throw new ApiError(0, 'Cannot reach the server. Check your connection, or that NEXT_PUBLIC_API_URL points at the Worker.');
+  // a read that fails on the network (a busy server, a dropped connection) is tried again twice
+  const get = !opts.method || opts.method === 'GET';
+  for (let attempt = 0; ; attempt++) {
+    try {
+      res = await fetch(API_URL + path, {
+        method: opts.method || 'GET',
+        headers: { 'Content-Type': 'application/json', 'X-Div': getDiv(), ...(s ? { Authorization: 'Bearer ' + s.token } : {}) },
+        body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+      });
+      if (get && res.status === 503 && attempt < 2) { await new Promise((r) => setTimeout(r, 700 * (attempt + 1))); continue; }
+      break;
+    } catch {
+      if (get && attempt < 2) { await new Promise((r) => setTimeout(r, 700 * (attempt + 1))); continue; }
+      throw new ApiError(0, 'Cannot reach the server. Check your connection, or that NEXT_PUBLIC_API_URL points at the Worker.');
+    }
   }
   const data = await res.json().catch(() => ({}));
   if (res.status === 401 && path !== '/api/auth/login') {
     clearSession();
-    if (typeof window !== 'undefined' && location.pathname !== '/' && !location.pathname.startsWith('/login')) location.href = '/login/';
+    if (typeof window !== 'undefined' && !location.pathname.startsWith('/login')) location.href = '/login/';
   }
   if (!res.ok) throw new ApiError(res.status, (data as { error?: string }).error || `Request failed (${res.status}).`);
   return data as T;
@@ -72,5 +87,5 @@ async function apiCall<T>(path: string, opts: { method?: string; body?: unknown 
 
 export function liveUrl(): string {
   const s = getSession();
-  return API_URL.replace(/^http/, 'ws') + '/api/live' + (s ? '?token=' + encodeURIComponent(s.token) : '');
+  return API_URL.replace(/^http/, 'ws') + '/api/live?div=' + getDiv() + (s ? '&token=' + encodeURIComponent(s.token) : '');
 }

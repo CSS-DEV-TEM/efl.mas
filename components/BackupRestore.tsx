@@ -1,6 +1,6 @@
 'use client';
 import { useRef, useState } from 'react';
-import { api } from '@/lib/api';
+import { DIV_NAME, api, getDiv } from '@/lib/api';
 import { fmt } from '@/lib/calc';
 
 interface Meta { app: string; api: number; schema: string; at: string; by: string; tables: { name: string; rows: number }[] }
@@ -41,7 +41,7 @@ export default function BackupRestore({ toast }: { toast: (m: string) => void })
       const out: BackupFile = { ...meta, tables: meta.tables.map((t) => ({ name: t.name, rows: data[t.name]?.rows.length ?? 0 })), data };
       const blob = new Blob([JSON.stringify(out)], { type: 'application/json' });
       const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob); a.download = `MAS_Tracker_Backup_${stamp(meta.at)}.json`; a.click();
+      a.href = URL.createObjectURL(blob); a.download = `MAS_${(meta as { div?: string }).div === 'kreeda' ? 'Kreeda' : 'Active'}_Backup_${stamp(meta.at)}.json`; a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 4000);
       setPct(100); toast(`Backup saved: ${fmt(done)} rows in ${meta.tables.length} tables`);
     } catch (e) { setErr(e instanceof Error ? e.message : 'Could not make the backup.'); } finally { setBusy(null); }
@@ -52,6 +52,9 @@ export default function BackupRestore({ toast }: { toast: (m: string) => void })
     try {
       const b = JSON.parse(await f.text()) as BackupFile;
       if (b.app !== 'mas-weekly-plan-tracker' || !b.data) throw new Error('This is not a MAS AUTOMATE PICK SYSTEM backup file.');
+      // a backup belongs to one system: MAS Active (older backups) or MAS Kreeda
+      const from = (b as { div?: string }).div === 'kreeda' ? 'kreeda' : 'active';
+      if (from !== getDiv()) throw new Error(`This backup is from ${DIV_NAME[from]}. Switch to ${DIV_NAME[from]} (header) to restore it — a backup never goes into the other system.`);
       setFile({ name: f.name, b });
     } catch (e) { setErr(e instanceof Error ? e.message : 'Could not read the file.'); }
   };
@@ -81,7 +84,7 @@ export default function BackupRestore({ toast }: { toast: (m: string) => void })
 
   return (
     <section className="card" aria-labelledby="bk-title">
-      <h2 id="bk-title">Backup &amp; Restore</h2>
+      <h2 id="bk-title">Backup &amp; Restore · <span className={`div-tag ${getDiv()}`}>{DIV_NAME[getDiv()]}</span></h2>
       <p className="sub">A backup is one .json file with every plan (all Picks), the pick history and Packing List data, statuses, the reports (ZMMBE, ZINR, ZCOMENT, Korber…), plants and settings. <b>Users and passwords are never in it</b> and a restore never changes them. Keep backups internal — they hold real SO data.</p>
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', margin: '12px 0' }}>
         <button className="btn primary" disabled={!!busy} onClick={backup}>Download backup</button>

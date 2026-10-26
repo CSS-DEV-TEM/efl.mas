@@ -9,7 +9,7 @@ import { action } from '@/lib/smart';
 import { downloadLatest } from '@/lib/files';
 import { smartBest, smartSuggest, type Suggestion } from '@/lib/rollSuggest';
 import {
-  PICK_SRCS, type PLIssue, korberWorkbook, ordinal, packingListWorkbook, saveWorkbook, uploadPickFile,
+  PICK_SRCS, type PLIssue, type NotPicked, notPickedWhy, korberWorkbook, ordinal, packingListWorkbook, saveWorkbook, uploadPickFile,
   pickNote, type Candidate, type Candidates, type KorberRow, type SapFit, type ManualRoll, type NbOption, type NoBarcodeRoll, type PickHistory, type PickSrc,
 } from '@/lib/pick';
 
@@ -1202,14 +1202,55 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
       for (const w of weeks.filter((x) => /^\d{4}-W\d{2}$/.test(x))) {
         try { plan.push(...(await api<{ rows: LineP[] }>(`/api/pullplan?week=${encodeURIComponent(w)}`)).rows.filter((l) => lineIds.has(`${l.key}|${l.date ?? ''}`))); } catch { /* plan not available */ }
       }
+      // the lines the system did not pick (in full), and why: the day Picks' plan lines, and for a week plan its lines of
+      // the same plants and plan dates as the picked lines
+      const scope: LineP[] = plan.filter((l) => !/^\d{4}-W\d{2}$/.test(l.week));
+      for (const w of weeks.filter((x) => /^\d{4}-W\d{2}$/.test(x))) {
+        const picked = target.filter((r) => r.week === w);
+        const dates = new Set(picked.map((r) => r.line.split('|')[3] || ''));
+        const plants = new Set(picked.map((r) => String(r.plant || '').toUpperCase().replace(/\s+/g, '')));
+        try { scope.push(...(await api<{ rows: LineP[] }>(`/api/pullplan?week=${encodeURIComponent(w)}`)).rows.filter((l) => dates.has(l.date ?? '') && (!plants.size || plants.has(String(l.plant || '').toUpperCase().replace(/\s+/g, ''))))); } catch { /* plan not available */ }
+      }
+      const open = scope.filter((l) => !isDone(l) && !isDispatched(l) && need(l) > 1e-9);
+      const notPicked: NotPicked[] = [];
+      let done = 0;
+      const one = async (l: LineP) => {
+        // no UR on the dashboard: nothing the system could pick — no need to read the rolls
+        if (!l.hold && !(Number(l.ur) > 1e-9)) {
+          const parts = [Number(l.qi) > 0 ? `QI ${r3(Number(l.qi))}` : '', Number(l.block) > 0 ? `Block ${r3(Number(l.block))}` : '', Number(l.assigned) > 0 ? `Assigned ${r3(Number(l.assigned))}` : ''].filter(Boolean);
+          notPicked.push({ pick: pickName(l.week), so: l.so, li: l.li, item: l.item, plant: l.plant, date: l.date, planQty: Number(l.qty) || 0, ur: 0, picked: Number(l.picked ?? 0), balance: r3(need(l)), matched: null,
+            reason: 'No UR in ZMMBE', detail: parts.length ? `ZMMBE has no Unrestricted stock: ${parts.join(' · ')}` : 'Not in ZMMBE (no stock for this SO / LI / Item)' });
+          return;
+        }
+        let c: Candidates | null = null, err = '';
+        try { c = await api<Candidates>(`/api/pick/candidates?week=${encodeURIComponent(l.week)}&key=${encodeURIComponent(l.key)}&date=${encodeURIComponent(l.date ?? '')}`); } catch (e) { err = e instanceof Error ? e.message : ''; }
+        const left = c ? r3(c.need - c.picked) : need(l);
+        // what the plan still wants (plan QTY less what was picked): more than the UR lets the system pick
+        const planLeft = c ? r3(Number(c.planQty ?? l.qty) - c.picked) : need(l);
+        let w = notPickedWhy(c, l, err), bal = left;
+        if (c && !(left > 1e-9) && !l.hold) {
+          if (!(planLeft > 1e-9)) return;
+          const ur0 = Number(c.ur ?? 0);
+          w = ur0 > 1e-9 ? { reason: 'Plan QTY more than UR', detail: `UR ${r3(ur0)} is picked; the plan wants ${r3(planLeft)} more — no stock left in ZMMBE UR` } : { reason: 'No UR in ZMMBE', detail: c.sent ? `Already sent ${r3(Number(c.sent))}; ZMMBE has no Unrestricted stock left in the warehouse` : 'ZMMBE has no Unrestricted stock for this SO / LI (QI, Block, Assigned or not in ZMMBE)' };
+          bal = planLeft;
+        }
+        notPicked.push({ pick: pickName(l.week), so: l.so, li: l.li, item: l.item, plant: l.plant, date: l.date, planQty: Number(l.qty) || 0, ur: c ? Number(c.ur ?? 0) : null,
+          picked: c ? r3(c.picked) : Number(l.picked ?? 0), balance: r3(Math.max(0, bal)), matched: c ? r3(c.matchedAvail ?? c.rolls.reduce((t, r) => t + Math.max(0, r.available), 0)) : null, reason: w.reason, detail: w.detail });
+      };
+      // a few lines at a time
+      const queue = [...open];
+      await Promise.all(Array.from({ length: Math.min(5, queue.length) }, async () => { for (let l = queue.shift(); l; l = queue.shift()) { await one(l); done++; setPlProg(`${done} / ${open.length}`); } }));
+      setPlProg('');
+      notPicked.sort((a, b) => a.pick.localeCompare(b.pick) || a.reason.localeCompare(b.reason) || a.so.localeCompare(b.so) || Number(a.li) - Number(b.li));
       // the SAP and Korber data of every roll is checked first: problems are shown before the file is saved
       const issues: PLIssue[] = [];
-      const wb = packingListWorkbook(h!, { ids: new Set(target.map((r) => r.id)), combined: oneSheet, pfcSlocs, plan, planTitle: `Plan · ${weeks.map(pickName).join(', ')}`, issues });
+      const wb = packingListWorkbook(h!, { ids: new Set(target.map((r) => r.id)), combined: oneSheet, pfcSlocs, plan, planTitle: `Plan · ${weeks.map(pickName).join(', ')}`, issues, notPicked });
       const file = `Packing_List_${day}${ptag}${tag}.xlsx`;
       if (issues.length) setPlCheck({ wb, file, issues });
-      else { saveWorkbook(wb, file); toast(`Packing List checked ✓ — ${target.length} pick${target.length === 1 ? '' : 's'}: SAP lines and Korber rows are right`); }
-    } finally { setPlBusy(false); }
+      else { saveWorkbook(wb, file); toast(`Packing List checked ✓ — ${target.length} pick${target.length === 1 ? '' : 's'}: SAP lines and Korber rows are right${notPicked.length ? ` · ${notPicked.length} line${notPicked.length === 1 ? '' : 's'} not picked (sheet “Not Picked”)` : ''}`); }
+    } finally { setPlBusy(false); setPlProg(''); }
   };
+  const [plProg, setPlProg] = useState('');
   const [plCheck, setPlCheck] = useState<{ wb: ReturnType<typeof packingListWorkbook>; file: string; issues: PLIssue[] } | null>(null);
   const downloadKorber = () => saveWorkbook(korberWorkbook(h!, new Set(target.map((r) => r.id))), `Korber_Picked_${day}${ptag}${tag}.xlsx`);
   const markedQty = marked.reduce((t, r) => t + r.qty, 0);
@@ -1272,7 +1313,7 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
             <button className={oneSheet ? 'on' : ''} onClick={() => setOne(true)}>One sheet</button>
             <button className={!oneSheet ? 'on' : ''} onClick={() => setOne(false)}>Sheet per pick</button>
           </div>
-          <button className="btn primary" disabled={plBusy} aria-busy={plBusy || undefined} onClick={downloadPL}>{plBusy ? 'Preparing…' : `Download Packing List${marked.length ? ` (${marked.length})` : ''}`}</button>
+          <button className="btn primary" disabled={plBusy} aria-busy={plBusy || undefined} onClick={downloadPL}>{plBusy ? `Preparing…${plProg ? ` checking lines ${plProg}` : ''}` : `Download Packing List${marked.length ? ` (${marked.length})` : ''}`}</button>
           <button className="btn" disabled={!h.korberHeader} onClick={downloadKorber} title="The picked rolls in the Korber Inventory format (cut rolls with the cut QTY)">Korber Inventory{marked.length ? ` (${marked.length})` : ''}</button>
           {canEdit && marked.length > 0 && <button className="btn danger" disabled={!cancelable.length || !!bulkBusy} aria-busy={!!bulkBusy || undefined} onClick={cancelMarked}
             title={cancelable.length ? 'Cancel the marked picks: deleted from the history, their rolls become pickable again' : 'You can cancel only your own picks'}>{bulkBusy || `Cancel marked (${cancelable.length})`}</button>}

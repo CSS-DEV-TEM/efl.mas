@@ -9,6 +9,10 @@
 
 export interface Env {
   DB: D1Database;
+  /** MAS Kreeda's own database (everything except users and logins, which stay in DB) */
+  DB_KREEDA?: D1Database;
+  /** set per request: the system asked for, and the main database (users, login key) */
+  DIV?: Div; MAIN?: D1Database;
   HUB?: DurableObjectNamespace; // optional: without it the dashboard refreshes every 20 s instead of instantly
   JWT_SECRET?: string; // optional: a random key is created and kept in D1 when not set
   ADMIN_USER?: string;
@@ -17,6 +21,27 @@ export interface Env {
 }
 
 type Role = 'admin' | 'head' | 'editor' | 'viewer';
+/**
+ * Two systems in one: MAS Active (DB) and MAS Kreeda (DB_KREEDA). Each has its own plans, reports, picks, packing lists,
+ * settings, uploads and activity. Users and passwords are kept once (DB): each user has access to one or both;
+ * Admin and Head have both and switch in the header. The website sends the system in the X-Div header.
+ */
+type Div = 'active' | 'kreeda';
+const DIV_NAME: Record<Div, string> = { active: 'MAS Active', kreeda: 'MAS Kreeda' };
+/** the users table and the login key always come from the main database */
+const udb = (env: Env) => env.MAIN ?? env.DB;
+const parseDivs = (v: unknown): Div[] => { const d = String(v ?? '').toLowerCase().split(',').map((x) => x.trim()).filter((x): x is Div => x === 'active' || x === 'kreeda'); return d.length ? Array.from(new Set(d)) : ['active']; };
+const divCache = new Map<string, { d: Div[]; at: number }>();
+async function userDivs(env: Env, u: string, role: Role): Promise<Div[]> {
+  if (role === 'admin' || role === 'head') return ['active', 'kreeda'];
+  const c = divCache.get(u);
+  if (c && Date.now() - c.at < 20000) return c.d;
+  let d: Div[] = ['active'];
+  try { d = parseDivs((await udb(env).prepare('SELECT divs FROM users WHERE username = ?').bind(u).first<{ divs: string | null }>())?.divs); } catch { /* column added on first run */ }
+  divCache.set(u, { d, at: Date.now() });
+  return d;
+}
+const hubName = (env: Env) => (env.DIV === 'kreeda' ? 'kreeda' : 'main');
 /** admin: everything incl. system settings · head: everything except system settings · editor (user): own plan and picks · viewer: read only */
 const isBoss = (s: Session | null) => !!s && (s.role === 'admin' || s.role === 'head');
 interface Session { u: string; role: Role; exp: number }
@@ -51,10 +76,11 @@ let cachedSecret: string | null = null;
 async function getSecret(env: Env): Promise<string> {
   if (env.JWT_SECRET) return env.JWT_SECRET;
   if (cachedSecret) return cachedSecret;
-  await env.DB.prepare('CREATE TABLE IF NOT EXISTS config (k TEXT PRIMARY KEY, v TEXT NOT NULL)').run();
+  const db = udb(env);
+  await db.prepare('CREATE TABLE IF NOT EXISTS config (k TEXT PRIMARY KEY, v TEXT NOT NULL)').run();
   const fresh = b64url(crypto.getRandomValues(new Uint8Array(32)));
-  await env.DB.prepare("INSERT OR IGNORE INTO config (k, v) VALUES ('jwt_secret', ?)").bind(fresh).run();
-  const row = await env.DB.prepare("SELECT v FROM config WHERE k = 'jwt_secret'").first<{ v: string }>();
+  await db.prepare("INSERT OR IGNORE INTO config (k, v) VALUES ('jwt_secret', ?)").bind(fresh).run();
+  const row = await db.prepare("SELECT v FROM config WHERE k = 'jwt_secret'").first<{ v: string }>();
   cachedSecret = row!.v;
   return cachedSecret;
 }
@@ -146,12 +172,88 @@ const thisWeek = () => weekId(new Date(Date.now() + 5.5 * 3600 * 1000).toISOStri
  * Brings an older database up to date the first time a Worker instance runs:
  * adds plan.week, fills it from the dates, and moves dashboard edits to week-scoped keys ("2026-W42#SO|LI|Item").
  */
-let schemaReady = false;
+/** A new, empty database (MAS Kreeda the first time): every table and index as the up-to-date MAS Active database has them (schema v34). */
+const BASE_SCHEMA = [
+  'CREATE TABLE IF NOT EXISTS activity ( id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, username TEXT NOT NULL, action TEXT NOT NULL, detail TEXT )',
+  'CREATE TABLE IF NOT EXISTS config (k TEXT PRIMARY KEY, v TEXT NOT NULL)',
+  'CREATE TABLE IF NOT EXISTS dispatch ( ident TEXT PRIMARY KEY, week TEXT NOT NULL, item TEXT NOT NULL, qty REAL NOT NULL, raw_qty REAL, factor REAL, pallet TEXT, location TEXT, lot TEXT, order_no TEXT, uom TEXT, client_so TEXT, file_name TEXT, sheet_name TEXT, uploaded_by TEXT, uploaded_at TEXT, first_at TEXT)',
+  'CREATE TABLE IF NOT EXISTS dispatch_assign (id INTEGER PRIMARY KEY AUTOINCREMENT, week TEXT NOT NULL, item TEXT NOT NULL, line TEXT NOT NULL, qty REAL NOT NULL, by_user TEXT, at TEXT)',
+  'CREATE TABLE IF NOT EXISTS follow_close (ref TEXT PRIMARY KEY, note TEXT, by_user TEXT, at TEXT)',
+  `CREATE TABLE IF NOT EXISTS korber (pallet TEXT NOT NULL, item TEXT, lot TEXT, qty REAL, uom TEXT, invoice TEXT, location TEXT, supplier_hu TEXT, status TEXT, raw TEXT, po TEXT, pcore TEXT, rid TEXT NOT NULL DEFAULT '', pick_id TEXT NOT NULL DEFAULT '0', wh TEXT, fifo TEXT)`,
+  'CREATE TABLE IF NOT EXISTS line_status ( key TEXT PRIMARY KEY, status TEXT, comment TEXT, vehicle TEXT, qi_note TEXT, updated_by TEXT, updated_at TEXT , hold TEXT, hold_by TEXT, hold_at TEXT)',
+  'CREATE TABLE IF NOT EXISTS pick_reject (id INTEGER PRIMARY KEY AUTOINCREMENT, pick_id INTEGER, req_id INTEGER, day TEXT, week TEXT, line TEXT, so TEXT, li TEXT, item TEXT, pallet TEXT, qty REAL, roll_qty REAL, lot TEXT, insp_lot TEXT, batch TEXT, shade TEXT, reason TEXT, by_user TEXT, at TEXT, korber TEXT, replaced_by TEXT, replaced_qty REAL, replaced_pick INTEGER, replaced_user TEXT, replaced_at TEXT)',
+  `CREATE TABLE IF NOT EXISTS pick_req (id INTEGER PRIMARY KEY AUTOINCREMENT, day TEXT NOT NULL, seq INTEGER NOT NULL, pick_no TEXT, week TEXT, line TEXT, so TEXT, li TEXT, item TEXT, plant TEXT, need REAL, qty REAL, rolls INTEGER, by_user TEXT, at TEXT, cancelled_at TEXT, cancelled_by TEXT, match TEXT, kind TEXT DEFAULT 'normal', closed INTEGER DEFAULT 0, short REAL, auto INTEGER DEFAULT 0)`,
+  'CREATE TABLE IF NOT EXISTS pick_round (rid TEXT PRIMARY KEY, day TEXT NOT NULL, plant TEXT, round INTEGER NOT NULL, created_by TEXT, created_at TEXT, note TEXT)',
+  'CREATE TABLE IF NOT EXISTS picks (id INTEGER PRIMARY KEY AUTOINCREMENT, req_id INTEGER NOT NULL, day TEXT, week TEXT, line TEXT, so TEXT, li TEXT, item TEXT, pallet TEXT NOT NULL, qty REAL NOT NULL, roll_qty REAL, partial INTEGER DEFAULT 0, shade TEXT, lot TEXT, insp_lot TEXT, batch TEXT, note TEXT, by_user TEXT, at TEXT, cancelled_at TEXT, cancelled_by TEXT, korber TEXT)',
+  `CREATE TABLE IF NOT EXISTS plan ( key TEXT NOT NULL, so TEXT NOT NULL, li TEXT NOT NULL, item TEXT NOT NULL, date TEXT, qty REAL NOT NULL DEFAULT 0, plant TEXT, remarks TEXT, row_no INTEGER NOT NULL , week TEXT, src_user TEXT, src_at TEXT, owner TEXT, plan_type TEXT DEFAULT 'week', follow_of TEXT, plan_date TEXT)`,
+  'CREATE TABLE IF NOT EXISTS plan_day (day TEXT PRIMARY KEY, created_by TEXT, created_at TEXT)',
+  'CREATE TABLE IF NOT EXISTS plant_info (code TEXT PRIMARY KEY, name TEXT, responsible TEXT, target TEXT, sort INTEGER DEFAULT 0)',
+  'CREATE TABLE IF NOT EXISTS plant_received (week TEXT NOT NULL, code TEXT NOT NULL, received TEXT, by_user TEXT, at TEXT, PRIMARY KEY (week, code))',
+  `CREATE TABLE IF NOT EXISTS stock ( src TEXT NOT NULL CHECK (src IN ('zmmbe','kfc','pfc','plant')), key TEXT NOT NULL, plant TEXT, sloc TEXT, so_plant TEXT, so TEXT, li TEXT, material TEXT, batch TEXT, style TEXT, ur REAL DEFAULT 0, qi REAL DEFAULT 0, block REAL DEFAULT 0, assigned REAL DEFAULT 0, total REAL DEFAULT 0 , rid TEXT NOT NULL DEFAULT '', plant_link TEXT)`,
+  'CREATE TABLE IF NOT EXISTS stock_release (week TEXT NOT NULL, key TEXT NOT NULL, qi REAL DEFAULT 0, block REAL DEFAULT 0, by_user TEXT, at TEXT, PRIMARY KEY (week, key))',
+  `CREATE TABLE IF NOT EXISTS stock_sent (src TEXT, key TEXT, plant TEXT, sloc TEXT, so_plant TEXT, so TEXT, li TEXT, material TEXT, batch TEXT, style TEXT, ur REAL, qi REAL, block REAL, assigned REAL, total REAL, plant_link TEXT, rid TEXT NOT NULL DEFAULT '')`,
+  'CREATE TABLE IF NOT EXISTS trr ( key TEXT NOT NULL, tn TEXT, tn_date TEXT, created_by TEXT, so TEXT, li TEXT, material TEXT, from_plant TEXT, from_sloc TEXT, to_plant TEXT, to_sloc TEXT, qty REAL DEFAULT 0, reason TEXT )',
+  'CREATE TABLE IF NOT EXISTS upload_file (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, mime TEXT, size INTEGER, sha TEXT, srcs TEXT, rid TEXT, uploaded_by TEXT, uploaded_at TEXT, parts INTEGER, complete INTEGER DEFAULT 0)',
+  'CREATE TABLE IF NOT EXISTS upload_file_part (file_id INTEGER NOT NULL, n INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (file_id, n))',
+  `CREATE TABLE IF NOT EXISTS uploads ( id INTEGER PRIMARY KEY AUTOINCREMENT, src TEXT NOT NULL, file_name TEXT, sheet_name TEXT, row_count INTEGER NOT NULL, uploaded_by TEXT NOT NULL, uploaded_at TEXT NOT NULL , mode TEXT, rid TEXT NOT NULL DEFAULT '')`,
+  `CREATE TABLE IF NOT EXISTS zcoment (lot TEXT NOT NULL, material TEXT, batch TEXT, vendor_batch TEXT, roll_qty REAL, roll_no TEXT, barcode TEXT, shade TEXT, sys_roll TEXT, accept TEXT, description TEXT, rid TEXT NOT NULL DEFAULT '')`,
+  `CREATE TABLE IF NOT EXISTS zinr (lot TEXT NOT NULL, plant TEXT, sloc TEXT, batch TEXT, material TEXT, qty REAL, uom TEXT, so TEXT, li TEXT, vendor_batch TEXT, invoice TEXT, created TEXT, style TEXT, po TEXT, rid TEXT NOT NULL DEFAULT '')`,
+  `CREATE TABLE IF NOT EXISTS zroll (barcode TEXT NOT NULL, bin TEXT, material TEXT, batch TEXT, qty REAL, uom TEXT, sloc TEXT, plant TEXT, so TEXT, li TEXT, status TEXT, raw TEXT, rid TEXT NOT NULL DEFAULT '', pcore TEXT)`,
+  `CREATE TABLE IF NOT EXISTS ztrr (tn TEXT, tn_date TEXT, to_so TEXT, to_li TEXT, material TEXT, to_plant TEXT, from_so TEXT, from_li TEXT, batch TEXT, qty REAL, approved REAL, tqty REAL, status TEXT, raw TEXT, rid TEXT NOT NULL DEFAULT '')`,
+  'CREATE INDEX IF NOT EXISTS dispatch_week_item ON dispatch(week, item)',
+  'CREATE INDEX IF NOT EXISTS korber_item_lot ON korber(item, lot)',
+  'CREATE INDEX IF NOT EXISTS korber_pallet ON korber(pallet)',
+  'CREATE INDEX IF NOT EXISTS korber_pcore ON korber(pcore)',
+  'CREATE INDEX IF NOT EXISTS korber_rid ON korber(rid, pallet)',
+  'CREATE INDEX IF NOT EXISTS korber_rid_core ON korber(rid, pcore)',
+  'CREATE INDEX IF NOT EXISTS korber_rid_item ON korber(rid, item, lot)',
+  'CREATE INDEX IF NOT EXISTS pick_reject_pallet ON pick_reject(pallet)',
+  'CREATE INDEX IF NOT EXISTS pick_req_day ON pick_req(day)',
+  'CREATE INDEX IF NOT EXISTS pick_req_user_day ON pick_req(by_user, day)',
+  'CREATE INDEX IF NOT EXISTS pick_round_day ON pick_round(day, plant, round)',
+  'CREATE INDEX IF NOT EXISTS picks_pallet ON picks(pallet)',
+  'CREATE INDEX IF NOT EXISTS picks_req ON picks(req_id)',
+  'CREATE INDEX IF NOT EXISTS picks_week_line ON picks(week, line)',
+  'CREATE INDEX IF NOT EXISTS plan_follow ON plan(follow_of)',
+  'CREATE INDEX IF NOT EXISTS plan_key ON plan(key)',
+  'CREATE INDEX IF NOT EXISTS plan_owner_week ON plan(owner, week)',
+  'CREATE INDEX IF NOT EXISTS plan_type_week ON plan(plan_type, week, owner)',
+  'CREATE INDEX IF NOT EXISTS plan_week ON plan(week, key)',
+  'CREATE INDEX IF NOT EXISTS stock_key ON stock(key)',
+  'CREATE INDEX IF NOT EXISTS stock_rid ON stock(rid, src, key)',
+  'CREATE INDEX IF NOT EXISTS stock_sent_key ON stock_sent(key)',
+  'CREATE INDEX IF NOT EXISTS stock_src_key ON stock(src, key)',
+  'CREATE INDEX IF NOT EXISTS trr_key ON trr(key)',
+  'CREATE INDEX IF NOT EXISTS upload_file_at ON upload_file(complete, uploaded_at)',
+  'CREATE INDEX IF NOT EXISTS uploads_rid ON uploads(rid, src)',
+  'CREATE INDEX IF NOT EXISTS zcoment_barcode ON zcoment(barcode)',
+  'CREATE INDEX IF NOT EXISTS zcoment_lot ON zcoment(lot)',
+  'CREATE INDEX IF NOT EXISTS zcoment_rid ON zcoment(rid, lot)',
+  'CREATE INDEX IF NOT EXISTS zcoment_rid_bc ON zcoment(rid, barcode)',
+  'CREATE INDEX IF NOT EXISTS zinr_key ON zinr(so, li, material, batch)',
+  'CREATE INDEX IF NOT EXISTS zinr_rid ON zinr(rid, so, li, material)',
+  'CREATE INDEX IF NOT EXISTS zinr_rid_lot ON zinr(rid, lot)',
+  'CREATE INDEX IF NOT EXISTS zroll_barcode ON zroll(barcode)',
+  'CREATE INDEX IF NOT EXISTS zroll_batch ON zroll(batch)',
+  'CREATE INDEX IF NOT EXISTS zroll_pcore ON zroll(pcore)',
+  'CREATE INDEX IF NOT EXISTS ztrr_key ON ztrr(to_so, to_li, material)',
+];
+/** per system (each has its own database) */
+const schemaDone = new Set<string>();
 const SCHEMA_V = '34';
 async function ensureSchema(env: Env) {
-  if (schemaReady || !env.DB) return;
+  const dk = env.DIV || 'active';
+  if (schemaDone.has(dk) || !env.DB) return;
+  // the users table (main database) gets each user's systems: Active, Kreeda or both
+  try { await udb(env).prepare('CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, pass_hash TEXT NOT NULL, salt TEXT NOT NULL, role TEXT NOT NULL, created_at TEXT, plant TEXT)').run(); } catch { /* there */ }
+  try { await udb(env).prepare("ALTER TABLE users ADD COLUMN divs TEXT DEFAULT 'active'").run(); } catch { /* already there */ }
+  // a new database: made as it is now in one go (no step-by-step upgrade needed)
+  if (!(await env.DB.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'plan'").first())) {
+    await env.DB.batch([...BASE_SCHEMA.map((q) => env.DB.prepare(q)), env.DB.prepare("INSERT INTO config (k, v) VALUES ('schema_v', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(SCHEMA_V)]);
+    schemaDone.add(dk); return;
+  }
   try {
-    if ((await env.DB.prepare("SELECT v FROM config WHERE k = 'schema_v'").first<{ v: string }>())?.v === SCHEMA_V) { schemaReady = true; return; }
+    if ((await env.DB.prepare("SELECT v FROM config WHERE k = 'schema_v'").first<{ v: string }>())?.v === SCHEMA_V) { schemaDone.add(dk); return; }
   } catch { /* no config table yet */ }
   try { await env.DB.prepare('ALTER TABLE plan ADD COLUMN week TEXT').run(); } catch { /* already there */ }
   await env.DB.prepare('CREATE INDEX IF NOT EXISTS plan_week ON plan(week, key)').run();
@@ -194,7 +296,8 @@ async function ensureSchema(env: Env) {
     try { await env.DB.prepare(sql).run(); } catch { /* already there */ }
   }
   await env.DB.batch([
-    env.DB.prepare("UPDATE plan SET owner = COALESCE(src_user, (SELECT username FROM users WHERE role = 'admin' ORDER BY created_at LIMIT 1), 'admin') WHERE owner IS NULL"),
+    // the first admin (users live in the main database: a MAS Kreeda database has no users table)
+    env.DB.prepare(`UPDATE plan SET owner = COALESCE(src_user, ${env.MAIN && env.MAIN !== env.DB ? "'admin'" : "(SELECT username FROM users WHERE role = 'admin' ORDER BY created_at LIMIT 1)"}, 'admin') WHERE owner IS NULL`),
     env.DB.prepare('CREATE INDEX IF NOT EXISTS plan_owner_week ON plan(owner, week)'),
     env.DB.prepare('CREATE INDEX IF NOT EXISTS pick_req_user_day ON pick_req(by_user, day)'),
     // cancelled picks are deleted now: drop the ones kept before
@@ -215,8 +318,8 @@ async function ensureSchema(env: Env) {
     try { await env.DB.prepare('ALTER TABLE users ADD COLUMN plant TEXT').run(); } catch { /* already there */ }
     await env.DB.batch([
       env.DB.prepare(`CREATE TABLE IF NOT EXISTS users_v2 (username TEXT PRIMARY KEY, pass_hash TEXT NOT NULL, salt TEXT NOT NULL,
-        role TEXT NOT NULL CHECK (role IN ('admin','head','editor','viewer')), created_at TEXT NOT NULL, plant TEXT)`),
-      env.DB.prepare('INSERT OR REPLACE INTO users_v2 (username, pass_hash, salt, role, created_at, plant) SELECT username, pass_hash, salt, role, created_at, plant FROM users'),
+        role TEXT NOT NULL CHECK (role IN ('admin','head','editor','viewer')), created_at TEXT NOT NULL, plant TEXT, divs TEXT DEFAULT 'active')`),
+      env.DB.prepare('INSERT OR REPLACE INTO users_v2 (username, pass_hash, salt, role, created_at, plant, divs) SELECT username, pass_hash, salt, role, created_at, plant, divs FROM users'),
       env.DB.prepare('DROP TABLE users'),
       env.DB.prepare('ALTER TABLE users_v2 RENAME TO users'),
     ]);
@@ -351,7 +454,7 @@ async function ensureSchema(env: Env) {
     env.DB.prepare('CREATE TABLE IF NOT EXISTS upload_file_part (file_id INTEGER NOT NULL, n INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (file_id, n))'),
   ]);
   await env.DB.prepare("INSERT INTO config (k, v) VALUES ('schema_v', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(SCHEMA_V).run();
-  schemaReady = true;
+  schemaDone.add(dk);
 }
 
 /** A day plan round (Pick 1, 2 … of a plant on a day) is kept as the plan's period: "<day>~<plant>~<n>". */
@@ -415,7 +518,7 @@ function corsHeaders(env: Env, req: Request): Record<string, string> {
   return {
     'Access-Control-Allow-Origin': allow,
     'Access-Control-Allow-Methods': 'GET,POST,PATCH,DELETE,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+    'Access-Control-Allow-Headers': 'Content-Type,Authorization,X-Div',
     'Access-Control-Max-Age': '86400',
     Vary: 'Origin',
   };
@@ -446,7 +549,7 @@ async function broadcast(env: Env, msg: Record<string, unknown>) {
     ]);
   } catch { /* config table is created on first sign-in */ }
   if (!env.HUB) return; // realtime hub not bound: clients check /api/changes when someone uses the page
-  const stub = env.HUB.get(env.HUB.idFromName('main'));
+  const stub = env.HUB.get(env.HUB.idFromName(hubName(env)));
   await stub.fetch('https://hub/broadcast', { method: 'POST', body: JSON.stringify({ ...msg, at: now() }) });
 }
 async function logActivity(env: Env, user: string, action: string, detail: string) {
@@ -549,7 +652,7 @@ const cleanPlant = (v: unknown) => { const t = txt(v); return t && !/^#/.test(t)
 type PlanMode = 'merge' | 'replace-plant' | 'replace-week' | 'replace-day' | 'replace-round';
 
 async function userPlant(env: Env, u: string) {
-  return (await env.DB.prepare('SELECT plant FROM users WHERE username = ?').bind(u).first<{ plant: string | null }>())?.plant || null;
+  return (await udb(env).prepare('SELECT plant FROM users WHERE username = ?').bind(u).first<{ plant: string | null }>())?.plant || null;
 }
 
 async function handleUpload(env: Env, req: Request) {
@@ -586,7 +689,7 @@ async function handleUpload(env: Env, req: Request) {
   if (body.src === 'plan' && body.owner && body.owner.trim().toLowerCase() !== s.u) {
     if (!isBoss(s)) throw new HttpError(403, 'Only Admin or Head can upload a plan for another user.');
     const o = body.owner.trim().toLowerCase();
-    if (!(await env.DB.prepare('SELECT 1 FROM users WHERE username = ?').bind(o).first())) throw new HttpError(400, `There is no user "${o}".`);
+    if (!(await udb(env).prepare('SELECT 1 FROM users WHERE username = ?').bind(o).first())) throw new HttpError(400, `There is no user "${o}".`);
     owner = o;
   }
   const planType = body.planType === 'day' ? 'day' : 'week';
@@ -938,7 +1041,9 @@ async function viewScope(env: Env, req: Request): Promise<{ owner: string | null
   const h = req.headers.get('Authorization') || '';
   const s = await verifyToken(env, h.startsWith('Bearer ') ? h.slice(7) : null);
   const asked = (new URL(req.url).searchParams.get('user') || '').trim().toLowerCase();
-  if (s && s.role === 'editor') return { owner: s.u, s };
+  // every page needs a signed-in user (no guest view)
+  if (!s) throw new HttpError(401, 'Please sign in.');
+  if (s.role === 'editor') return { owner: s.u, s };
   return { owner: asked && asked !== '*' ? asked : null, s };
 }
 
@@ -981,7 +1086,7 @@ async function handleBackup(env: Env, req: Request, p: string) {
   if (p === '/api/backup' && req.method === 'GET') {
     const counts: { name: string; rows: number }[] = [];
     for (const t of tables) counts.push({ name: t, rows: Number((await env.DB.prepare(`SELECT COUNT(*) n FROM ${t}${cfgWhere(t)}`).first<{ n: number }>())?.n ?? 0) });
-    return json({ app: 'mas-weekly-plan-tracker', api: API_VERSION, schema: SCHEMA_V, at: now(), by: s.u, tables: counts });
+    return json({ app: 'mas-weekly-plan-tracker', api: API_VERSION, schema: SCHEMA_V, at: now(), by: s.u, div: env.DIV || 'active', tables: counts });
   }
   if (p === '/api/backup/rows' && req.method === 'GET') {
     const t = url.searchParams.get('table') || '';
@@ -1377,7 +1482,6 @@ async function handleDays(env: Env, req: Request) {
 }
 
 async function handlePullPlan(env: Env, req: Request) {
-  // public: the dashboard can be viewed without signing in (uploads and edits still need a login)
   const { owner } = await viewScope(env, req);
   const sp = new URL(req.url).searchParams;
   // ?type=week (default) or ?type=day: week plans and day plans have their own dashboards
@@ -2067,7 +2171,7 @@ async function handlePick(env: Env, req: Request, p: string) {
     // a Pick's report replaces only that Pick's rows; the shared report and the other Picks stay
     const d = await diffReplace(env, b.src, cols, rows, 'rid = ?', [rid], b.src === 'korber' ? 150 : 400);
     const stmts: D1PreparedStatement[] = [...d.stmts];
-    if (b.src === 'korber') poIx = null;
+    if (b.src === 'korber') poIxBy.delete(env.DIV || 'active');
     // ZCOMENT rows without Material (the roll view): the inspection lot's material from ZINR — after a ZINR upload too
     if (b.src === 'zcoment' || b.src === 'zinr') stmts.push(env.DB.prepare("UPDATE zcoment SET material = COALESCE((SELECT z.material FROM zinr z WHERE z.lot = zcoment.lot AND z.rid = zcoment.rid LIMIT 1), (SELECT z.material FROM zinr z WHERE z.lot = zcoment.lot AND z.rid = '' LIMIT 1)) WHERE COALESCE(material, '') = '' AND EXISTS (SELECT 1 FROM zinr z WHERE z.lot = zcoment.lot AND z.rid IN (zcoment.rid, ''))"));
     if (b.src === 'korber') stmts.push(env.DB.prepare("INSERT INTO config (k, v) VALUES ('korber_header', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(JSON.stringify(b.header)));
@@ -2694,12 +2798,15 @@ async function zcomentShade(env: Env, k: { pallet: unknown; item: unknown; lot: 
 }
 
 /** Korber Po Number (older uploads have it only in the raw row). */
-let poIx: number | null = null;
+const poIxBy = new Map<string, number>();
 async function korberPo(env: Env, k: Row): Promise<string | null> {
   if (k.po) return String(k.po);
-  if (poIx === null) {
+  const dk = env.DIV || 'active';
+  let poIx = poIxBy.get(dk);
+  if (poIx === undefined) {
     const h = (await env.DB.prepare("SELECT v FROM config WHERE k = 'korber_header'").first<{ v: string }>())?.v;
     poIx = h ? (JSON.parse(h) as unknown[]).map(hnorm).indexOf('ponumber') : -1;
+    poIxBy.set(dk, poIx);
   }
   if (poIx < 0 || !k.raw) return null;
   try { const v = (JSON.parse(String(k.raw)) as unknown[])[poIx]; return v === null || v === undefined || v === '' ? null : up(v); } catch { return null; }
@@ -3688,19 +3795,19 @@ async function handleLogin(env: Env, req: Request) {
   const { username, password } = (await req.json()) as { username?: string; password?: string };
   const u = (username || '').trim().toLowerCase();
   if (!u || !password) throw new HttpError(400, 'Enter a username and password.');
-  let user = await env.DB.prepare('SELECT * FROM users WHERE username = ?').bind(u).first<{ username: string; pass_hash: string; salt: string; role: Role }>();
+  let user = await udb(env).prepare('SELECT * FROM users WHERE username = ?').bind(u).first<{ username: string; pass_hash: string; salt: string; role: Role }>();
 
   // First run: no users yet → this sign-in creates the first admin.
   // If ADMIN_USER / ADMIN_PASSWORD secrets are set, only those details are accepted; otherwise any username/password (6+ chars).
   if (!user) {
-    const anyUser = await env.DB.prepare('SELECT COUNT(*) n FROM users').first<{ n: number }>();
+    const anyUser = await udb(env).prepare('SELECT COUNT(*) n FROM users').first<{ n: number }>();
     const noUsers = (anyUser?.n ?? 0) === 0;
     const fromSecrets = !!(env.ADMIN_USER && env.ADMIN_PASSWORD);
     if (noUsers && !fromSecrets && password.length < 6) throw new HttpError(400, 'First sign-in creates the admin account: use a password of at least 6 characters.');
     if (noUsers && !fromSecrets && !/^[a-z0-9._-]{2,32}$/.test(u)) throw new HttpError(400, 'Username: 2–32 letters, numbers, dot, dash or underscore.');
     if (noUsers && (fromSecrets ? u === env.ADMIN_USER!.toLowerCase() && password === env.ADMIN_PASSWORD : true)) {
       const h = await hashPassword(password);
-      await env.DB.prepare('INSERT INTO users (username, pass_hash, salt, role, created_at) VALUES (?,?,?,?,?)').bind(u, h.hash, h.salt, 'admin', now()).run();
+      await udb(env).prepare('INSERT INTO users (username, pass_hash, salt, role, created_at) VALUES (?,?,?,?,?)').bind(u, h.hash, h.salt, 'admin', now()).run();
       user = { username: u, pass_hash: h.hash, salt: h.salt, role: 'admin' };
     } else throw new HttpError(401, 'Wrong username or password.');
   } else {
@@ -3708,39 +3815,42 @@ async function handleLogin(env: Env, req: Request) {
     if (!safeEqual(h.hash, user.pass_hash)) throw new HttpError(401, 'Wrong username or password.');
   }
   const session: Session = { u: user.username, role: user.role, exp: Date.now() + 12 * 3600 * 1000 };
-  return json({ token: await signToken(env, session), user: { username: user.username, role: user.role }, expires: session.exp });
+  const divs = await userDivs({ ...env, MAIN: udb(env) }, user.username, user.role);
+  return json({ token: await signToken(env, session), user: { username: user.username, role: user.role, divs }, expires: session.exp, kreeda: !!env.DB_KREEDA });
 }
 
 async function handleUsers(env: Env, req: Request, path: string) {
   const s = await requireUser(env, req, 'admin');
   if (req.method === 'GET') {
-    const r = await env.DB.prepare('SELECT username, role, plant, created_at FROM users ORDER BY username').all();
+    const r = await udb(env).prepare('SELECT username, role, plant, created_at, divs FROM users ORDER BY username').all();
     return json({ users: r.results });
   }
   if (req.method === 'POST') {
-    const b = (await req.json()) as { username?: string; password?: string; role?: Role; plant?: string | null };
+    const b = (await req.json()) as { username?: string; password?: string; role?: Role; plant?: string | null; divs?: string[] };
     const u = (b.username || '').trim().toLowerCase();
     if (!/^[a-z0-9._-]{2,32}$/.test(u)) throw new HttpError(400, 'Username: 2–32 letters, numbers, dot, dash or underscore.');
     if (!b.role || !['admin', 'head', 'editor', 'viewer'].includes(b.role)) throw new HttpError(400, 'Choose a role.');
-    const existing = await env.DB.prepare('SELECT username FROM users WHERE username = ?').bind(u).first();
+    const existing = await udb(env).prepare('SELECT username FROM users WHERE username = ?').bind(u).first();
     if (!existing && (!b.password || b.password.length < 6)) throw new HttpError(400, 'Password must be at least 6 characters.');
     if (b.password) {
       if (b.password.length < 6) throw new HttpError(400, 'Password must be at least 6 characters.');
       const h = await hashPassword(b.password);
-      await env.DB.prepare(`INSERT INTO users (username, pass_hash, salt, role, created_at) VALUES (?,?,?,?,?)
+      await udb(env).prepare(`INSERT INTO users (username, pass_hash, salt, role, created_at) VALUES (?,?,?,?,?)
         ON CONFLICT(username) DO UPDATE SET pass_hash=excluded.pass_hash, salt=excluded.salt, role=excluded.role`)
         .bind(u, h.hash, h.salt, b.role, now()).run();
     } else {
-      await env.DB.prepare('UPDATE users SET role = ? WHERE username = ?').bind(b.role, u).run();
+      await udb(env).prepare('UPDATE users SET role = ? WHERE username = ?').bind(b.role, u).run();
     }
-    if ('plant' in b) await env.DB.prepare('UPDATE users SET plant = ? WHERE username = ?').bind(cleanPlant(b.plant), u).run();
-    await logActivity(env, s.u, 'user', `${existing ? 'Updated' : 'Added'} ${u} (${b.role}${cleanPlant(b.plant) ? ', ' + cleanPlant(b.plant) : ''})`);
+    if ('plant' in b) await udb(env).prepare('UPDATE users SET plant = ? WHERE username = ?').bind(cleanPlant(b.plant), u).run();
+    // the systems the user can open: MAS Active, MAS Kreeda or both (Admin and Head always have both)
+    if (Array.isArray(b.divs)) { const d = parseDivs(b.divs.join(',')); await udb(env).prepare('UPDATE users SET divs = ? WHERE username = ?').bind(d.join(','), u).run(); divCache.delete(u); }
+    await logActivity(env, s.u, 'user', `${existing ? 'Updated' : 'Added'} ${u} (${b.role}${cleanPlant(b.plant) ? ', ' + cleanPlant(b.plant) : ''}${Array.isArray(b.divs) ? ', ' + parseDivs(b.divs.join(',')).map((d) => DIV_NAME[d]).join(' + ') : ''})`);
     return json({ ok: true });
   }
   if (req.method === 'DELETE') {
     const u = decodeURIComponent(path.split('/').pop() || '');
     if (u === s.u) throw new HttpError(400, 'You cannot remove your own account.');
-    await env.DB.prepare('DELETE FROM users WHERE username = ?').bind(u).run();
+    await udb(env).prepare('DELETE FROM users WHERE username = ?').bind(u).run();
     await logActivity(env, s.u, 'user', `Removed ${u}`);
     return json({ ok: true });
   }
@@ -3819,7 +3929,7 @@ async function handleAdminPlans(env: Env, req: Request) {
   const label = `${type === 'day' ? (parseRound(b.week) ? 'day plan ' + periodLabel(b.week) : 'day plan ' + (b.day || b.week)) : 'week plan ' + b.week} of ${b.owner}`;
   if (b.action === 'reassign') {
     const to = String(b.to || '').trim().toLowerCase();
-    if (!(await env.DB.prepare('SELECT 1 FROM users WHERE username = ?').bind(to).first())) throw new HttpError(400, `There is no user "${to}".`);
+    if (!(await udb(env).prepare('SELECT 1 FROM users WHERE username = ?').bind(to).first())) throw new HttpError(400, `There is no user "${to}".`);
     const n = (await env.DB.prepare(`UPDATE plan SET owner = ?${binds.length + 1} WHERE ${where}`).bind(...binds, to).run()).meta.changes;
     await logActivity(env, s.u, 'plan', `Moved ${label} to ${to} (${n} lines)`);
     await broadcast(env, { type: 'data', src: 'plan', by: s.u, rows: n });
@@ -3874,6 +3984,21 @@ export default {
     try {
       const p = url.pathname.replace(/\/+$/, '');
       if (p !== '/api/health' && !env.DB) throw new HttpError(500, 'The D1 database is not bound to the Worker as DB (Settings → Bindings).');
+      // which system: MAS Active (DB) or MAS Kreeda (DB_KREEDA); users and logins always come from DB
+      {
+        const div: Div = String(req.headers.get('X-Div') || url.searchParams.get('div') || 'active').toLowerCase() === 'kreeda' ? 'kreeda' : 'active';
+        if (div === 'kreeda' && p !== '/api/health' && p !== '/api/auth/login') {
+          if (!env.DB_KREEDA) throw new HttpError(503, 'MAS Kreeda is not set up yet: create a D1 database and bind it to the Worker as DB_KREEDA (Settings → Bindings).');
+        }
+        // a signed-in user may open only the systems they have access to
+        const h = req.headers.get('Authorization') || '';
+        const tok = h.startsWith('Bearer ') ? h.slice(7) : url.searchParams.get('token');
+        if (tok && p !== '/api/health' && p !== '/api/auth/login') {
+          const s0 = await verifyToken(env, tok);
+          if (s0 && !(await userDivs(env, s0.u, s0.role)).includes(div)) throw new HttpError(403, `${s0.u} has no access to ${DIV_NAME[div]}. Ask the admin, or switch to ${DIV_NAME[div === 'active' ? 'kreeda' : 'active']}.`);
+        }
+        env = { ...env, MAIN: env.DB, DIV: div, DB: div === 'kreeda' && env.DB_KREEDA ? meterDb(env.DB_KREEDA, meter) : env.DB };
+      }
       // "has anything changed?" — one row, answered before anything else so it stays cheap
       if (p === '/api/changes') {
         let rev: string | null = null;
@@ -3884,10 +4009,11 @@ export default {
 
       // WebSocket for live updates (token in the query string, browsers can't set headers on WebSockets)
       if (p === '/api/live') {
-        const s = (await verifyToken(env, url.searchParams.get('token'))) || { u: 'guest', role: 'viewer' as Role, exp: 0 };
+        const s = await verifyToken(env, url.searchParams.get('token'));
+        if (!s) return new Response('Please sign in', { status: 401 });
         if (req.headers.get('Upgrade') !== 'websocket') return new Response('Expected WebSocket', { status: 426 });
         if (!env.HUB) return new Response('Realtime hub not configured', { status: 503 });
-        const stub = env.HUB.get(env.HUB.idFromName('main'));
+        const stub = env.HUB.get(env.HUB.idFromName(hubName(env)));
         return stub.fetch(`https://hub/connect?u=${encodeURIComponent(s.u)}`, req);
       }
 
@@ -3895,11 +4021,11 @@ export default {
       if (p === '/api/health') {
         let db = 'missing';
         let users = 0;
-        if (env.DB) { try { users = (await env.DB.prepare('SELECT COUNT(*) n FROM users').first<{ n: number }>())?.n ?? 0; db = 'ok'; } catch { db = 'no tables (run schema.sql)'; } }
-        res = json({ ok: db === 'ok', db, users, setup: db !== 'ok' ? 'fix db first' : users === 0 ? 'ready: the first sign-in creates the admin account' : 'done', realtime: env.HUB ? 'on' : 'off (polling)', version: API_VERSION, at: now() });
+        if (env.DB) { try { users = (await udb(env).prepare('SELECT COUNT(*) n FROM users').first<{ n: number }>())?.n ?? 0; db = 'ok'; } catch { db = 'no tables (run schema.sql)'; } }
+        res = json({ ok: db === 'ok', db, users, kreeda: env.DB_KREEDA ? 'bound' : 'not bound', setup: db !== 'ok' ? 'fix db first' : users === 0 ? 'ready: the first sign-in creates the admin account' : 'done', realtime: env.HUB ? 'on' : 'off (polling)', version: API_VERSION, at: now() });
       }
       else if (p === '/api/auth/login' && req.method === 'POST') res = await handleLogin(env, req);
-      else if (p === '/api/me') { const s = await requireUser(env, req); res = json({ user: { username: s.u, role: s.role, plant: await userPlant(env, s.u) } }); }
+      else if (p === '/api/me') { const s = await requireUser(env, req); res = json({ user: { username: s.u, role: s.role, plant: await userPlant(env, s.u), divs: await userDivs(env, s.u, s.role) }, div: env.DIV, kreeda: !!env.DB_KREEDA }); }
       else if (p === '/api/plan' || p.startsWith('/api/plan/')) res = await handlePlanLine(env, req, p.split('/')[3] || '');
       else if (p === '/api/dispatch') res = await handleDispatch(env, req);
       else if (p.startsWith('/api/pick')) res = await handlePick(env, req, p);
@@ -3946,8 +4072,11 @@ export default {
         const s = await requireUser(env, req);
         if (s.role === 'editor') res = json({ owners: [s.u] });
         else {
-          const r = await env.DB.prepare('SELECT owner u FROM plan WHERE owner IS NOT NULL UNION SELECT by_user FROM pick_req UNION SELECT username FROM users WHERE role <> \'viewer\' ORDER BY 1').all<{ u: string }>();
-          res = json({ owners: r.results.map((x) => x.u).filter(Boolean) });
+          const r = await env.DB.prepare('SELECT owner u FROM plan WHERE owner IS NOT NULL UNION SELECT by_user FROM pick_req').all<{ u: string }>();
+          // the users of this system (Admin / Head have both)
+          const us = (await udb(env).prepare("SELECT username u, role, divs FROM users WHERE role <> 'viewer'").all<{ u: string; role: Role; divs: string | null }>()).results
+            .filter((x) => x.role === 'admin' || x.role === 'head' || parseDivs(x.divs).includes(env.DIV || 'active')).map((x) => x.u);
+          res = json({ owners: Array.from(new Set([...r.results.map((x) => x.u), ...us].filter(Boolean))).sort() });
         }
       }
       else if (p === '/api/plants/received') res = await handleReceived(env, req);
@@ -3990,7 +4119,7 @@ export default {
       else if (p.startsWith('/api/data/') && req.method === 'DELETE') res = await handleClear(env, req, p.split('/').pop() || '');
       else if (p === '/api/online') {
         await requireUser(env, req);
-        res = env.HUB ? await env.HUB.get(env.HUB.idFromName('main')).fetch('https://hub/online') : json({ online: [] });
+        res = env.HUB ? await env.HUB.get(env.HUB.idFromName(hubName(env))).fetch('https://hub/online') : json({ online: [] });
       } else throw new HttpError(404, 'Not found.');
 
       const h = new Headers(res.headers);
