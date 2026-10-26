@@ -2,7 +2,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { NEEDS_API, ROLE_NAME, api, clearSession, getSession, getViewUser, onApiBusy, setViewUser, type User } from '@/lib/api';
+import { ApiError, DIV_NAME, NEEDS_API, ROLE_NAME, api, clearSession, getDiv, getSession, getViewUser, onApiBusy, saveSession, setDiv, setViewUser, userDivs, type Div, type User } from '@/lib/api';
 import { useLive, type LiveMessage, type LiveState } from '@/lib/live';
 import { Credit, Logo } from '@/components/Brand';
 import TableFilters from '@/components/TableFilters';
@@ -24,21 +24,37 @@ export const useShell = () => {
 
 const SRC_NAME: Record<string, string> = { plan: 'Weekly plan', zmmbe: 'ZMMBE', kfc: 'ZMMBE KFC', pfc: 'ZMMBE PFC', plant: 'PLANT report', trr: 'TRR', dispatch: 'a dispatch' };
 
-/** `allowGuest`: the page can be viewed without signing in (read-only). */
+/** Every page needs a signed-in user: without one the login screen opens straight away (`allowGuest` is no longer used). */
 export default function Shell({ children, admin, allowGuest }: { children: React.ReactNode; admin?: boolean; allowGuest?: boolean }) {
   const router = useRouter();
   const path = usePathname();
   const [user, setUser] = useState<User | null>(null);
-  const [guest, setGuest] = useState(false);
+  const [guest] = useState(false);
+  const [div, setDivS] = useState<Div>('active');
   const [toasts, setToasts] = useState<{ id: number; text: string }[]>([]);
   const subs = useRef(new Set<(m: LiveMessage) => void>());
 
   useEffect(() => {
     const s = getSession();
-    if (!s && allowGuest) { setGuest(true); setUser({ username: 'Guest', role: 'viewer' }); return; }
     if (!s) { router.replace('/login/'); return; }
     if (admin && s.user.role !== 'admin') { router.replace('/'); return; }
+    // the system open on this device must be one the user has (else their own one)
+    const ds = userDivs(s.user);
+    if (!ds.includes(getDiv())) setDiv(ds[0]);
+    setDivS(getDiv());
     setUser(s.user);
+    // the access may have changed since the sign-in: read it again
+    api<{ user: User }>('/api/me').then((r) => {
+      const nd = userDivs(r.user);
+      saveSession({ ...s, user: { ...s.user, divs: r.user.divs } }); try { sessionStorage.removeItem('mas-div-switch'); } catch { /* private mode */ }
+      if (!nd.includes(getDiv())) { setDiv(nd[0]); location.reload(); }
+    }).catch((e) => {
+      // access to this system was taken away: open the other one (once)
+      if (e instanceof ApiError && e.status === 403 && /no access/i.test(e.message)) {
+        let tried = false; try { tried = sessionStorage.getItem('mas-div-switch') === '1'; sessionStorage.setItem('mas-div-switch', '1'); } catch { /* private mode */ }
+        if (!tried) { setDiv(getDiv() === 'active' ? 'kreeda' : 'active'); location.reload(); }
+      }
+    });
   }, [router, admin, allowGuest]);
 
   // macOS-style close: React removes a window at once, so a copy of it is shown for a moment while it shrinks and fades
@@ -135,6 +151,12 @@ export default function Shell({ children, admin, allowGuest }: { children: React
       <header className="bar">
         <div className="bar-in">
           <Link href="/" className="brand"><Logo size={30} /><span className="tpl-badge" aria-label="3PL"><span>3PL</span></span><span className="brand-text">MAS AUTOMATE PICK SYSTEM</span></Link>
+          {/* the system open now: MAS Active or MAS Kreeda — a user with both switches here */}
+          {userDivs(user).length > 1 ? (
+            <div className={`div-switch ${div}`} role="radiogroup" aria-label="System">
+              {(['active', 'kreeda'] as Div[]).map((d) => <button key={d} type="button" role="radio" aria-checked={div === d} className={div === d ? 'on' : ''} onClick={() => { if (d !== div) { setDiv(d); location.reload(); } }}>{DIV_NAME[d]}</button>)}
+            </div>
+          ) : <span className={`div-tag ${div}`}>{DIV_NAME[div]}</span>}
           <nav className="nav">
             {nav.map((n) => (
               <Link key={n.href} href={n.href} className={(n.href === '/' ? path === '/' : path?.startsWith(n.href.replace(/\/$/, ''))) ? 'on' : ''}>{n.label}</Link>
@@ -159,7 +181,7 @@ export default function Shell({ children, admin, allowGuest }: { children: React
                   </label>
                 )}
                 <span className="who">{user.username}<span className="role">{ROLE_NAME[user.role] || user.role}</span></span>
-                <button className="btn sm" onClick={() => { clearSession(); setGuest(true); setUser({ username: 'Guest', role: 'viewer' }); if (!allowGuest) router.replace('/'); }}>Sign out</button>
+                <button className="btn sm" onClick={() => { clearSession(); router.replace('/login/'); }}>Sign out</button>
               </>
             )}
           </div>

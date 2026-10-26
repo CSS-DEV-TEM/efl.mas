@@ -51,6 +51,8 @@ export const FIELDS: Record<Src, FieldDef[]> = {
     { id: 'qty', label: 'QTY', required: true, numeric: true, aliases: ['qty', 'quantity', 'req qty', 'pull qty', 'required qty'], keyed: 'F' },
     { id: 'plant', label: 'Plant', aliases: ['plant', 'to plant', 'factory'] },
     { id: 'remarks', label: 'Remarks', aliases: ['remarks', 'remark', 'priority'], keyed: 'G' },
+    // Pick 1, 2, 3 … of the day and plant: the lines are uploaded to that Pick (blank = the Pick chosen on the page)
+    { id: 'pick', label: 'Pick', aliases: ['pick', 'pick no', 'pick number', 'pick #'] },
     { id: 'comment', label: 'Comment', aliases: ['comment', 'comments'], keyed: 'H' },
     { id: 'qi_note', label: 'QI note', aliases: ['qi'], keyed: 'I' },
     { id: 'status', label: 'Status', aliases: ['status'], keyed: 'J' },

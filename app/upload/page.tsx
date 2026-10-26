@@ -14,7 +14,9 @@ import { TEMPLATES, downloadTemplate } from '@/lib/templates';
 import DayPickBar, { useDayPick } from '@/components/DayPickBar';
 import PlanReport from '@/components/PlanReport';
 import { todayLocal, weekDays, weekIdOf, weekOptions } from '@/lib/smart';
-import { PICK_SRCS, PLAN_SHEET, pickSrcOf, squash, uploadPickSheets, type PickSrc } from '@/lib/pick';
+import { keepFile } from '@/lib/files';
+import UploadedFiles from '@/components/UploadedFiles';
+import { PICK_SRCS, PLAN_SHEET, pickSrcOfSheet, squash, uploadPickSheets, type PickSrc } from '@/lib/pick';
 import {
   FIELDS, SRC_INFO, SRC_ORDER, applyMapping, colLetter, detectMapping, guessSrc, guessSrcFromGrid, isHelpSheet, readWorkbook, usableCount,
   type Grid, type Mapping, type Src,
@@ -116,34 +118,53 @@ function Uploads() {
     const skipped: string[] = [];
     for (const f of Array.from(files)) {
       try {
+        fileObj.current[f.name] = f;
         const sheets = readWorkbook(await f.arrayBuffer());
         // a dispatch / pick file (Display Item Number + Actual Qty) belongs on the Dispatch page
         // dispatch files are no longer uploaded: picks count as dispatched
-        if (sheets.some((s) => isDispatchGrid(s.grid)) && !sheets.some((s) => guessSrc(s.name))) { disp.push(f); continue; }
+        // (a Korber Inventory / other pick report is not a dispatch file)
+        const oneData = sheets.filter((s) => s.grid.length && !isHelpSheet(s.name)).length === 1;
+        if (sheets.some((s) => isDispatchGrid(s.grid)) && !sheets.some((s) => guessSrc(s.name)) && !sheets.some((s) => s.grid.length && pickSrcOfSheet(s.name, s.grid, f.name, oneData))) { disp.push(f); continue; }
         const dataSheets = sheets.filter((s) => s.grid.length && !isHelpSheet(s.name));
         // a "PLANT-DD" plan sheet (ASIALLINE-23): the plan of that plant's Pick on that day of this month
         let filePick: { plant: string; day: string } | null = null;
         for (const s of dataSheets) {
-          const m = PLAN_SHEET.exec(s.name);
-          if (!m || m[1].toUpperCase().startsWith('SHEET') || detectMapping('plan', s.grid).how !== 'header') continue;
-          const want = squash(m[1]);
+          if (detectMapping('plan', s.grid).how !== 'header') continue;
+          // "PLANT-DD" (ASIALLINE-23), or a sheet named after the plant ("SLEEK LINE") in a file like
+          // SLEEK_LINE_WEEKLY_PULL_27.xlsx: the day from the sheet's DATE column (one date), else the number in the file name
+          const m0 = PLAN_SHEET.exec(s.name);
+          let pName = '', dd = 0, dayIso: string | null = null;
+          if (m0 && !m0[1].toUpperCase().startsWith('SHEET')) { pName = m0[1]; dd = Number(m0[2]); }
+          else if (!/^(sheet\s*\d*|plan|data|day\s*plan|week\s*plan|plan\s*format|pull\s*plan)$/i.test(s.name.trim()) && !pickSrcOfSheet(s.name, s.grid) && !guessSrc(s.name)) {
+            const want0 = squash(s.name);
+            const known = plants.some((c) => squash(c) === want0) || Object.values(plantNames).some((nm) => nm && squash(nm) === want0);
+            if (want0.length >= 3 && (known || squash(f.name).includes(want0))) {
+              pName = s.name;
+              const ds = Array.from(new Set(applyMapping('plan', s.grid, detectMapping('plan', s.grid)).map((r) => toIsoDate((r as Record<string, unknown>).date)).filter(Boolean))) as string[];
+              if (ds.length === 1) dayIso = ds[0];
+              else { const fm = /(\d{1,2})(?!.*\d)/.exec(f.name.replace(/\.\w+$/, '')); dd = fm ? Number(fm[1]) : 0; }
+            }
+          }
+          if (!pName || (!dayIso && !(dd >= 1 && dd <= 31))) continue;
+          const want = squash(pName);
           const hit = plants.find((c) => squash(c) === want) ?? Object.entries(plantNames).find(([, nm]) => nm && squash(nm) === want)?.[0];
-          const code = (hit || m[1].replace(/\s+/g, '')).toUpperCase();
-          const dd = Math.min(31, Math.max(1, Number(m[2])));
-          filePick = { plant: code, day: nearDay(todayLocal(), dd) };
+          const code = (hit || pName.replace(/\s+/g, '')).toUpperCase();
+          if (!dd) dd = Number(dayIso!.slice(8, 10));
+          filePick = { plant: code, day: dayIso || nearDay(todayLocal(), Math.min(31, Math.max(1, dd))) };
           const ex = await api<{ rounds: RoundInfo[] }>(`/api/rounds?day=${filePick.day}`).then((r) => r.rounds.filter((x) => (x.plant || '').toUpperCase() === code)).catch(() => [] as RoundInfo[]);
           const last = ex.sort((a, b) => b.round - a.round)[0];
           const map = detectMapping('plan', s.grid);
           // the report columns of such a sheet are worked out by the system: not plan fields
           for (const k of ['qi_note', 'status', 'comment']) if (map.cols[k] !== undefined) map.cols[k] = -1;
           next.push({ id: f.name + '::' + s.name + '::' + Math.random(), file: f.name, sheet: s.name, grid: s.grid, src: 'plan', map, state: 'ready', planType: 'day', mode: 'replace-round',
-            autoPick: { name: `${m[1].replace(/\s+/g, '').toUpperCase()}-${String(dd).padStart(2, '0')}`, plant: code, day: filePick.day, rid: last ? last.id : `${filePick.day}~${code}~1`, exists: !!last } });
+            autoPick: { name: `${pName.replace(/\s+/g, '').toUpperCase()}-${String(dd).padStart(2, '0')}`, plant: code, day: filePick.day, rid: last ? last.id : `${filePick.day}~${code}~1`, exists: !!last } });
         }
         for (const s of dataSheets) {
           if (next.some((j) => j.file === f.name && j.sheet === s.name)) continue;
           // generated by the system from ZMMBE (the plan report's ALRADY SEND)
           if (/^al+re?a?dy\s*sen[dt]/i.test(s.name.trim())) { skipped.push(`${f.name} › ${s.name} (made from ZMMBE)`); continue; }
-          const ps = pickSrcOf(s.name);
+          // a pick report by its sheet name, its file name (one sheet) or its columns — never taken for ZMMBE
+          const ps = pickSrcOfSheet(s.name, s.grid, f.name, dataSheets.length === 1);
           if (ps) { next.push({ id: f.name + '::' + s.name + '::' + Math.random(), file: f.name, sheet: s.name, grid: s.grid, src: '', map: null, state: 'ready', pickSrc: ps }); continue; }
           // KFC / PFC are built from the ZMMBE upload; TRR is not used any more
           const named = guessSrc(s.name) ?? (dataSheets.length === 1 ? guessSrc(f.name.replace(/\.\w+$/, '').replace(/\(\d+\)/g, '')) : null);
@@ -169,14 +190,25 @@ function Uploads() {
 
   // the Pick a workbook's plan sheet went to: its other report sheets go there too
   const fileRid = useRef<Record<string, string>>({});
+  // a plan with a Pick column (1, 2, 3 …) goes to Pick 1, 2, 3 … of the same day and plant: the reports uploaded with it
+  // go to each of those Picks (key: the Pick chosen on the page / the plan sheet's Pick)
+  const splitRids = useRef<Record<string, string[]>>({});
+  const targetsOf = (to: string) => (to && splitRids.current[to]?.length ? splitRids.current[to] : [to]);
+  // the files as chosen: after a sheet is saved, its original file is kept for download (Uploaded files)
+  const fileObj = useRef<Record<string, File>>({});
   async function send(j: SheetJob) {
     if (j.pickSrc) {
-      const to = fileRid.current[j.file] || rid;
-      if (!to) { setJob(j.id, { state: 'error', msg: 'Choose or create a Pick first.' }); return; }
+      const to0 = fileRid.current[j.file] || rid;
+      if (!to0) { setJob(j.id, { state: 'error', msg: 'Choose or create a Pick first.' }); return; }
       setJob(j.id, { state: 'sending', msg: undefined });
       try {
-        const r = await uploadPickSheets(j.pickSrc, [{ name: j.sheet, grid: j.grid }], j.file, to);
-        setJob(j.id, { state: 'done', msg: `${PICK_SRCS.find((x) => x.src === j.pickSrc)!.title}: ${fmt(r.rows)} rows saved to ${roundName(to, plantNames)}${r.total > r.rows ? ` (of ${fmt(r.total)} in the sheet)` : ''}.` });
+        const msgs: string[] = [];
+        for (const to of targetsOf(to0)) {
+          const r = await uploadPickSheets(j.pickSrc, [{ name: j.sheet, grid: j.grid }], j.file, to);
+          msgs.push(`${fmt(r.rows)} rows → ${roundName(to, plantNames)}${r.total > r.rows ? ` (of ${fmt(r.total)})` : ''}`);
+          await keepFile(fileObj.current[j.file], [j.pickSrc], to);
+        }
+        setJob(j.id, { state: 'done', msg: `${PICK_SRCS.find((x) => x.src === j.pickSrc)!.title}: ${msgs.join(' · ')}.` });
         setBarKey((k) => k + 1);
       } catch (e) { setJob(j.id, { state: 'error', msg: e instanceof Error ? e.message : 'Upload failed.' }); }
       return;
@@ -193,11 +225,42 @@ function Uploads() {
       setDay(j.autoPick.day); setRid(to); setBarKey((k) => k + 1);
       return;
     }
+    // a stock report (ZMMBE): to every Pick the plan was split into
+    if (j.src !== 'plan') {
+      const ts = targetsOf(fileRid.current[j.file] || rid);
+      for (let i = 0; i < ts.length; i++) await sendPlan(j, ts[i], ts.length > 1 ? `${i + 1}/${ts.length}` : '');
+      return;
+    }
     await sendPlan(j, fileRid.current[j.file] || rid);
   }
-  async function sendPlan(j: SheetJob, rid: string) {
+  /** Pick N of the same day and plant as `rid` ("2026-10-27~SHADOWLINE~1" → "…~N") */
+  const ridN = (rid: string, n: number) => rid.replace(/~\d+$/, `~${n}`);
+  async function sendPlan(j: SheetJob, rid: string, part = '') {
     if (!j.src || !j.map) return;
-    setJob(j.id, { state: 'sending', msg: undefined });
+    // a day plan with a Pick column: each Pick's lines go to that Pick (one upload per Pick; blank = the chosen Pick)
+    if (j.src === 'plan' && /^\d{4}-\d{2}-\d{2}~[^~]*~\d+$/.test(rid) && !part) {
+      const all = applyMapping(j.src, j.grid, j.map);
+      const pickOf = (r: Record<string, unknown>) => { const m = /\d+/.exec(String(r.pick ?? '')); const n = m ? Number(m[0]) : 0; return n >= 1 && n <= 50 ? n : 0; };
+      if (all.some((r) => pickOf(r) > 0)) {
+        const groups = new Map<string, Record<string, unknown>[]>();
+        for (const r of all) { const n = pickOf(r); const to = n ? ridN(rid, n) : rid; if (!groups.has(to)) groups.set(to, []); groups.get(to)!.push(r); }
+        const ts = Array.from(groups.keys()).sort((a, b) => Number(/\d+$/.exec(a)?.[0]) - Number(/\d+$/.exec(b)?.[0]));
+        setJob(j.id, { state: 'sending', msg: undefined });
+        try {
+          const msgs: string[] = [];
+          for (const to of ts) {
+            const r = await api<PlanPreview & { accepted: number; skipped: number }>('/api/upload', { method: 'POST', body: { src: 'plan', fileName: j.file, sheetName: j.sheet, rows: groups.get(to)!, ...planOpts(j, to) } });
+            msgs.push(`${roundName(to, plantNames)}: ${fmt(groups.get(to)!.length)} lines (${fmt(r.added ?? 0)} new, ${fmt(r.updated ?? 0)} updated${r.removed ? `, ${fmt(r.removed)} removed` : ''})`);
+          }
+          splitRids.current[rid] = ts;
+          await keepFile(fileObj.current[j.file], ['plan'], rid || null);
+          await loadStatus(); setBarKey((k) => k + 1); setShowReady(true);
+          setJob(j.id, { state: 'done', msg: `Pick column → ${ts.length} Pick${ts.length === 1 ? '' : 's'}: ${msgs.join(' · ')}. The reports uploaded with it go to each of these Picks.` });
+        } catch (e) { setJob(j.id, { state: 'error', msg: e instanceof Error ? e.message : 'Upload failed.' }); }
+        return;
+      }
+    }
+    setJob(j.id, { state: 'sending', msg: part ? `Uploading ${part}…` : undefined });
     try {
       const rows = applyMapping(j.src, j.grid, j.map);
       const r = await api<PlanPreview & { accepted: number; skipped: number; weeks?: string[]; stockDups?: number; changes?: { added: number; removed: number; unchanged: number }; derived?: { kfc: number; pfc: number; plant: number | null; plantKept?: number }; notInSetup?: { plant: string; soPlant: string; rows: number; ur: number }[]; setupOut?: number }>('/api/upload', { method: 'POST', body: { src: j.src, fileName: j.file, sheetName: j.sheet, rows, ...planOpts(j, rid) } });
@@ -207,7 +270,8 @@ function Uploads() {
       const plan = j.src === 'plan' && r.added !== undefined ? `${fmt(r.added)} new, ${fmt(r.updated)} updated${r.removed ? `, ${fmt(r.removed)} removed` : ''}${r.inFileDups ? `, ${fmt(r.inFileDups)} repeated rows (last row kept${r.dupQtyCount ? `; ${fmt(r.dupQtyCount)} had a different QTY` : ''})` : ''}` : `${fmt(r.accepted)} rows saved — ${j.stockMode === 'add' ? 'added to the current report' : 'whole report replaced, no duplicates'}${r.stockDups ? ` · ${fmt(r.stockDups)} repeated rows counted once` : ''}${r.changes ? ` · ${fmt(r.changes.unchanged)} unchanged, ${fmt(r.changes.added)} new or changed, ${fmt(r.changes.removed)} removed` : ''}${r.derived ? ` · also built ZMMBE KFC (${fmt(r.derived.kfc)}) and PFC (${fmt(r.derived.pfc)})${r.derived.plant ? ` · ${fmt(r.derived.plant)} plant-location row${r.derived.plant === 1 ? '' : 's'} left out` : ''}` : ''}`;
       // Plant + SO Plant pairs not in Settings → ZMMBE plants: left out, listed so they can be added
       const notSet = r.notInSetup?.length ? ` · ${fmt(r.setupOut || 0)} row${r.setupOut === 1 ? '' : 's'} left out — Plant + SO Plant not in Settings → ZMMBE plants: ${r.notInSetup.map((m) => `${m.plant} + ${m.soPlant || '–'} (${fmt(m.rows)} rows, UR ${fmt(m.ur, 2)})`).join(', ')}` : '';
-      setJob(j.id, { state: 'done', msg: `${plan}${wk}${notSet}${r.skipped > 0 ? ` · ${fmt(r.skipped)} rows without SO/LI/Material skipped` : ''}. Every open dashboard has updated.` });
+      await keepFile(fileObj.current[j.file], [j.src], rid || null);
+      setJob(j.id, { state: 'done', msg: `${part ? `${roundName(rid, plantNames)} (${part}): ` : ''}${plan}${wk}${notSet}${r.skipped > 0 ? ` · ${fmt(r.skipped)} rows without SO/LI/Material skipped` : ''}. Every open dashboard has updated.` });
     } catch (e) {
       setJob(j.id, { state: 'error', msg: e instanceof Error ? e.message : 'Upload failed.' });
     }
@@ -378,6 +442,7 @@ function Uploads() {
           </div>
         </section>
       )}
+      <UploadedFiles toast={toast} />
       </>}
     </main>
   );
@@ -453,11 +518,18 @@ function SheetCard({ job, rid, ridLabel, owners, me, onChange, onSend, onRemove 
   const rows = useMemo(() => (job.src && job.map ? applyMapping(job.src, job.grid, job.map) : []), [job.src, job.map, job.grid]);
   const usable = job.src ? usableCount(job.src, rows) : 0;
   const checks = useMemo(() => (job.src === 'plan' ? planChecks(rows, '', true) : []), [job.src, rows]);
+  // a Pick column (1, 2, 3 …): the lines of each Pick
+  const picks = useMemo(() => {
+    if (job.src !== 'plan') return [] as [number, number][];
+    const m = new Map<number, number>();
+    for (const r of rows) { const x = /\d+/.exec(String((r as Record<string, unknown>).pick ?? '')); const n = x ? Number(x[0]) : 0; m.set(n >= 1 && n <= 50 ? n : 0, (m.get(n >= 1 && n <= 50 ? n : 0) ?? 0) + 1); }
+    return Array.from(m).filter(([n]) => n > 0).length ? Array.from(m).sort((a, b) => a[0] - b[0]) : [];
+  }, [job.src, rows]);
   // ask the server what this upload would do (new / updated / removed) before it is sent
   const [preview, setPreview] = useState<PlanPreview | null>(null);
   const [previewErr, setPreviewErr] = useState('');
   useEffect(() => {
-    if (job.src !== 'plan' || job.state === 'done' || !usable || !rid) { setPreview(null); return; }
+    if (job.src !== 'plan' || job.state === 'done' || !usable || !rid || picks.length) { setPreview(null); return; }
     let stop = false;
     const t = setTimeout(async () => {
       try {
@@ -546,6 +618,12 @@ function SheetCard({ job, rid, ridLabel, owners, me, onChange, onSend, onRemove 
               </>
             ) : <Loader inline label="Checking what this upload will change…" />}
           </div>
+        </div>
+      )}
+      {picks.length > 0 && job.state !== 'done' && (
+        <div className="notice info" style={{ margin: '6px 0' }}>
+          <b>Pick column</b> — the lines go to {picks.map(([n, c]) => `${n ? `Pick ${n}` : 'the chosen Pick'} (${fmt(c)} line${c === 1 ? '' : 's'})`).join(', ')} of this day and plant, each picked on its own. Each of these Picks&apos; plan is replaced by its lines; the reports uploaded with this file go to every one of them.
+          {!/^\d{4}-\d{2}-\d{2}~[^~]*~\d+$/.test(rid) && <> <b>Choose the day and plant (a Pick) first.</b></>}
         </div>
       )}
       {job.src === 'plan' && job.state !== 'done' && checks.length > 0 && (

@@ -14,9 +14,9 @@ const STOCK_HEADERS = ['Plant', 'St Location', 'SO Plant', 'SO', 'LI', 'UR', 'Ma
 export const TEMPLATES: Record<Src, Template> = {
   plan: {
     file: 'Day_Plan_Format.xlsx', title: 'Day plan',
-    note: 'One row per SO line. On upload you choose the day, the plant and the Pick No (1, 2 …); Date and Plant in the file are optional.',
-    headers: ['SO', 'LI', 'Item Code', 'Date', 'QTY', 'Plant', 'Remarks'],
-    rows: [[1001724370, 10, 1000042935, '2026-10-12', 3, 'C051', ''], [1001733165, 10, 1000256506, '2026-10-13', 40, 'C051', '1st priority Last pallet']],
+    note: 'One row per SO line. On upload you choose the day and the plant; the Pick column (1, 2, 3 …) puts each line in that Pick of the day, so each Pick is picked on its own (blank = the Pick chosen on the page). Date and Plant in the file are optional.',
+    headers: ['SO', 'LI', 'Item Code', 'Date', 'QTY', 'Plant', 'Remarks', 'Pick'],
+    rows: [[1001724370, 10, 1000042935, '2026-10-12', 3, 'C051', '', 1], [1001733165, 10, 1000256506, '2026-10-13', 40, 'C051', '1st priority Last pallet', 2]],
   },
   zmmbe: {
     file: 'ZMMBE.xlsx', title: 'ZMMBE (full stock)',
