@@ -2255,7 +2255,8 @@ async function handlePick(env: Env, req: Request, p: string) {
   // POST {week, key, date, pickNo, rolls:[{pallet, qty, confirmed, manual?: {roll_no, barcode, lot, shade, roll_qty}}]}
   if (part === '' && req.method === 'POST') {
     const s = await requireUser(env, req, 'editor');
-    const b = (await req.json()) as { week: string; key: string; date: string | null; pickNo?: string; kind?: string; auto?: boolean; overConfirmed?: boolean; closeShort?: boolean; rolls: { pallet: string; qty: number; confirmed?: boolean; manual?: ManualFor; nobarcode?: boolean; /** chosen by the smart suggestion in Pick all matched */ smart?: boolean }[] };
+    const b = (await req.json()) as { week: string; key: string; date: string | null; pickNo?: string; kind?: string; auto?: boolean; overConfirmed?: boolean; closeShort?: boolean; rolls: { pallet: string; qty: number; confirmed?: boolean; manual?: ManualFor; nobarcode?: boolean; /** chosen by the smart suggestion in Pick all matched */ smart?: boolean }[];
+      /** manual pick: the user confirmed a roll whose Korber Lot Number is not one of the line's ZINSR lots */ lotConfirmed?: boolean };
     if (!b.week || !b.key || !Array.isArray(b.rolls) || !b.rolls.length) throw new HttpError(400, 'Choose at least one roll.');
     // one pallet once per pick (two entries would each pass the roll's balance and pick it over)
     { const seen = new Set<string>(); for (const x of b.rolls) { const k = up(x.pallet); if (seen.has(k)) throw new HttpError(400, `Pallet ${x.pallet} is twice in this pick — enter its QTY once.`); seen.add(k); } }
@@ -2373,7 +2374,14 @@ async function handlePick(env: Env, req: Request, p: string) {
           // a roll SAP lists under several lots of this SO line counts toward any of them: its lots in turn, each up to its QTY
           let ls = Array.from(new Set(String(p.insp_lot ?? '').split(',').map((t) => t.trim()).filter((t) => lotCap.has(t))));
           if (!ls.length) { const kl = up(p.lot); const l0 = Array.from(lotCap).find(([, v]) => v.vb && v.vb === kl)?.[0]; if (l0) { p.insp_lot = l0; ls = [l0]; } }
-          if (!ls.length) throw new HttpError(409, `Pallet ${p.pallet}: Korber Lot Number ${p.lot ?? '–'} is not a ZINSR lot / Vendor Batch of ${line.so} / ${line.li} — it cannot be picked for this SO line.`);
+          if (!ls.length) {
+            // a manual pick may take it once the user confirms (a warning, kept on the pick); Pick all matched never does
+            if (b.lotConfirmed && !b.auto) {
+              p.note = [p.note, `Confirmed: Korber Lot Number ${p.lot ?? '–'} is not a ZINSR lot / Vendor Batch of ${line.so} / ${line.li}`].filter(Boolean).join(' · ');
+              continue;
+            }
+            throw new HttpError(409, `Pallet ${p.pallet}: Korber Lot Number ${p.lot ?? '–'} is not a ZINSR lot / Vendor Batch of ${line.so} / ${line.li} — ${b.auto ? 'it cannot be picked for this SO line.' : 'tick “I checked — pick anyway” to pick it.'}`);
+          }
           let rest = Number(p.qty);
           for (const l0 of ls) {
             if (rest <= 1e-9) break;
@@ -2443,16 +2451,30 @@ async function handlePick(env: Env, req: Request, p: string) {
     };
     const pre = await over();
     if (pre.length) throw new HttpError(409, `Picked meanwhile — ${pre.join(' · ')}. Refresh and pick again.`);
-    const reqRow = await env.DB.prepare(`INSERT INTO pick_req (day, seq, pick_no, week, line, so, li, item, plant, need, qty, rolls, by_user, at, match, kind, closed, short, auto) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`)
-      .bind(day, seq, txt(b.pickNo), b.week, lineId, line.so, line.li, line.item, line.plant ?? null, cand.need, total, picks.length, s.u, at, match, kind, closed, short, b.auto ? 1 : 0).first<{ id: number }>();
-    const reqId = Number(reqRow!.id);
-    for (const x of picks) x.req_id = reqId;
-    await env.DB.batch([
-      ...jsonInsert(env, 'picks', ['req_id', 'day', 'week', 'line', 'so', 'li', 'item', 'pallet', 'qty', 'roll_qty', 'partial', 'shade', 'lot', 'insp_lot', 'batch', 'note', 'by_user', 'at', 'korber'], picks, 100),
-      // two picks saved at the same moment: the later one is taken back (below), so a pallet is never picked twice
-      env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(at, s.u, 'pick',
-        `${kind === 'offsite' ? 'Offsite' : 'Normal'} pick ${ordinal(seq)} ${day}: ${line.so} / ${line.li} / ${line.item} — ${picks.length} roll(s), ${total}${short ? ` (closed ${short} short)` : ''}${b.pickNo ? ' · pick no ' + b.pickNo : ''}`),
-    ]);
+    // the pick and its rolls are saved in ONE transaction (all or nothing): a dropped connection never leaves half a pick.
+    // Its id is chosen first; another pick taking the same id at the same moment makes the batch fail — then the next id.
+    let reqId = 0;
+    for (let attempt = 0; ; attempt++) {
+      // the next id that was never used (an id of a pick taken back is not given again)
+      let next = Number((await env.DB.prepare('SELECT COALESCE(MAX(id), 0) + 1 n FROM pick_req').first<{ n: number }>())?.n ?? 1);
+      try { next = Math.max(next, Number((await env.DB.prepare("SELECT seq + 1 n FROM sqlite_sequence WHERE name = 'pick_req'").first<{ n: number }>())?.n ?? 0)); } catch { /* not readable */ }
+      reqId = next + attempt;
+      for (const x of picks) x.req_id = reqId;
+      try {
+        await env.DB.batch([
+          env.DB.prepare(`INSERT INTO pick_req (id, day, seq, pick_no, week, line, so, li, item, plant, need, qty, rolls, by_user, at, match, kind, closed, short, auto) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+            .bind(reqId, day, seq, txt(b.pickNo), b.week, lineId, line.so, line.li, line.item, line.plant ?? null, cand.need, total, picks.length, s.u, at, match, kind, closed, short, b.auto ? 1 : 0),
+          ...jsonInsert(env, 'picks', ['req_id', 'day', 'week', 'line', 'so', 'li', 'item', 'pallet', 'qty', 'roll_qty', 'partial', 'shade', 'lot', 'insp_lot', 'batch', 'note', 'by_user', 'at', 'korber'], picks, 100),
+          // two picks saved at the same moment: the later one is taken back (below), so a pallet is never picked twice
+          env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(at, s.u, 'pick',
+            `${kind === 'offsite' ? 'Offsite' : 'Normal'} pick ${ordinal(seq)} ${day}: ${line.so} / ${line.li} / ${line.item} — ${picks.length} roll(s), ${total}${short ? ` (closed ${short} short)` : ''}${b.pickNo ? ' · pick no ' + b.pickNo : ''}`),
+        ]);
+        break;
+      } catch (e) {
+        if (attempt < 4 && /UNIQUE|PRIMARY KEY|constraint/i.test(String((e as Error)?.message ?? e))) continue;
+        throw e;
+      }
+    }
     const post = await over(reqId);
     if (post.length) {
       await env.DB.batch([env.DB.prepare('DELETE FROM picks WHERE req_id = ?').bind(reqId), env.DB.prepare('DELETE FROM pick_req WHERE id = ?').bind(reqId)]);

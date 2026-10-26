@@ -1,7 +1,7 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Loader, Skeleton } from '@/components/Loader';
-import { api, getSession, isBossRole } from '@/lib/api';
+import { ApiError, api, getSession, isBossRole } from '@/lib/api';
 import CompleteLine from '@/components/CompleteLine';
 import PlanReport, { type PlanReportRes } from '@/components/PlanReport';
 import { ago, avail, fmt, fmtDate, fmtQty, isDispatched, isDone, need, periodOf, type Line } from '@/lib/calc';
@@ -161,49 +161,81 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
   // "Pick all matched": every open line of the Pick, one by one — the rolls where everything matches (no check needed,
   // not a shared-lot roll) are picked as the system selects them; what is left shows under "Needs manual"
   type RunRes = { id: number; so: string; li: string; item: string; ok: 'picked' | 'skip' | 'error'; text: string };
-  const [run, setRun] = useState<{ total: number; done: number; cur: string; res: RunRes[]; finished: boolean } | null>(null);
+  const [run, setRun] = useState<{ total: number; done: number; cur: string; res: RunRes[]; finished: boolean; offline?: boolean } | null>(null);
   const [runWhy, setRunWhy] = useState<Record<number, string>>({});
   const stopRef = useRef(false);
   const runAll = async () => {
     const targets = rows.filter((l) => !isDone(l) && todo(l) > 1e-9 && !l.hold);
     if (!targets.length) { toast('No open line with UR to pick in this Pick.'); return; }
-    if (!window.confirm(`Pick every All-match roll for ${targets.length} open line${targets.length === 1 ? '' : 's'} of ${label || week}?\n\nOnly rolls where everything matches are picked (as the system selects them, the last roll cut to the QTY) — also a roll SAP lists in the lots of several SO lines, up to each line's ZINSR lot QTY (a cut roll's balance first). Lines that need a check or a manual roll are left for you under “Needs manual” — the Smart suggestion shows there, you choose.`)) return;
+    if (!window.confirm(`Pick every All-match roll for ${targets.length} open line${targets.length === 1 ? '' : 's'} of ${label || week}?\n\nOnly rolls where everything matches are picked (as the system selects them, the last roll cut to the QTY) — also a roll SAP lists in the lots of several SO lines, up to each line's ZINSR lot QTY (a cut roll's balance first). Lines that need a check or a manual roll are left for you under “Needs manual” — the Smart suggestion shows there, you choose.\n\nKeep this tab open while it runs. If the network drops it waits and goes on by itself.`)) return;
     stopRef.current = false;
     setRunActive(true);
+    // closing / reloading the tab while it runs: the browser asks first (the lines already picked stay picked)
+    const onLeave = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ''; return ''; };
+    window.addEventListener('beforeunload', onLeave);
+    // the network is gone: wait until the server answers again (checked every 3 s), unless Stop is pressed
+    const waitOnline = async (what: string) => {
+      for (let n = 1; !stopRef.current; n++) {
+        setRun((r) => r && { ...r, cur: `Network lost — waiting to go on (${what}) · ${n * 3} s`, offline: true });
+        await new Promise((r) => setTimeout(r, 3000));
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) continue;
+        try { await api('/api/health'); setRun((r) => r && { ...r, offline: false }); return; } catch { /* still offline */ }
+      }
+    };
     const res: RunRes[] = []; const why: Record<number, string> = {};
     setRun({ total: targets.length, done: 0, cur: '', res: [], finished: false });
-    for (let i = 0; i < targets.length; i++) {
-      if (stopRef.current) break;
-      const l = targets[i];
-      setRun((r) => r && { ...r, cur: `${l.so} / ${l.li} · ${l.item}` });
-      const base = { id: l.id, so: l.so, li: String(l.li), item: l.item };
-      try {
-        const wk = (l as LineP & { week?: string }).week || week;
-        const c = await api<Candidates>(`/api/pick/candidates?week=${encodeURIComponent(wk)}&key=${encodeURIComponent(l.key)}&date=${encodeURIComponent(l.date ?? '')}`);
-        const left = r3(c.need - c.picked);
-        // only the All-match rolls (as the system selects them); the Smart suggestion is never taken by itself
-        const good = autoRolls(c);
-        const plan = autoPlan(good);
-        const rolls = Object.entries(plan.sel).map(([pallet, x]) => ({ pallet, qty: r3(Number(x.qty)) })).filter((x) => x.qty > 1e-9);
-        if (left <= 1e-9) { res.push({ ...base, ok: 'skip', text: 'nothing left to pick (UR / balance)' }); why[l.id] = 'Nothing to pick — UR or balance is 0'; }
-        else if (!rolls.length) {
-          const t = c.rolls.some((x) => x.available > 1e-9 && x.needsConfirm) ? 'rolls need a check (“Confirmed”)' : c.rolls.some((x) => x.available > 1e-9 && x.pool) ? 'shared-lot rolls — tick them' : c.nobarcode?.length ? 'no-barcode / Invoice + Item rolls — choose them' : 'no matched roll';
-          res.push({ ...base, ok: 'skip', text: t }); why[l.id] = t;
-        } else {
-          await api('/api/pick', { method: 'POST', body: { week: wk, key: l.key, date: l.date, kind: 'normal', auto: true, rolls } });
-          const tot = r3(rolls.reduce((t, x) => t + x.qty, 0));
-          const short = r3(left - tot);
-          res.push({ ...base, ok: 'picked', text: `${rolls.length} roll${rolls.length === 1 ? '' : 's'} · ${fmtQty(tot)}${short > 1e-9 ? ` · ${fmtQty(short)} still short` : ''}` });
-          if (short > 1e-9) why[l.id] = `${fmtQty(short)} still short — no more All-match rolls (see the Smart suggestion in the pick window)`;
+    try {
+      for (let i = 0; i < targets.length; i++) {
+        if (stopRef.current) break;
+        const l = targets[i];
+        setRun((r) => r && { ...r, cur: `${l.so} / ${l.li} · ${l.item}` });
+        const base = { id: l.id, so: l.so, li: String(l.li), item: l.item };
+        // a line is tried again after the network comes back: its rolls are read again, so a pick that reached the
+        // server before the network dropped is not picked twice (it shows as picked)
+        let firstPicked: number | null = null, sent = 0;
+        for (;;) {
+          try {
+            const wk = (l as LineP & { week?: string }).week || week;
+            const c = await api<Candidates>(`/api/pick/candidates?week=${encodeURIComponent(wk)}&key=${encodeURIComponent(l.key)}&date=${encodeURIComponent(l.date ?? '')}`);
+            if (firstPicked === null) firstPicked = c.picked;
+            const left = r3(c.need - c.picked);
+            if (sent > 1e-9 && c.picked - firstPicked > 1e-9) {
+              res.push({ ...base, ok: 'picked', text: `${fmtQty(r3(c.picked - firstPicked))} (saved before the network dropped)${left > 1e-9 ? ` · ${fmtQty(left)} still to pick` : ''}` });
+              break;
+            }
+            // only the All-match rolls (as the system selects them); the Smart suggestion is never taken by itself
+            const plan = autoPlan(autoRolls(c));
+            const rolls = Object.entries(plan.sel).map(([pallet, x]) => ({ pallet, qty: r3(Number(x.qty)) })).filter((x) => x.qty > 1e-9);
+            if (left <= 1e-9) { res.push({ ...base, ok: 'skip', text: 'nothing left to pick (UR / balance)' }); why[l.id] = 'Nothing to pick — UR or balance is 0'; }
+            else if (!rolls.length) {
+              const t = c.rolls.some((x) => x.available > 1e-9 && x.needsConfirm) ? 'rolls need a check (“Confirmed”)' : c.rolls.some((x) => x.available > 1e-9 && x.pool) ? 'shared-lot rolls — tick them' : c.nobarcode?.length ? 'no-barcode / Invoice + Item rolls — choose them' : 'no matched roll';
+              res.push({ ...base, ok: 'skip', text: t }); why[l.id] = t;
+            } else {
+              const tot = r3(rolls.reduce((t, x) => t + x.qty, 0));
+              sent = tot;
+              await api('/api/pick', { method: 'POST', body: { week: wk, key: l.key, date: l.date, kind: 'normal', auto: true, rolls } });
+              const short = r3(left - tot);
+              res.push({ ...base, ok: 'picked', text: `${rolls.length} roll${rolls.length === 1 ? '' : 's'} · ${fmtQty(tot)}${short > 1e-9 ? ` · ${fmtQty(short)} still short` : ''}` });
+              if (short > 1e-9) why[l.id] = `${fmtQty(short)} still short — no more All-match rolls (see the Smart suggestion in the pick window)`;
+            }
+            break;
+          } catch (e) {
+            // no answer from the server (network): wait, then the same line again
+            if (e instanceof ApiError && e.status === 0 && !stopRef.current) { await waitOnline(`${l.so} / ${l.li}`); if (!stopRef.current) continue; }
+            const t = e instanceof Error ? e.message : 'failed'; res.push({ ...base, ok: 'error', text: t }); why[l.id] = t;
+            break;
+          }
         }
-      } catch (e) { const t = e instanceof Error ? e.message : 'failed'; res.push({ ...base, ok: 'error', text: t }); why[l.id] = t; }
-      setRun((r) => r && { ...r, done: i + 1, res: [...res] });
+        setRun((r) => r && { ...r, done: i + 1, res: [...res] });
+      }
+    } finally {
+      window.removeEventListener('beforeunload', onLeave);
     }
-    setRun((r) => r && { ...r, cur: '', finished: true });
+    setRun((r) => r && { ...r, cur: '', finished: true, offline: false });
     setRunActive(false);
     setRunWhy(why);
     const n = res.filter((x) => x.ok === 'picked').length;
-    toast(`Pick all matched: ${n} line${n === 1 ? '' : 's'} picked, ${res.length - n} left for manual`);
+    toast(`Pick all matched: ${n} line${n === 1 ? '' : 's'} picked, ${res.length - n} left for manual${stopRef.current ? ' — stopped; press Pick all matched again to go on' : ''}`);
     reload(); setHistKey((k) => k + 1);
     setScope('manual'); setByView('lines');
   };
@@ -289,10 +321,10 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
           ))}
         </div>
         {run && (
-          <div className={`run-panel ${run.finished ? 'done' : 'going'}`} role="status" aria-live="polite">
+          <div className={`run-panel ${run.finished ? 'done' : 'going'} ${run.offline ? 'offline' : ''}`} role="status" aria-live="polite">
             <div className="run-top">
               {!run.finished ? <span className="run-dot" aria-hidden="true" /> : <span className="run-ok" aria-hidden="true">✓</span>}
-              <b>{run.finished ? 'Pick all matched — finished' : 'Picking all matched rolls…'}</b>
+              <b>{run.finished ? 'Pick all matched — finished' : run.offline ? 'Network lost — paused, goes on by itself' : 'Picking all matched rolls… keep this tab open'}</b>
               <span className="muted small">{run.done} / {run.total} lines{run.cur ? ` · ${run.cur}` : ''}</span>
               <span style={{ flex: 1 }} />
               {!run.finished ? <button className="btn sm" onClick={() => { stopRef.current = true; }}>Stop</button> : <button className="btn sm" onClick={() => setRun(null)}>Close</button>}
@@ -788,6 +820,10 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
   const isShort = diff < -0.0005 && nSel > 0;
   const blocked = !nSel || offsiteOver || (flagged.length > 0 && !checkedOk) || (needOverOk && !overOk) || Object.values(sel).some((x) => !(Number(x.qty) > 0));
 
+  // a roll whose Korber Lot Number is not one of this SO line's ZINSR lots: a warning — picked once the user confirms
+  const [lotWarn, setLotWarn] = useState('');
+  const [lotOk, setLotOk] = useState(false);
+  useEffect(() => { setLotWarn(''); setLotOk(false); }, [sel]);
   const save = async () => {
     if (!c) return;
     setBusy(true); setErr('');
@@ -797,9 +833,14 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
         overConfirmed: kind === 'normal' && diff > 0.0005 ? (overByFullRoll || overOk) : false,
         closeShort: kind === 'normal' && isShort && closeShort,
         rolls: Object.entries(sel).map(([pallet, x]) => ({ pallet, qty: Number(x.qty), confirmed: checkedOk, ...(x.manual ? { manual: { ...x.manual, options: undefined, suggest: undefined } } : {}), ...(x.nb ? { nobarcode: true } : {}) })),
+        ...(lotOk ? { lotConfirmed: true } : {}),
       } });
       onDone(`${kind === 'offsite' ? 'Offsite' : 'Normal'} ${r.label} pick of ${r.day}: ${r.rolls} roll${r.rolls === 1 ? '' : 's'}, ${fmt(r.qty, 2)} — ${line.so} / ${line.li}`);
-    } catch (e) { setErr(e instanceof Error ? e.message : 'Pick failed.'); } finally { setBusy(false); }
+    } catch (e) {
+      const m = e instanceof Error ? e.message : 'Pick failed.';
+      if (/is not a ZINSR lot \/ Vendor Batch/.test(m) && !lotOk) { setLotWarn(m.replace(/ — tick .*$/, '.')); setErr(''); }
+      else setErr(m);
+    } finally { setBusy(false); }
   };
 
   const open = c ? c.rolls.filter((r) => r.available > 1e-9) : [];
@@ -1095,6 +1136,15 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
           </>
         )}
         {err && <div className="notice bad">{err}</div>}
+        {lotWarn && (
+          <div className="notice warn" role="alert">
+            <b>Check:</b> {lotWarn}
+            <label style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 }}>
+              <input type="checkbox" checked={lotOk} onChange={(e) => setLotOk(e.target.checked)} />
+              <span><b>I checked — pick anyway.</b> The roll&apos;s batch is still this line&apos;s ZMMBE batch; the Lot Number difference is saved on the pick.</span>
+            </label>
+          </div>
+        )}
         <div className="modal-foot">
           <label className="pk-no">HJ Pick No <input className="as-search" value={pickNo} onChange={(e) => setPickNo(e.target.value)} placeholder="e.g. 21204655" style={{ width: 130 }} /></label>
           <span style={{ flex: 1 }} />
