@@ -261,7 +261,6 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
         <div className="pick-tabs" role="tablist" aria-label="Plan → Pick views">
           {([
             ['To pick now', [
-              ...(possible.size > 0 ? [['possible', 'Posibal pending', 'POSIBAL PENDING (plan report): QTY − ALRADY SEND, and the warehouse ZMMBE has UR for it — pick these now']] : []),
               ['ready', 'Auto match', 'Lines with All-match rolls — “Pick all matched” picks them (a line they only part cover also shows under Needs manual for the rest)'],
               ['manual', 'Needs manual', 'Lines with UR the matched rolls do not cover: rolls to check, shared lots, no barcode, not matched or Manual pallet — with the reason'],
               ['open', 'All with UR', 'Every open line with UR to pick'],

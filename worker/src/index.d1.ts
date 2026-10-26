@@ -560,7 +560,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 64; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 65; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1303,8 +1303,6 @@ async function handlePlanReport(env: Env, req: Request) {
   if (!rnd && !isWeek) throw new HttpError(400, 'Choose a Pick or a week.');
   const lines = (await env.DB.prepare(`SELECT key, so, li, item, date, COALESCE(plan_date, date) AS plan_date, qty, row_no, plant, remarks FROM plan WHERE week = ?1
     ${isWeek ? "AND plan_type = 'week' AND (?2 = '' OR upper(COALESCE(plant, '')) = ?2)" : ''} ORDER BY ${isWeek ? 'date, ' : ''}row_no`).bind(...(isWeek ? [rid, wPlant] : [rid])).all<Row>()).results;
-  // ALRADY SEND is shared out over the plan's lines of the same SO / LI / Item in date order (every plant of a week)
-  const allLines = wPlant ? (await env.DB.prepare("SELECT key, date, qty FROM plan WHERE week = ? AND plan_type = 'week'").bind(rid).all<Row>()).results : lines;
   const plantCode = rnd ? rnd.plant : wPlant || (new Set(lines.map((l) => up(l.plant))).size === 1 ? up(lines[0]?.plant) : '');
   const pi = plantCode ? await env.DB.prepare('SELECT name FROM plant_info WHERE upper(code) = ?').bind(plantCode.toUpperCase()).first<{ name: string | null }>() : null;
   const plantName = (pi?.name || plantCode || '').toUpperCase().replace(/\s+/g, '');
@@ -1339,12 +1337,9 @@ async function handlePlanReport(env: Env, req: Request) {
     const pending = r3(qty - sent);
     // POSIBAL PENDING: the warehouse has free UR for it — UR = Total − QI − Block − Assigned (an Assigned Qty is not free to send)
     const possible = pending > 1e-4 && avail - sent > 1e-4 && Number(x?.wh_ur ?? 0) > 1e-4 ? pending : null;
-    // the balance still to send: QTY − ALRADY SEND (this line's share: earlier days of the same SO / LI / Item first)
-    // − the picks the ZMMBE does not show yet
-    const pq = p0 ? Number(p0.q) : 0, after = p0 ? Number(p0.qa) : 0, before = Math.max(0, r3(pq - after));
-    const earlier = allLines.filter((o) => o.key === l.key && String(o.date ?? '') < String(l.date ?? '')).reduce((t0, o) => t0 + Number(o.qty), 0);
-    const sentMine = earlier > 1e-9 ? Math.max(0, r3(Math.min(qty, sent - earlier))) : sent;
-    const left = Math.max(0, r3(qty - Math.max(sentMine, before) - after));
+    // the balance still to pick: the plan QTY − what this line picked (ALRADY SEND / POSIBAL PENDING do not lower it)
+    const pq = p0 ? Number(p0.q) : 0;
+    const left = Math.max(0, r3(qty - pq));
     return { left, unic: `${l.so}${l.li}${l.item}A`, so: l.so, li: l.li, item: l.item, date: l.plan_date, pick_date: l.date, qty, avail: r3(avail), sent: r3(sent), pending, possible,
       qi: r3(Number(x?.qi ?? 0)), block: r3(Number(x?.block ?? 0)), tn: t?.tn ?? null, tn_qty: t ? Number(t.tn_qty) : null, tn_status: t?.tn_status ?? null,
       wh: r3(avail - sent), wh_ur: r3(Number(x?.wh_ur ?? 0)), assigned: r3(Number(x?.assigned ?? 0)), picked: p0 ? Number(p0.q) : 0, rolls: p0 ? Number(p0.n) : 0, key: l.key, plant: l.plant, remarks: l.remarks };
@@ -3114,6 +3109,7 @@ async function makeGate(env: Env) {
  * The match chain for one plan line (the rules agreed with the warehouse):
  *  1. ZMMBE — SO + Material (= Plan Item Code) + LI: UR = Total stock − SO QI stock − SO Blocked stock − Assigned Qty, per batch.
  *     What to pick = the plan QTY, but never more than the UR (QTY > UR → the UR; QTY < UR → the QTY).
+ *     ALRADY SEND / POSIBAL PENDING do not lower it (report columns only).
  *  2. ZINSR — Sales Order + Material + Line Item + Batch (the ZMMBE batches): the inspection lots and how much of each.
  *  3. ZCOMENT VIEW — Inspection # = the lot: its rolls (Vendor Batch, Vendor Roll No, Barcode Number).
  *  4. Korber (Pick Id 0 only; the master pick history: a pallet is never picked twice, only a cut roll's balance):
@@ -3142,25 +3138,21 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
   const otherAfter = r3(Number((await env.DB.prepare("SELECT COALESCE(SUM(qty), 0) q FROM picks WHERE week = ?1 AND substr(line, 1, length(?2) + 1) = ?2 || '|' AND line <> ?3 AND cancelled_at IS NULL AND at > ?4").bind(week, key, lineId, zAt0).first<{ q: number }>())?.q ?? 0));
   const urFree = Math.max(0, r3(urTotal - otherAfter));
   if (otherAfter > 1e-9) steps.push(`${otherAfter} of this SO / LI / Item was picked for its other plan line(s) since the ZMMBE upload: UR ${urTotal} − ${otherAfter} = ${urFree} for this line.`);
-  // 1. what to pick: the plan QTY, at most the UR
-  let need = r3(Math.min(planQty, urFree));
-  // the plan report's "Already sent" (ZMMBE at the plant storage locations): only the Pending (QTY − already sent) is picked.
-  // Picks saved before the ZMMBE upload are in it once SAP moved them (the larger of the two counts); picks after it are not.
+  // 1. what to pick: the plan QTY itself (less what this line already picked), at most the warehouse UR.
+  // ALRADY SEND / POSIBAL PENDING are report columns only — they do not lower the QTY to pick.
+  // The UR: picks saved before the ZMMBE upload are already out of it; picks after it are not yet (taken off here).
+  const zAtL = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(srid).first<{ at: string | null }>())?.at ?? null;
+  const afterL = zAtL ? Number((await env.DB.prepare('SELECT COALESCE(SUM(qty), 0) q FROM picks WHERE week = ? AND line = ? AND cancelled_at IS NULL AND at > ?').bind(week, lineId, zAtL).first<{ q: number }>())?.q ?? 0) : pickedLine;
+  const leftL = Math.max(0, r3(Math.min(planQty - pickedLine, urFree - afterL)));
+  let need = r3(pickedLine + leftL);
+  // ALRADY SEND (ZMMBE at the plant storage locations) is shown for information
   let sentQ: number | null = null;
   if (await env.DB.prepare("SELECT 1 FROM stock_sent LIMIT 1").first()) {
     sentQ = r3(Number((await env.DB.prepare("SELECT SUM(COALESCE(total - COALESCE(qi, 0) - COALESCE(block, 0), ur)) q FROM stock_sent WHERE key = ?").bind(key).first<{ q: number | null }>())?.q ?? 0));
-    // the same SO / LI / Item on earlier days of the plan takes its share of ALRADY SEND first (date order)
-    const earlier = r3(Number((await env.DB.prepare("SELECT COALESCE(SUM(qty), 0) q FROM plan WHERE week = ?1 AND key = ?2 AND COALESCE(date, '') < ?3").bind(week, key, date || '').first<{ q: number }>())?.q ?? 0));
-    if (earlier > 1e-9) { const mine = Math.max(0, r3(Math.min(planQty, sentQ - earlier))); steps.push(`ALRADY SEND ${sentQ} of this SO / LI / Item: ${r3(Math.min(sentQ, earlier))} to its earlier plan line(s) (QTY ${earlier}), ${mine} to this line.`); sentQ = mine; }
-    const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(srid).first<{ at: string | null }>())?.at ?? null;
-    const after = zAt ? Number((await env.DB.prepare('SELECT COALESCE(SUM(qty), 0) q FROM picks WHERE week = ? AND line = ? AND cancelled_at IS NULL AND at > ?').bind(week, lineId, zAt).first<{ q: number }>())?.q ?? 0) : pickedLine;
-    const before = Math.max(0, r3(pickedLine - after));
-    const left2 = Math.max(0, r3(Math.min(planQty - Math.max(sentQ, before) - after, urFree - after)));
-    need = r3(pickedLine + left2);
-    if (sentQ > 1e-9) steps.push(`Already sent ${sentQ} (ZMMBE at the plant storage locations): Pending = QTY ${planQty} − ${sentQ} = ${r3(planQty - sentQ)}${r3(planQty - sentQ) > urTotal + 1e-9 ? ` — the warehouse UR is ${urTotal}` : ''}.`);
+    if (sentQ > 1e-9) steps.push(`ALRADY SEND ${sentQ} (ZMMBE at the plant storage locations) — for information: the plan QTY ${planQty} is picked, at most the warehouse UR.`);
   }
   if (!stock.length) steps.push('ZMMBE has no row for this SO / Material / LI — nothing can be picked.');
-  else if (planQty > urTotal + 1e-9 && sentQ === null) steps.push(`Plan QTY ${planQty} is more than the UR ${urTotal} (Total − SO QI − SO Blocked − Assigned): the UR ${urTotal} is picked.`);
+  else if (planQty - pickedLine > urFree - afterL + 1e-9) steps.push(`Plan QTY ${planQty} is more than the UR ${urTotal} (Total − SO QI − SO Blocked − Assigned): only the UR can be picked.`);
   // the plan QTY taken batch by batch (UR order: the bigger batch first), then lot by lot (2. ZINSR)
   const rejected = new Set((await env.DB.prepare('SELECT DISTINCT pallet FROM pick_reject').all<{ pallet: string }>()).results.map((x) => up(x.pallet)));
   const gate = await makeGate(env);
