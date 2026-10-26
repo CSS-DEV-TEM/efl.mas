@@ -2396,7 +2396,18 @@ async function handlePick(env: Env, req: Request, p: string) {
         const overOk = b.overConfirmed && kind === 'normal' ? Math.max(0, r3(picks.reduce((t, x) => t + Number(x.qty), 0) - left)) : 0;
         for (const [l0, q] of used) {
           const cap = lotCap.get(l0)!;
-          if (q > cap.need + overOk + 0.0005) throw new HttpError(400, `Lot ${l0} (Vendor Batch ${cap.vb || '–'}): ZINSR gives ${line.so} / ${line.li} ${cap.qty}${cap.qty - cap.need > 0.0005 ? `, ${r3(cap.qty - cap.need)} already picked` : ''} — only ${cap.need} more can come from it, this pick takes ${q}. Cut the roll to ${cap.need}.`);
+          if (q > cap.need + overOk + 0.0005) {
+            const over = r3(q - cap.need);
+            // where the rest of the line is: its other ZINSR lots that still give something (another batch)
+            const rest = (cand.lots as Row[]).filter((l) => String(l.lot) !== l0 && Number(l.cap ?? l.need) > 1e-9).map((l) => `lot ${l.lot} (batch ${l.batch}, ${r3(Number(l.cap ?? l.need))})`);
+            const what = `Lot ${l0} (Vendor Batch ${cap.vb || '–'}): ZINSR gives ${line.so} / ${line.li} ${cap.qty}${cap.qty - cap.need > 0.0005 ? `, ${r3(cap.qty - cap.need)} already picked` : ''} — this pick takes ${q}, ${over} more than the lot${cap.need > 1e-9 ? ` (cut the roll to ${cap.need})` : ' (the lot is used up)'}${rest.length ? `. The rest of the line is in ${rest.join(', ')} — pick a roll of that batch` : ''}`;
+            // a manual pick may go over once the user confirms (kept on the pick); Pick all matched never does
+            if (b.lotConfirmed && !b.auto) {
+              for (const p of picks) if (String(p.insp_lot ?? '').split(',').map((t) => t.trim()).includes(l0)) p.note = [p.note, `Confirmed: ${over} over ZINSR lot ${l0} (${cap.qty})`].filter(Boolean).join(' · ');
+              continue;
+            }
+            throw new HttpError(400, `${what}.${b.auto ? '' : ' Tick “I checked — pick anyway” to pick it.'}`);
+          }
         }
       }
     }

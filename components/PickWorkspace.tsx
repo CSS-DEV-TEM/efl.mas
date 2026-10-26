@@ -838,7 +838,8 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
       onDone(`${kind === 'offsite' ? 'Offsite' : 'Normal'} ${r.label} pick of ${r.day}: ${r.rolls} roll${r.rolls === 1 ? '' : 's'}, ${fmt(r.qty, 2)} — ${line.so} / ${line.li}`);
     } catch (e) {
       const m = e instanceof Error ? e.message : 'Pick failed.';
-      if (/is not a ZINSR lot \/ Vendor Batch/.test(m) && !lotOk) { setLotWarn(m.replace(/ — tick .*$/, '.')); setErr(''); }
+      // a ZINSR lot difference (Korber Lot ≠ the line's lots, or more than a lot gives): a warning the user can confirm
+      if ((/is not a ZINSR lot \/ Vendor Batch/.test(m) || /more than the lot/.test(m)) && /pick anyway/.test(m) && !lotOk) { setLotWarn(m.replace(/ — tick .*$/, '.').replace(/ Tick “I checked — pick anyway” to pick it\.$/, '')); setErr(''); }
       else setErr(m);
     } finally { setBusy(false); }
   };
@@ -1141,7 +1142,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
             <b>Check:</b> {lotWarn}
             <label style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 }}>
               <input type="checkbox" checked={lotOk} onChange={(e) => setLotOk(e.target.checked)} />
-              <span><b>I checked — pick anyway.</b> The roll&apos;s batch is still this line&apos;s ZMMBE batch; the Lot Number difference is saved on the pick.</span>
+              <span><b>I checked — pick anyway.</b> The roll&apos;s batch is still this line&apos;s ZMMBE batch; the ZINSR lot difference is saved on the pick.</span>
             </label>
           </div>
         )}
