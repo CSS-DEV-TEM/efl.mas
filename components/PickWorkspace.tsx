@@ -439,7 +439,6 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
 
       {holding && <HoldDialog line={holding} onClose={() => setHolding(null)} onSave={(r) => { const l = holding; setHolding(null); void setHold(l, r); }} />}
 
-      <BalanceFollow key={`bf${histKey}`} rid={week} label={label} canEdit={canEdit} toast={toast} onChanged={() => { reload(); setHistKey((k) => k + 1); }} />
 
       <PickHistoryCard key={histKey} canEdit={canEdit} toast={toast} onChanged={() => { reload(); setHistKey((k) => k + 1); }} />
 
@@ -1224,8 +1223,11 @@ function KorberChooser({ item, rid, batches, lineKey, roll, title, taken, mine =
   );
 }
 
+/** The day chosen in the pick history: kept when the card reloads after a change (cancel, tally, …). */
+let histDay = '';
 function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toast: (m: string) => void; onChanged: () => void }) {
-  const [day, setDay] = useState(today());
+  const [day, setDay0] = useState(histDay || today());
+  const setDay = (d: string) => { histDay = d; setDay0(d); };
   const [h, setH] = useState<PickHistory | null>(null);
   const [open, setOpen] = useState<number | null>(null);
   // the history is everyone's: who picked what, so nobody picks a roll twice. "Mine" narrows it.
@@ -1258,11 +1260,39 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
   useEffect(() => { api<{ settings: { pfcSlocs?: string[] } }>('/api/settings').then((r) => { if (r.settings.pfcSlocs?.length) setPfcSlocs(r.settings.pfcSlocs); }).catch(() => {}); }, []);
   // none marked = every pick shown (the chosen Pick, or the whole day)
   const target = marked.length ? marked : live;
+  const target0 = target;
+  // the Packing List tallies the cut roll balances first (can be turned off)
+  const [autoTally, setAutoTally0] = useState(() => { try { return localStorage.getItem('pl_auto_tally') !== '0'; } catch { return true; } });
+  const setAutoTally = (v: boolean) => { setAutoTally0(v); try { localStorage.setItem('pl_auto_tally', v ? '1' : '0'); } catch { /* */ } };
   const ptag = pickId ? '_' + pickName(pickId).replace(/[^\w]+/g, '_') : '';
   const [plBusy, setPlBusy] = useState(false);
   const downloadPL = async () => {
     setPlBusy(true);
     try {
+      // cut roll balances first: each one goes to another SO line it can go to (same Material and LI, UR in ZMMBE, a ZINSR
+      // lot with the roll's Vendor Batch) as a pick of that line — then the Packing List is made with them
+      let hh = h!, target = target0, tallied = 0, tallyQty = 0;
+      const tallyFail: string[] = [];
+      if (canEdit && autoTally && target.length) {
+        setPlProg('tallying cut rolls');
+        try {
+          const t = await api<{ rolls: { pallet: string; from: number; targets: { so: string; li: string; item: string; take: number }[] }[] }>('/api/pick/tally?ids=' + target.map((r) => r.id).join(','));
+          const newIds: number[] = [];
+          for (const x of t.rolls) for (const y of x.targets) {
+            if (!(y.take > 0)) continue;
+            try { const r = await api<{ id: number }>('/api/pick/tally', { method: 'POST', body: { pallet: x.pallet, so: y.so, li: y.li, item: y.item, qty: y.take, from: x.from } }); newIds.push(r.id); tallied++; tallyQty = r3(tallyQty + y.take); }
+            catch (e) { tallyFail.push(`${x.pallet} → ${y.so} / ${y.li}: ${e instanceof Error ? e.message : 'failed'}`); }
+          }
+          if (newIds.length) {
+            hh = await api<PickHistory>('/api/pick/history?day=' + day + (mine && me ? '&user=' + encodeURIComponent(me) : ''));
+            setH(hh);
+            const want = new Set([...target.map((r) => r.id), ...newIds]);
+            target = hh.requests.filter((r) => !r.cancelled_at && want.has(r.id));
+            if (marked.length) setSel(new Set(target.map((r) => r.id)));
+          }
+        } catch (e) { tallyFail.push(e instanceof Error ? e.message : 'Could not read the cut rolls.'); }
+        setPlProg('');
+      }
       // the plan (dashboard table) of the Picks in the download
       const weeks = Array.from(new Set(target.map((r) => r.week).filter(Boolean)));
       const days = Array.from(new Set(weeks.map((w) => /^(\d{4}-\d{2}-\d{2})~/.exec(w)?.[1]).filter(Boolean))) as string[];
@@ -1285,12 +1315,13 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
       }
       const open = scope.filter((l) => !isDone(l) && !isDispatched(l) && need(l) > 1e-9);
       const notPicked: NotPicked[] = [];
+      const seen = new Set<string>();
       let done = 0;
       const one = async (l: LineP) => {
         // no UR on the dashboard: nothing the system could pick — no need to read the rolls
         if (!l.hold && !(Number(l.ur) > 1e-9)) {
           const parts = [Number(l.qi) > 0 ? `QI ${r3(Number(l.qi))}` : '', Number(l.block) > 0 ? `Block ${r3(Number(l.block))}` : '', Number(l.assigned) > 0 ? `Assigned ${r3(Number(l.assigned))}` : ''].filter(Boolean);
-          notPicked.push({ pick: pickName(l.week), so: l.so, li: l.li, item: l.item, plant: l.plant, date: l.date, planQty: Number(l.qty) || 0, ur: 0, picked: Number(l.picked ?? 0), balance: r3(need(l)), matched: null,
+          seen.add(`${l.key}|${l.date ?? ''}`); notPicked.push({ pick: pickName(l.week), so: l.so, li: l.li, item: l.item, plant: l.plant, date: l.date, planQty: Number(l.qty) || 0, ur: 0, picked: Number(l.picked ?? 0), balance: r3(need(l)), matched: null,
             reason: 'No UR in ZMMBE', detail: parts.length ? `ZMMBE has no Unrestricted stock: ${parts.join(' · ')}` : 'Not in ZMMBE (no stock for this SO / LI / Item)' });
           return;
         }
@@ -1306,23 +1337,44 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
           w = ur0 > 1e-9 ? { reason: 'Plan QTY more than UR', detail: `UR ${r3(ur0)} is picked; the plan wants ${r3(planLeft)} more — no stock left in ZMMBE UR` } : { reason: 'No UR in ZMMBE', detail: c.sent ? `Already sent ${r3(Number(c.sent))}; ZMMBE has no Unrestricted stock left in the warehouse` : 'ZMMBE has no Unrestricted stock for this SO / LI (QI, Block, Assigned or not in ZMMBE)' };
           bal = planLeft;
         }
-        notPicked.push({ pick: pickName(l.week), so: l.so, li: l.li, item: l.item, plant: l.plant, date: l.date, planQty: Number(l.qty) || 0, ur: c ? Number(c.ur ?? 0) : null,
+        seen.add(`${l.key}|${l.date ?? ''}`); notPicked.push({ pick: pickName(l.week), so: l.so, li: l.li, item: l.item, plant: l.plant, date: l.date, planQty: Number(l.qty) || 0, ur: c ? Number(c.ur ?? 0) : null,
           picked: c ? r3(c.picked) : Number(l.picked ?? 0), balance: r3(Math.max(0, bal)), matched: c ? r3(c.matchedAvail ?? c.rolls.reduce((t, r) => t + Math.max(0, r.available), 0)) : null, reason: w.reason, detail: w.detail });
       };
       // a few lines at a time
       const queue = [...open];
       await Promise.all(Array.from({ length: Math.min(5, queue.length) }, async () => { for (let l = queue.shift(); l; l = queue.shift()) { await one(l); done++; setPlProg(`${done} / ${open.length}`); } }));
       setPlProg('');
+      // short picks: lines picked with less than their plan QTY (a pick closed short included) that are not listed yet
+      for (const l of scope) {
+        const id = `${l.key}|${l.date ?? ''}`;
+        if (seen.has(id) || l.hold) continue;
+        const planQty = Number(l.qty) || 0, picked = r3(Number(l.picked ?? 0));
+        const short = r3(planQty - picked);
+        if (!(picked > 1e-9) || !(short > 0.0005)) continue;
+        // closed short: the plan line says so (any day), and the day's pick history says who
+        const reqs = (hh.requests || []).filter((r) => r.line === id && !r.cancelled_at);
+        const cs = Number((l as LineP & { closed_short?: number }).closed_short ?? 0);
+        const closedReq = reqs.find((r) => Number(r.closed) > 0 || Number(r.short) > 0);
+        const closed = cs > 1e-9 || closedReq ? { by_user: closedReq?.by_user ?? '', short: cs || Number(closedReq?.short ?? 0) } : null;
+        seen.add(id);
+        notPicked.push({ pick: pickName(l.week), so: l.so, li: l.li, item: l.item, plant: l.plant, date: l.date, planQty, ur: Number.isFinite(Number(l.ur)) ? Number(l.ur) : null,
+          picked, balance: short, matched: null,
+          reason: closed ? 'Picked short — closed' : 'Picked short',
+          detail: `Picked ${fmtQty(picked)} of ${fmtQty(planQty)} — ${fmtQty(short)} short${closed ? ` · closed short${closed.by_user ? ` by ${closed.by_user}` : ''} (the rest is not picked later)` : ''}${Number(l.ur) > 0 && Number(l.ur) < planQty - 1e-9 ? ` · UR ${fmtQty(Number(l.ur))}` : ''}` });
+      }
       notPicked.sort((a, b) => a.pick.localeCompare(b.pick) || a.reason.localeCompare(b.reason) || a.so.localeCompare(b.so) || Number(a.li) - Number(b.li));
       // the SAP and Korber data of every roll is checked first: problems are shown before the file is saved
       const issues: PLIssue[] = [];
-      const wb = packingListWorkbook(h!, { ids: new Set(target.map((r) => r.id)), combined: oneSheet, pfcSlocs, plan, planTitle: `Plan · ${weeks.map(pickName).join(', ')}`, issues, notPicked });
+      const wb = packingListWorkbook(hh, { ids: new Set(target.map((r) => r.id)), combined: oneSheet, pfcSlocs, plan, planTitle: `Plan · ${weeks.map(pickName).join(', ')}`, issues, notPicked });
       const file = `Packing_List_${day}${ptag}${tag}.xlsx`;
-      if (issues.length) setPlCheck({ wb, file, issues });
-      else { saveWorkbook(wb, file); toast(`Packing List checked ✓ — ${target.length} pick${target.length === 1 ? '' : 's'}: SAP lines and Korber rows are right${notPicked.length ? ` · ${notPicked.length} line${notPicked.length === 1 ? '' : 's'} not picked (sheet “Not Picked”)` : ''}`); }
+      const tallyMsg = tallied ? ` · ${tallied} cut roll balance${tallied === 1 ? '' : 's'} tallied (${fmtQty(tallyQty)})` : '';
+      if (tallyFail.length) toast(`Cut roll tally: ${tallyFail.length} not saved — ${tallyFail[0]}`);
+      if (issues.length) { setPlCheck({ wb, file, issues }); if (tallied) toast(`${tallied} cut roll balance${tallied === 1 ? '' : 's'} tallied (${fmtQty(tallyQty)}) — on this Packing List`); }
+      else { saveWorkbook(wb, file); toast(`Packing List checked ✓${tallyMsg} — ${target.length} pick${target.length === 1 ? '' : 's'}: SAP lines and Korber rows are right${notPicked.length ? ` · ${notPicked.length} line${notPicked.length === 1 ? '' : 's'} not picked (sheet “Not Picked”)` : ''}`); }
     } finally { setPlBusy(false); setPlProg(''); }
   };
   const [plProg, setPlProg] = useState('');
+  const [tallyOpen, setTallyOpen] = useState(false);
   const [plCheck, setPlCheck] = useState<{ wb: ReturnType<typeof packingListWorkbook>; file: string; issues: PLIssue[] } | null>(null);
   const downloadKorber = () => saveWorkbook(korberWorkbook(h!, new Set(target.map((r) => r.id))), `Korber_Picked_${day}${ptag}${tag}.xlsx`);
   const markedQty = marked.reduce((t, r) => t + r.qty, 0);
@@ -1385,13 +1437,17 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
             <button className={oneSheet ? 'on' : ''} onClick={() => setOne(true)}>One sheet</button>
             <button className={!oneSheet ? 'on' : ''} onClick={() => setOne(false)}>Sheet per pick</button>
           </div>
-          <button className="btn primary" disabled={plBusy} aria-busy={plBusy || undefined} onClick={downloadPL}>{plBusy ? `Preparing…${plProg ? ` checking lines ${plProg}` : ''}` : `Download Packing List${marked.length ? ` (${marked.length})` : ''}`}</button>
+          {canEdit && <label className="small" style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }} title="When the Packing List is made, each cut roll's balance is first tallied to another SO line that can take it (same Material and LI, UR in ZMMBE, a ZINSR lot with the roll's Vendor Batch) and goes on the Packing List with that line's SAP details">
+            <input type="checkbox" checked={autoTally} onChange={(e) => setAutoTally(e.target.checked)} /> Tally cut roll balances</label>}
+          <button className="btn primary" disabled={plBusy} aria-busy={plBusy || undefined} onClick={downloadPL}>{plBusy ? `Preparing…${plProg ? (/^\d/.test(plProg) ? ` checking lines ${plProg}` : ` ${plProg}`) : ''}` : `Download Packing List${marked.length ? ` (${marked.length})` : ''}`}</button>
           <button className="btn" disabled={!h.korberHeader} onClick={downloadKorber} title="The picked rolls in the Korber Inventory format (cut rolls with the cut QTY)">Korber Inventory{marked.length ? ` (${marked.length})` : ''}</button>
+          {canEdit && <button className="btn" onClick={() => setTallyOpen(true)} title="A cut roll's balance to another SO line of the same Material and LI (ZMMBE UR, ZINSR lot with the roll's Vendor Batch) — saved as a pick of that SO line, on the Packing List with its SAP details">✂ Tally cut rolls{marked.length ? ` (${marked.length})` : ''}</button>}
           {canEdit && marked.length > 0 && <button className="btn danger" disabled={!cancelable.length || !!bulkBusy} aria-busy={!!bulkBusy || undefined} onClick={cancelMarked}
             title={cancelable.length ? 'Cancel the marked picks: deleted from the history, their rolls become pickable again' : 'You can cancel only your own picks'}>{bulkBusy || `Cancel marked (${cancelable.length})`}</button>}
           {marked.length > 0 && <button className="btn sm" onClick={() => setSel(new Set())}>Clear marks</button>}
         </div>
       )}
+      {tallyOpen && <TallyDialog ids={target.map((r) => r.id)} toast={toast} onClose={(changed) => { setTallyOpen(false); if (changed) { load(); onChanged(); } }} />}
       {plCheck && (() => {
         const errs = plCheck.issues.filter((i) => i.level === 'error'), warns = plCheck.issues.filter((i) => i.level === 'warn');
         const list = (xs: PLIssue[]) => (
@@ -1499,103 +1555,88 @@ function RejectedRolls({ canEdit, toast, onChanged }: { canEdit: boolean; toast:
   );
 }
 
-interface FollowCheck { ref: string; ur?: number; need?: number; avail?: number; can?: number; rolls?: number; blocked?: number; status: 'ok' | 'part' | 'none'; why: string | null }
-interface Follow {
-  ref: string; week: string; plan: string; date: string | null; so: string; li: string; item: string; plant: string | null; owner: string | null;
-  qty: number; picked: number; balance: number; first_picked: string | null; last_at: string | null; rolls: number; closed_short: boolean;
-  in_picks: { plan: string; week: string; qty: number; picked: number }[]; closed: boolean; closed_note: string | null; closed_by: string | null; closed_at: string | null;
-}
+interface FoundPick { id: number; day: string; plan: string; so: string; li: string; item: string; pallet: string; qty: number; roll_qty: number; partial: number; shade: string | null; lot: string | null; insp_lot: string | null; batch: string | null; note: string | null; by_user: string; at: string; seq: number; pick_no: string | null; kind: string | null }
 /**
- * Balance follow-up (master: every day, every Pick, every user). A plan line picked with less than its QTY stays here until the
- * balance is picked: "Add to this Pick" puts the balance into the Pick on screen as a line of its own; what is picked there counts
- * for the original line. Close it when the balance will not be sent.
+ * Cut roll balance tally: each cut roll of the picks on screen, its balance, and the SO lines it can go to — another SO with
+ * the same Material and LI number in ZMMBE (UR in the warehouse) whose ZINSR lot has the roll's Vendor Batch (the batch may
+ * differ). The suggested QTYs fill the balance (the roll's own batch first); each saved one is a pick of that SO line, so it
+ * is on the Packing List with that SO line's SAP details.
  */
-function BalanceFollow({ rid, label, canEdit, toast, onChanged }: { rid: string; label?: string; canEdit: boolean; toast: (m: string) => void; onChanged: () => void }) {
-  const [state, setState] = useState<'open' | 'closed' | 'all'>('open');
-  const [rows, setRows] = useState<Follow[] | null>(null);
-  const [q, setQ] = useState('');
-  const [busy, setBusy] = useState('');
-  const load = useCallback(() => { api<{ follow: Follow[] }>('/api/follow?state=' + state).then((r) => setRows(r.follow)).catch(() => setRows([])); }, [state]);
+interface TallyTarget { key: string; so: string; li: string; item: string; plant: string | null; batch: string; sloc: string; sameBatch: boolean; ur: number; ur_free: number; lot_room: number; can: number; take: number; lots: { lot: string; batch: string; vendor_batch: string; qty: number }[] }
+interface TallyRoll { pallet: string; from: number; so: string; li: string; item: string; roll_qty: number; balance: number; lot: string | null; location: string | null; targets: TallyTarget[] }
+function TallyDialog({ ids, toast, onClose }: { ids: number[]; toast: (m: string) => void; onClose: (changed: boolean) => void }) {
+  const [rolls, setRolls] = useState<TallyRoll[] | null>(null);
+  const [err, setErr] = useState('');
+  const [qty, setQty] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(0);
+  const load = useCallback(() => {
+    setRolls(null);
+    api<{ rolls: TallyRoll[] }>('/api/pick/tally?ids=' + ids.join(',')).then((r) => {
+      setRolls([...r.rolls].sort((x, y) => Number(!x.targets.length) - Number(!y.targets.length)));
+      const q: Record<string, string> = {};
+      for (const x of r.rolls) for (const t of x.targets) if (t.take > 0) q[`${x.pallet}|${t.key}`] = String(t.take);
+      setQty(q);
+    }).catch((e) => setErr(e instanceof Error ? e.message : 'Could not read the cut rolls.'));
+  }, [ids.join(',')]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, [load]);
-  const isPick = rid.includes('~');
-  // can each open balance be picked from this Pick's reports (ZMMBE UR → ZINSR → ZCOMENT → Korber, ZROLLMGT)?
-  const [chk, setChk] = useState<Record<string, FollowCheck> | null>(null);
-  const [checking, setChecking] = useState(false);
-  const runCheck = useCallback((list: Follow[]) => {
-    const items = list.filter((f) => !f.closed).slice(0, 60).map((f) => ({ ref: f.ref, bal: f.balance }));
-    if (!isPick || !items.length) { setChk(null); return; }
-    setChecking(true);
-    api<{ check: FollowCheck[] }>(`/api/follow?check=${encodeURIComponent(rid)}&items=${encodeURIComponent(JSON.stringify(items))}`)
-      .then((r) => setChk(Object.fromEntries(r.check.map((x) => [x.ref, x])))).catch(() => setChk(null)).finally(() => setChecking(false));
-  }, [rid, isPick]);
-  useEffect(() => { if (rows) runCheck(rows); }, [rows, runCheck]);
-  const act = async (f: Follow, action: 'add' | 'close' | 'reopen') => {
-    let note: string | null = null;
-    if (action === 'close') { note = window.prompt(`Close the balance ${fmtQty(f.balance)} of ${f.so} / ${f.li} / ${f.item}? Reason (e.g. Customer cut the QTY):`, 'Not needed'); if (note === null) return; }
-    setBusy(f.ref);
-    try {
-      const r = await api<{ qty?: number }>('/api/follow', { method: 'POST', body: { action, ref: f.ref, rid, note } });
-      toast(action === 'add' ? `Balance ${fmtQty(Number(r.qty))} of ${f.so} / ${f.li} added to ${label || 'this Pick'}` : action === 'close' ? `Balance of ${f.so} / ${f.li} closed` : `Balance of ${f.so} / ${f.li} open again`);
-      load(); onChanged();
-    } catch (e) { toast(e instanceof Error ? e.message : 'Could not save.'); } finally { setBusy(''); }
+  const chosen = (rolls || []).flatMap((x) => x.targets.filter((t) => Number(qty[`${x.pallet}|${t.key}`]) > 0).map((t) => ({ x, t, q: r3(Number(qty[`${x.pallet}|${t.key}`])) })));
+  const over = (rolls || []).filter((x) => r3(x.targets.reduce((s0, t) => s0 + (Number(qty[`${x.pallet}|${t.key}`]) || 0), 0)) > x.balance + 0.0005).map((x) => x.pallet);
+  const save = async () => {
+    setBusy(true); setErr('');
+    let n = 0; const fails: string[] = [];
+    for (const { x, t, q } of chosen) {
+      try { await api('/api/pick/tally', { method: 'POST', body: { pallet: x.pallet, so: t.so, li: t.li, item: t.item, qty: q, from: x.from } }); n++; }
+      catch (e) { fails.push(`${x.pallet} → ${t.so} / ${t.li}: ${e instanceof Error ? e.message : 'failed'}`); }
+    }
+    setBusy(false); setSaved((v) => v + n);
+    if (n) toast(`${n} cut roll balance${n === 1 ? '' : 's'} tallied — on the Packing List with their SAP details`);
+    if (fails.length) setErr(fails.join(' · ')); else onClose(true);
+    if (fails.length) load();
   };
-  const t = q.trim().toLowerCase();
-  const list = (rows || []).filter((f) => !t || [f.so, f.li, f.item, f.plant, f.plan, f.owner].some((v) => String(v ?? '').toLowerCase().includes(t)));
-  const openN = (rows || []).filter((f) => !f.closed).length;
-  const openQty = (rows || []).filter((f) => !f.closed).reduce((a, f) => a + f.balance, 0);
   return (
-    <section className="card" aria-labelledby="bf-title">
-      <div className="sheet-top">
-        <div>
-          <h2 id="bf-title">Balance follow-up {state !== 'closed' && openN > 0 && <span className="pill warn" style={{ marginLeft: 6 }}>{openN} open · {fmtQty(openQty)}</span>}</h2>
-          <p className="sub" style={{ margin: 0 }}>Every plan line picked with less than its QTY (all days, all Picks, all users) stays here until the balance is picked. <b>Add to this Pick</b> puts the balance into {isPick ? (label || 'the Pick on screen') : 'the Pick on screen'}; what is picked there counts for the original line.{isPick ? ' “Pick from …?” checks each balance against that Pick’s uploaded ZMMBE, ZINSR, ZCOMENT VIEW, Korber and ZROLLMGT.' : ''}</p>
+    <div className="modal-back">
+      <div className="modal xwide" role="dialog" aria-modal="true" aria-labelledby="tally-title">
+        <div className="modal-head">
+          <div><h2 id="tally-title">Tally cut roll balances</h2>
+            <p className="sub" style={{ margin: 0 }}>A cut roll&apos;s balance goes to another SO line: same <b>Material</b> and <b>LI</b> number, UR in <b>ZMMBE</b>, and a <b>ZINSR</b> lot with the roll&apos;s <b>Vendor Batch</b> (Korber Lot Number) — the batch may differ. Each one is saved as a pick of that SO line and goes on the Packing List with its SAP details.</p></div>
+          <button className="btn sm" aria-label="Close" onClick={() => onClose(saved > 0)}>✕</button>
         </div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <input type="search" placeholder="SO, LI, Item…" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search balances" style={{ width: 160 }} />
-          {isPick && <button className="btn sm" disabled={checking || !rows?.length} onClick={() => rows && runCheck(rows)} title="Check the open balances against this Pick's ZMMBE, ZINSR, ZCOMENT VIEW, Korber and ZROLLMGT">{checking ? 'Checking…' : 'Check this Pick'}</button>}
-          <div className="seg" role="group">
-            {(['open', 'closed', 'all'] as const).map((k) => <button key={k} className={state === k ? 'on' : ''} onClick={() => setState(k)}>{k === 'open' ? 'Open' : k === 'closed' ? 'Closed' : 'All'}</button>)}
+        {!rolls && !err && <Loader label="Finding the cut rolls and the SO lines they can go to…" />}
+        {rolls && !rolls.length && <p className="muted">No cut roll with a balance in these picks.</p>}
+        {rolls && rolls.length > 0 && (
+          <div className="table-wrap" style={{ maxHeight: 520 }}>
+            <table className="mini">
+              <thead><tr><th>Cut roll</th><th>Cut for</th><th className="n">Balance</th><th>Can go to (SO / LI)</th><th>SAP batch · St Loc</th><th>ZINSR lot (Vendor Batch)</th><th className="n">UR free</th><th className="n">Lot room</th><th className="n">Tally QTY</th></tr></thead>
+              <tbody>{rolls.map((x) => (x.targets.length ? x.targets : [null]).map((t, i) => (
+                <tr key={x.pallet + (t?.key ?? '')} className={over.includes(x.pallet) ? 'gone' : ''}>
+                  {i === 0 && <><td rowSpan={Math.max(1, x.targets.length)} className="mono">{x.pallet}<div className="muted small">Lot {x.lot ?? '–'}{x.location ? ` · ${x.location}` : ''}</div></td>
+                    <td rowSpan={Math.max(1, x.targets.length)}>{x.so} / {x.li}<div className="muted small">{x.item}</div></td>
+                    <td rowSpan={Math.max(1, x.targets.length)} className="n"><b>{fmtQty(x.balance)}</b><div className="muted small">of {fmtQty(x.roll_qty)}</div></td></>}
+                  {t ? <>
+                    <td><b>{t.so} / {t.li}</b>{t.plant ? <span className="muted small"> · {t.plant}</span> : null}</td>
+                    <td>{t.batch} · {t.sloc}{!t.sameBatch && <span className="pill warn" style={{ marginLeft: 4 }} title="The ZMMBE batch of that SO line is not the batch of its ZINSR lot">other batch</span>}</td>
+                    <td className="small">{t.lots.map((l) => `${l.lot} (${l.vendor_batch})`).join(', ')}</td>
+                    <td className="n">{fmtQty(t.ur_free)}</td><td className="n">{fmtQty(t.lot_room)}</td>
+                    <td className="n"><input className="as-search" type="number" min="0" step="0.001" max={Math.min(x.balance, t.can)} style={{ width: 100 }} value={qty[`${x.pallet}|${t.key}`] ?? ''} placeholder="0"
+                      onChange={(e) => setQty((v) => ({ ...v, [`${x.pallet}|${t.key}`]: e.target.value }))} aria-label={`Tally QTY to ${t.so} / ${t.li}`} /></td>
+                  </> : <td colSpan={6} className="muted">No other SO line can take it (same Material and LI, UR in ZMMBE, a ZINSR lot with Vendor Batch {x.lot ?? '–'})</td>}
+                </tr>
+              )))}</tbody>
+            </table>
           </div>
+        )}
+        {over.length > 0 && <div className="notice bad">More than the balance for {over.join(', ')} — lower the QTY.</div>}
+        {err && <div className="notice bad">{err}</div>}
+        <div className="modal-foot"><span className="muted small">{chosen.length} tall{chosen.length === 1 ? 'y' : 'ies'} · {fmtQty(r3(chosen.reduce((t, c) => t + c.q, 0)))}</span><span style={{ flex: 1 }} />
+          <button className="btn" onClick={() => onClose(saved > 0)}>Close</button>
+          <button className="btn primary" disabled={busy || !chosen.length || over.length > 0} aria-busy={busy || undefined} onClick={save}>{busy ? 'Saving…' : `Save ${chosen.length} tall${chosen.length === 1 ? 'y' : 'ies'}`}</button>
         </div>
       </div>
-      {!rows ? <Loader label="Loading balances…" /> : !list.length ? <p className="muted">{state === 'open' ? 'No balance to follow — every picked line got its full QTY.' : 'Nothing here.'}</p> : (
-        <div className="table-wrap" style={{ maxHeight: 380 }}>
-          <table className="mini">
-            <thead><tr><th>Plan</th><th>SO / LI</th><th>Item</th><th>Plant</th><th className="n">Plan QTY</th><th className="n">Picked</th><th className="n">Balance</th>{isPick && <th>Pick from {label || 'this Pick'}?</th>}<th>Last pick</th><th>Balance in Picks</th><th>Status</th>{canEdit && <th></th>}</tr></thead>
-            <tbody>{list.map((f) => {
-              const here = f.in_picks.some((k) => k.week === rid);
-              const waiting = f.in_picks.some((k) => k.picked <= 0);
-              return (
-                <tr key={f.ref}>
-                  <td className="small">{f.plan}{f.owner ? <div className="muted">{f.owner}</div> : null}</td>
-                  <td>{f.so} / {f.li}</td><td>{f.item}</td><td>{f.plant || '–'}</td>
-                  <td className="n">{fmtQty(f.qty)}</td><td className="n">{fmtQty(f.picked)}</td><td className="n"><b>{fmtQty(f.balance)}</b></td>
-                  {isPick && <td className="small">{f.closed ? '–' : (() => { const k = chk?.[f.ref]; if (!k) return checking ? <span className="muted">checking…</span> : '–';
-                    const t = `UR ${fmtQty(Number(k.ur ?? 0))} · rolls ${fmtQty(Number(k.avail ?? 0))} (${k.rolls ?? 0})${k.blocked ? ` · ${k.blocked} not pickable (ZROLLMGT)` : ''}`;
-                    return k.status === 'ok' ? <span className="pill ok" title={t}>Pickable ✓ · {fmtQty(Number(k.can))} · {k.rolls} roll{k.rolls === 1 ? '' : 's'}</span>
-                      : k.status === 'part' ? <span className="pill accent" title={t}>Part · {fmtQty(Number(k.can))} of {fmtQty(f.balance)}</span>
-                      : <span className="pill bad" title={t}>{k.why || 'Not pickable'}</span>; })()}</td>}
-                  <td className="small">{f.last_at ? <span title={new Date(f.last_at).toLocaleString()}>{ago(f.last_at)}</span> : '–'}</td>
-                  <td className="small">{f.in_picks.length ? f.in_picks.map((k) => <div key={k.week}>{k.plan}: {fmtQty(k.picked)} / {fmtQty(k.qty)}</div>) : '–'}</td>
-                  <td>{f.closed ? <span className="pill mute" title={[f.closed_by, f.closed_at ? new Date(f.closed_at).toLocaleString() : ''].filter(Boolean).join(' · ')}>Closed · {f.closed_note}</span>
-                    : <>{waiting ? <span className="pill accent">In a Pick</span> : <span className="pill warn">To pick</span>}{f.closed_short && <span className="pill mute" style={{ marginLeft: 4 }} title="The pick was saved with “Close the line short”">closed short</span>}</>}</td>
-                  {canEdit && <td style={{ whiteSpace: 'nowrap' }}>
-                    {f.closed ? <button className="btn sm" disabled={!!busy} onClick={() => act(f, 'reopen')}>Reopen</button> : <>
-                      <button className="btn sm primary" disabled={!!busy || !isPick || here || waiting} onClick={() => act(f, 'add')}
-                        title={!isPick ? 'Choose a Day and a Pick first' : here ? 'Already in this Pick' : waiting ? 'The balance is already in a Pick, not picked yet' : `Add ${fmtQty(f.balance)} to ${label || 'this Pick'}`}>Add to this Pick</button>{' '}
-                      <button className="btn sm" disabled={!!busy} onClick={() => act(f, 'close')}>Close</button></>}
-                  </td>}
-                </tr>
-              );
-            })}</tbody>
-          </table>
-        </div>
-      )}
-    </section>
+    </div>
   );
 }
 
-interface FoundPick { id: number; day: string; plan: string; so: string; li: string; item: string; pallet: string; qty: number; roll_qty: number; partial: number; shade: string | null; lot: string | null; insp_lot: string | null; batch: string | null; note: string | null; by_user: string; at: string; seq: number; pick_no: string | null; kind: string | null }
 /** The whole pick history (every day, every user): search by any value. */
 function HistorySearch() {
   const [q, setQ] = useState('');
