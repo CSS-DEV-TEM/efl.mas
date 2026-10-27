@@ -2223,10 +2223,15 @@ async function handlePick(env: Env, req: Request, p: string) {
       const balance = Math.max(0, r3(base - pp.before));
       const vb = up(k?.lot);
       const targets: Row[] = [];
-      if (k && vb && balance > 1e-9) {
+      const srcPlants = new Set((await kenv.DB.prepare("SELECT DISTINCT COALESCE(NULLIF(trim(so_plant), ''), plant) p FROM stock WHERE src = 'zmmbe' AND so = ? AND li = ? AND material = ?").bind(normId(src.so), normId(src.li), normId(src.item)).all<Row>()).results
+        .map((x) => up(String(x.p ?? '').replace(/\s+/g, ''))).filter(Boolean));
+      if (!srcPlants.size && src.plant) srcPlants.add(up(String(src.plant).replace(/\s+/g, '')));
+      if (k && vb && balance > 1e-9 && srcPlants.size) {
         // ZMMBE: same Material and LI number, another SO, UR in the warehouse (not the plant storage locations)
         const st = (await kenv.DB.prepare("SELECT key, so, li, material, batch, sloc, so_plant, ur, total, qi, block, assigned, plant FROM stock WHERE src = 'zmmbe' AND material = ? AND li = ? AND so <> ? AND ur > 0")
-          .bind(normId(src.item), normId(src.li), normId(src.so)).all<Row>()).results.filter((x) => !plantLocs.has(up(normId(x.sloc))));
+          .bind(normId(src.item), normId(src.li), normId(src.so)).all<Row>()).results.filter((x) => !plantLocs.has(up(normId(x.sloc))))
+          // only an SO of the same SO Plant as the cut roll's SO line (ZMMBE SO Plant; else the Pick's plant)
+          .filter((x) => srcPlants.has(up(String((String(x.so_plant ?? '').trim() || x.plant) ?? '').replace(/\s+/g, ''))));
         const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(lrid).first<{ at: string | null }>())?.at ?? '';
         for (const key of Array.from(new Set(st.map((x) => String(x.key))))) {
           const rows = st.filter((x) => String(x.key) === key);
@@ -2276,7 +2281,7 @@ async function handlePick(env: Env, req: Request, p: string) {
           if (take) { used.set(uk, r3((used.get(uk) ?? 0) + take)); used.set(lk, r3((used.get(lk) ?? 0) + take)); }
         }
       }
-      return { k, kenv, lrid, balance, base, vb, targets };
+      return { k, kenv, lrid, balance, base, vb, targets, plants: Array.from(srcPlants) };
     };
     if (req.method === 'GET') {
       const ids = (url.searchParams.get('ids') || '').split(',').map((x) => Number(x)).filter((x) => x > 0);
@@ -2294,7 +2299,7 @@ async function handlePick(env: Env, req: Request, p: string) {
           seen.add(pal);
           const info = await rollInfo(pal, { ...r, batch: p.batch }, used);
           if (!(info.balance > 1e-9)) continue;
-          out.push({ pallet: pal, from: r.id, so: r.so, li: r.li, item: r.item, week: r.week, roll_qty: info.base, balance: info.balance, lot: info.k?.lot ?? p.lot, location: info.k?.location ?? null,
+          out.push({ pallet: pal, from: r.id, so: r.so, li: r.li, item: r.item, week: r.week, so_plant: info.plants.join(', ') || null, roll_qty: info.base, balance: info.balance, lot: info.k?.lot ?? p.lot, location: info.k?.location ?? null,
             targets: info.targets.map((t) => ({ ...t, zmmbe: undefined })) });
         }
       }
@@ -2311,7 +2316,7 @@ async function handlePick(env: Env, req: Request, p: string) {
       const t = info.targets.find((x) => x.key === key);
       const qty = r3(Number(b.qty) || 0);
       if (!info.k) throw new HttpError(404, `Pallet ${b.pallet} is not in the Korber Inventory of this Pick.`);
-      if (!t) throw new HttpError(409, `${b.so} / ${b.li} cannot take this roll: it needs UR in ZMMBE (Material ${b.item}, LI ${b.li}) and a ZINSR lot with Vendor Batch ${info.vb}.`);
+      if (!t) throw new HttpError(409, `${b.so} / ${b.li} cannot take this roll: it needs the same SO Plant (${info.plants.join(', ') || '–'}), UR in ZMMBE (Material ${b.item}, LI ${b.li}) and a ZINSR lot with Vendor Batch ${info.vb}.`);
       if (!(qty > 0)) throw new HttpError(400, 'Enter the QTY.');
       if (qty > info.balance + 0.0005) throw new HttpError(409, `Pallet ${b.pallet} has only ${info.balance} left.`);
       if (qty > Number(t.can) + 0.0005) throw new HttpError(409, `${b.so} / ${b.li} can take ${t.can} (UR free ${t.ur_free}, ZINSR lot ${t.lot_room}).`);

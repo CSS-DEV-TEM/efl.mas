@@ -1563,7 +1563,7 @@ interface FoundPick { id: number; day: string; plan: string; so: string; li: str
  * is on the Packing List with that SO line's SAP details.
  */
 interface TallyTarget { key: string; so: string; li: string; item: string; plant: string | null; batch: string; sloc: string; sameBatch: boolean; ur: number; ur_free: number; lot_room: number; can: number; take: number; lots: { lot: string; batch: string; vendor_batch: string; qty: number }[] }
-interface TallyRoll { pallet: string; from: number; so: string; li: string; item: string; roll_qty: number; balance: number; lot: string | null; location: string | null; targets: TallyTarget[] }
+interface TallyRoll { pallet: string; from: number; so: string; li: string; item: string; so_plant?: string | null; roll_qty: number; balance: number; lot: string | null; location: string | null; targets: TallyTarget[] }
 function TallyDialog({ ids, toast, onClose }: { ids: number[]; toast: (m: string) => void; onClose: (changed: boolean) => void }) {
   const [rolls, setRolls] = useState<TallyRoll[] | null>(null);
   const [err, setErr] = useState('');
@@ -1599,7 +1599,7 @@ function TallyDialog({ ids, toast, onClose }: { ids: number[]; toast: (m: string
       <div className="modal xwide" role="dialog" aria-modal="true" aria-labelledby="tally-title">
         <div className="modal-head">
           <div><h2 id="tally-title">Tally cut roll balances</h2>
-            <p className="sub" style={{ margin: 0 }}>A cut roll&apos;s balance goes to another SO line: same <b>Material</b> and <b>LI</b> number, UR in <b>ZMMBE</b>, and a <b>ZINSR</b> lot whose <b>Vendor Batch</b> is the roll&apos;s Korber Lot Number (always the same — never another Vendor Batch). Only the SAP batch may differ. Each one is saved as a pick of that SO line and goes on the Packing List with its SAP details.</p></div>
+            <p className="sub" style={{ margin: 0 }}>A cut roll&apos;s balance goes to another SO line of the <b>same SO Plant</b>: same <b>Material</b> and <b>LI</b> number, UR in <b>ZMMBE</b>, and a <b>ZINSR</b> lot whose <b>Vendor Batch</b> is the roll&apos;s Korber Lot Number (always the same — never another Vendor Batch). Only the SAP batch may differ. Each one is saved as a pick of that SO line and goes on the Packing List with its SAP details.</p></div>
           <button className="btn sm" aria-label="Close" onClick={() => onClose(saved > 0)}>✕</button>
         </div>
         {!rolls && !err && <Loader label="Finding the cut rolls and the SO lines they can go to…" />}
@@ -1611,7 +1611,7 @@ function TallyDialog({ ids, toast, onClose }: { ids: number[]; toast: (m: string
               <tbody>{rolls.map((x) => (x.targets.length ? x.targets : [null]).map((t, i) => (
                 <tr key={x.pallet + (t?.key ?? '')} className={over.includes(x.pallet) ? 'gone' : ''}>
                   {i === 0 && <><td rowSpan={Math.max(1, x.targets.length)} className="mono">{x.pallet}<div className="muted small">Lot {x.lot ?? '–'}{x.location ? ` · ${x.location}` : ''}</div></td>
-                    <td rowSpan={Math.max(1, x.targets.length)}>{x.so} / {x.li}<div className="muted small">{x.item}</div></td>
+                    <td rowSpan={Math.max(1, x.targets.length)}>{x.so} / {x.li}<div className="muted small">{x.item}{x.so_plant ? ` · SO Plant ${x.so_plant}` : ''}</div></td>
                     <td rowSpan={Math.max(1, x.targets.length)} className="n"><b>{fmtQty(x.balance)}</b><div className="muted small">of {fmtQty(x.roll_qty)}</div></td></>}
                   {t ? <>
                     <td><b>{t.so} / {t.li}</b>{t.plant ? <span className="muted small"> · {t.plant}</span> : null}</td>
@@ -1620,7 +1620,7 @@ function TallyDialog({ ids, toast, onClose }: { ids: number[]; toast: (m: string
                     <td className="n">{fmtQty(t.ur_free)}</td><td className="n">{fmtQty(t.lot_room)}</td>
                     <td className="n"><input className="as-search" type="number" min="0" step="0.001" max={Math.min(x.balance, t.can)} style={{ width: 100 }} value={qty[`${x.pallet}|${t.key}`] ?? ''} placeholder="0"
                       onChange={(e) => setQty((v) => ({ ...v, [`${x.pallet}|${t.key}`]: e.target.value }))} aria-label={`Tally QTY to ${t.so} / ${t.li}`} /></td>
-                  </> : <td colSpan={6} className="muted">No other SO line can take it (same Material and LI, UR in ZMMBE, a ZINSR lot with Vendor Batch {x.lot ?? '–'})</td>}
+                  </> : <td colSpan={6} className="muted">No other SO line can take it (same SO Plant{x.so_plant ? ` ${x.so_plant}` : ''}, same Material and LI, UR in ZMMBE, a ZINSR lot with Vendor Batch {x.lot ?? '–'})</td>}
                 </tr>
               )))}</tbody>
             </table>
