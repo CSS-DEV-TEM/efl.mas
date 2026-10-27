@@ -483,6 +483,61 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
       return { v, full, cut: m.qty, lines: Array.from(new Set(m.parts.map((x) => `${x.r.so} / ${x.r.li} / ${x.r.item}`))).join(', '), pickNo: nos.join(', '), day: Array.from(new Set(m.parts.map((x) => x.p.day))).join(', ') };
     })), sheetName(`${k} Cut Roll`));
   }
+  // Cut Roll Balance: each cut roll — what was cut for its own SO lines, where its balance was tallied (another SO line of
+  // the same Material and LI, a ZINSR lot with the roll's Vendor Batch) with the SAP details of each, and what stays on the shelf
+  {
+    const isTally = (e: Entry) => String(e.p.note ?? '').startsWith('Cut roll balance tallied');
+    const pals = Array.from(new Set(entries.filter((e) => isCut(e.p.pallet) || isTally(e)).map((e) => e.p.pallet)));
+    if (pals.length) {
+      const head = ['Pallet', 'Location Id', 'Item Number', 'Description', 'Lot Number (Vendor Batch)', 'Roll Qty', 'Piece', 'SO', 'LI', 'Material', 'Qty', 'SAP Batch', 'St Loc', 'SAP Plant', 'ZINSR Lot', 'Sheet', 'Pick No', 'Picked on', 'Balance after', 'Note'];
+      const aoa: (string | number | null)[][] = [];
+      const top: (string | number | null)[][] = [['CUT ROLL BALANCE', null, `${pals.length} roll${pals.length === 1 ? '' : 's'}`], []];
+      const tq2 = (x: number) => Math.round(x * 1000) / 1000;
+      const styleRows: { r: number; st: 'roll' | 'tally' | 'left' }[] = [];
+      let tallied = 0, onShelf = 0;
+      for (const pal of pals) {
+        const es = entries.filter((e) => e.p.pallet === pal).sort((x, y) => Number(isTally(x)) - Number(isTally(y)) || String(x.p.at ?? '').localeCompare(String(y.p.at ?? '')));
+        const e0 = es[0];
+        const v = (c: string) => { const i = col(PL_SRC[c] ?? []); return i >= 0 ? e0.raw[i] : null; };
+        const full = palFull.get(pal) ?? 0;
+        let left = full;
+        es.forEach((e, i) => {
+          const m = parseMatch(e.r);
+          const zrows = [...(m.zmmbe || []), ...(e.r.zstock || [])] as Record<string, unknown>[];
+          const bs = e.batches.length ? e.batches : [{ batch: String(e.p.batch ?? '').split(',')[0], qty: Number(e.p.qty) }];
+          left = tq2(left - Number(e.p.qty));
+          if (isTally(e)) tallied = tq2(tallied + Number(e.p.qty));
+          bs.forEach((bt, j) => {
+            const z = zrows.find((x) => bkey(x.batch) === bkey(bt.batch));
+            const last = j === bs.length - 1;
+            styleRows.push({ r: aoa.length, st: isTally(e) ? 'tally' : 'roll' });
+            aoa.push([i === 0 && j === 0 ? pal : null, i === 0 && j === 0 ? (v('Location Id') as string) ?? '' : null, i === 0 && j === 0 ? (v('Item Number') as string) ?? '' : null, i === 0 && j === 0 ? (v('Description') as string) ?? '' : null,
+              i === 0 && j === 0 ? (v('Lot Number') as string) ?? e.p.lot ?? '' : null, i === 0 && j === 0 ? full : null,
+              isTally(e) ? 'Balance tallied' : 'Cut for', String(e.r.so), num(e.r.li), num(e.r.item), tq2(bt.qty),
+              bkey(bt.batch) || '', z ? String(z.sloc ?? '') : '', z ? String(z.so_plant ?? z.plant ?? '') : '', String(e.p.insp_lot ?? ''), e.kind,
+              pickNoOf(e.r), e.p.day ? e.p.day.split('-').reverse().join('-') : '', last ? left : null,
+              isTally(e) ? (/roll \S+ cut for ([^;]+);/.exec(String(e.p.note))?.[1] ? `From the cut for ${/roll \S+ cut for ([^;]+);/.exec(String(e.p.note))![1]}` : 'Tallied') : '']);
+          });
+        });
+        styleRows.push({ r: aoa.length, st: 'left' });
+        aoa.push([null, null, null, null, null, null, 'On the shelf', null, null, null, Math.max(0, left), null, null, null, null, null, null, null, Math.max(0, left), left > 0.0005 ? 'Stays in Korber (not tallied)' : 'Whole roll used']);
+        onShelf = tq2(onShelf + Math.max(0, left));
+        aoa.push([]);
+      }
+      top[0].push(null, null, 'Tallied', tallied, null, 'On the shelf', onShelf);
+      const ws = U.aoa_to_sheet([...top, head, ...aoa]);
+      const hr = top.length;
+      for (let i = 0; i < head.length; i++) { const ref = U.encode_cell({ r: hr, c: i }); (ws[ref] as { s?: unknown }).s = ST.head; }
+      for (let i = 0; i < 10; i++) { const ref = U.encode_cell({ r: 0, c: i }); if (ws[ref]) (ws[ref] as { s?: unknown }).s = ST.top; }
+      for (const x of styleRows) for (let c = 0; c < head.length; c++) {
+        const ref = U.encode_cell({ r: hr + 1 + x.r, c });
+        if (!ws[ref]) ws[ref] = { t: 's', v: '' };
+        (ws[ref] as { s?: unknown }).s = x.st === 'tally' ? ST.match : x.st === 'left' ? ST.cut : ST.cell;
+      }
+      ws['!cols'] = [17, 14, 20, 30, 16, 9, 15, 12, 5, 12, 10, 12, 8, 10, 24, 6, 9, 11, 12, 36].map((w) => ({ wch: w }));
+      U.book_append_sheet(wb, ws, 'Cut Roll Balance');
+    }
+  }
   // Summary: one line per pick, its KFC and PFC QTY
   const summary: (string | number | null)[][] = [['Req', 'Total Qty', 'KFC Qty', 'PFC Qty', 'Total Rolls', 'Pick No', 'Type', 'Remarks']];
   for (const r of reqs) {
