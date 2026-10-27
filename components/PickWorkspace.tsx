@@ -1599,7 +1599,7 @@ function TallyDialog({ ids, toast, onClose }: { ids: number[]; toast: (m: string
       <div className="modal xwide" role="dialog" aria-modal="true" aria-labelledby="tally-title">
         <div className="modal-head">
           <div><h2 id="tally-title">Tally cut roll balances</h2>
-            <p className="sub" style={{ margin: 0 }}>A cut roll&apos;s balance goes to another SO line: same <b>Material</b> and <b>LI</b> number, UR in <b>ZMMBE</b>, and a <b>ZINSR</b> lot with the roll&apos;s <b>Vendor Batch</b> (Korber Lot Number) — the batch may differ. Each one is saved as a pick of that SO line and goes on the Packing List with its SAP details.</p></div>
+            <p className="sub" style={{ margin: 0 }}>A cut roll&apos;s balance goes to another SO line: same <b>Material</b> and <b>LI</b> number, UR in <b>ZMMBE</b>, and a <b>ZINSR</b> lot whose <b>Vendor Batch</b> is the roll&apos;s Korber Lot Number (always the same — never another Vendor Batch). Only the SAP batch may differ. Each one is saved as a pick of that SO line and goes on the Packing List with its SAP details.</p></div>
           <button className="btn sm" aria-label="Close" onClick={() => onClose(saved > 0)}>✕</button>
         </div>
         {!rolls && !err && <Loader label="Finding the cut rolls and the SO lines they can go to…" />}
@@ -1607,7 +1607,7 @@ function TallyDialog({ ids, toast, onClose }: { ids: number[]; toast: (m: string
         {rolls && rolls.length > 0 && (
           <div className="table-wrap" style={{ maxHeight: 520 }}>
             <table className="mini">
-              <thead><tr><th>Cut roll</th><th>Cut for</th><th className="n">Balance</th><th>Can go to (SO / LI)</th><th>SAP batch · St Loc</th><th>ZINSR lot (Vendor Batch)</th><th className="n">UR free</th><th className="n">Lot room</th><th className="n">Tally QTY</th></tr></thead>
+              <thead><tr><th>Cut roll</th><th>Cut for</th><th className="n">Balance</th><th>Can go to (SO / LI)</th><th>SAP batch · St Loc</th><th>ZINSR lot (Vendor Batch = roll lot)</th><th className="n">UR free</th><th className="n">Lot room</th><th className="n">Tally QTY</th></tr></thead>
               <tbody>{rolls.map((x) => (x.targets.length ? x.targets : [null]).map((t, i) => (
                 <tr key={x.pallet + (t?.key ?? '')} className={over.includes(x.pallet) ? 'gone' : ''}>
                   {i === 0 && <><td rowSpan={Math.max(1, x.targets.length)} className="mono">{x.pallet}<div className="muted small">Lot {x.lot ?? '–'}{x.location ? ` · ${x.location}` : ''}</div></td>
@@ -1615,7 +1615,7 @@ function TallyDialog({ ids, toast, onClose }: { ids: number[]; toast: (m: string
                     <td rowSpan={Math.max(1, x.targets.length)} className="n"><b>{fmtQty(x.balance)}</b><div className="muted small">of {fmtQty(x.roll_qty)}</div></td></>}
                   {t ? <>
                     <td><b>{t.so} / {t.li}</b>{t.plant ? <span className="muted small"> · {t.plant}</span> : null}</td>
-                    <td>{t.batch} · {t.sloc}{!t.sameBatch && <span className="pill warn" style={{ marginLeft: 4 }} title="The ZMMBE batch of that SO line is not the batch of its ZINSR lot">other batch</span>}</td>
+                    <td>{t.batch} · {t.sloc}{!t.sameBatch && <span className="pill warn" style={{ marginLeft: 4 }} title="Only the SAP batch (ZMMBE) differs from the ZINSR lot's batch — the Vendor Batch is the same as the roll's Korber Lot Number">other SAP batch</span>}</td>
                     <td className="small">{t.lots.map((l) => `${l.lot} (${l.vendor_batch})`).join(', ')}</td>
                     <td className="n">{fmtQty(t.ur_free)}</td><td className="n">{fmtQty(t.lot_room)}</td>
                     <td className="n"><input className="as-search" type="number" min="0" step="0.001" max={Math.min(x.balance, t.can)} style={{ width: 100 }} value={qty[`${x.pallet}|${t.key}`] ?? ''} placeholder="0"
