@@ -2651,12 +2651,13 @@ async function handlePick(env: Env, req: Request, p: string) {
     // the pick history is everyone's: all users by default, ?user= for one user
     const owner = (url.searchParams.get('user') || '').trim().toLowerCase() || null;
     const day = url.searchParams.get('day'), week = url.searchParams.get('week');
-    const where = (day ? 'day = ?1' : week ? 'week = ?1' : 'day = ?1') + ' AND (?2 IS NULL OR by_user = ?2)';
+    // a day = the picks made that day and every pick of that day's Picks (a Pick picked over two days shows whole)
+    const where = (week && !day ? 'week = ?1' : "(day = ?1 OR week GLOB ?1 || '~*')") + ' AND (?2 IS NULL OR by_user = ?2)';
     const arg = day || week || colomboDay();
     const [reqs, rolls, days, hdr] = await env.DB.batch([
       env.DB.prepare(`SELECT * FROM pick_req WHERE ${where} ORDER BY day, by_user, seq`).bind(arg, owner),
       env.DB.prepare(`SELECT * FROM picks WHERE ${where} ORDER BY req_id, id`).bind(arg, owner),
-      env.DB.prepare('SELECT day, COUNT(*) n, COUNT(*) open FROM pick_req WHERE ?1 IS NULL OR by_user = ?1 GROUP BY day ORDER BY day DESC LIMIT 60').bind(owner),
+      env.DB.prepare("SELECT d day, COUNT(*) n, COUNT(*) open FROM (SELECT day d FROM pick_req WHERE ?1 IS NULL OR by_user = ?1 UNION ALL SELECT substr(week, 1, 10) d FROM pick_req WHERE week GLOB '????-??-??~*' AND substr(week, 1, 10) <> day AND (?1 IS NULL OR by_user = ?1)) GROUP BY d ORDER BY d DESC LIMIT 60").bind(owner),
       env.DB.prepare("SELECT v FROM config WHERE k = 'korber_header'"),
     ]);
     const header = (hdr.results[0] as Row | undefined)?.v;

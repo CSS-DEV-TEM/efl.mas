@@ -59,10 +59,13 @@ export default function PlanPicks({ rows, label, reloadKey, plantName }: { rows:
   const tag = `${label.replace(/[^\w-]+/g, '_')}${marked.length ? `_${marked.length}picks` : ''}`;
   const ids = new Set(target.map((r) => r.id));
   // the Packing List also gets the plan (dashboard table) of the Picks in it
+  // plant names (Settings → Plants) for the Packing List header
+  const [plantNames, setPlantNames] = useState<Record<string, string>>({});
+  useEffect(() => { api<{ plants: { code: string; name: string | null }[] }>('/api/plants').then((r) => setPlantNames(Object.fromEntries(r.plants.map((x) => [x.code.toUpperCase(), x.name || x.code])))).catch(() => {}); }, []);
   const downloadPL = () => {
     if (!h) return;
     const weeks = new Set(target.map((r) => r.week));
-    saveWorkbook(packingListWorkbook(h, { ids, combined: oneSheet, pfcSlocs, plan: rows.filter((l) => weeks.has(l.week)), planTitle: `Plan · ${label}` }), `Packing_List_${tag}.xlsx`);
+    saveWorkbook(packingListWorkbook(h, { ids, combined: oneSheet, pfcSlocs, plan: rows.filter((l) => weeks.has(l.week)), planTitle: `Plan · ${label}`, plantNames }), `Packing_List_${tag}.xlsx`);
   };
   const downloadKorber = () => h && saveWorkbook(korberWorkbook(h, ids), `Korber_Picked_${tag}.xlsx`);
   // cancel the marked picks together (own picks; Admin / Head: anyone's) — they leave the history, their rolls are free again

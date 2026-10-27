@@ -265,7 +265,7 @@ export function notPickedWhy(c: Candidates | null, l: { hold?: string | null; st
 const r3n = (n: number) => Math.round(n * 1000) / 1000;
 
 export interface PLIssue { level: 'error' | 'warn'; pallet: string; so: string; li: string; item: string; what: string }
-export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolean; ids?: Set<number> | number[]; combined?: boolean; pfcSlocs?: string[]; /** the Pick's plan lines (dashboard table) → a "Plan" sheet */ plan?: Line[]; planTitle?: string; /** filled with the problems found (SAP and Korber data checked) */ issues?: PLIssue[]; /** plan lines the system did not pick, and why → a "Not Picked" sheet */ notPicked?: NotPicked[] } = {}) {
+export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolean; ids?: Set<number> | number[]; combined?: boolean; pfcSlocs?: string[]; /** the Pick's plan lines (dashboard table) → a "Plan" sheet */ plan?: Line[]; planTitle?: string; /** filled with the problems found (SAP and Korber data checked) */ issues?: PLIssue[]; /** plan lines the system did not pick, and why → a "Not Picked" sheet */ notPicked?: NotPicked[]; /** plant code → name (Settings → Plants) */ plantNames?: Record<string, string> } = {}) {
   const only = opts.ids ? new Set(opts.ids) : null;
   const reqs = h.requests.filter((r) => !r.cancelled_at && (!only || !only.size || only.has(r.id)));
   const header = (h.korberHeader || []).map(hn);
@@ -432,7 +432,14 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
     const cust = String(list0.map((e) => { const i = col(['customer ref number']); return i >= 0 ? e.raw[i] : ''; }).find(Boolean) ?? '').split('-')[0];
     const days = Array.from(new Set(list0.map((e) => e.p.day))).sort();
     aoa[1] = [qty, list.length, pickNos.length === 1 ? pickNos[0] : pickNos.join(', '), null, null, pickNos.length, cut];
-    aoa[3] = [cust || null, days.map((d) => d.split('-').reverse().join('-')).join(', ') || null];
+    // the plant: the one chosen in the system for the Pick (its Pick Id), with its name from Settings → Plants;
+    // else the plan line's plant; the Korber customer ref only when the Pick has no plant
+    const plants = Array.from(new Set(list0.map((e) => {
+      const m = /^\d{4}-\d{2}-\d{2}~([^~]+)~\d+$/.exec(String(e.r.week || ''));
+      const code = m && m[1] !== '-' ? m[1] : String(e.r.plant || '').trim();
+      return code ? (opts.plantNames?.[code.toUpperCase()] || code) : '';
+    }).filter(Boolean)));
+    aoa[3] = [plants.join(', ') || cust || null, days.map((d) => d.split('-').reverse().join('-')).join(', ') || null];
     const ws = U.aoa_to_sheet(aoa);
     // totals as formulas over the tables' Actual Qty / Pallet cells
     if (qtyRanges.length) ws.A2 = { t: 'n', v: qty, f: `SUM(${qtyRanges.join(',')})` };

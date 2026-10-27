@@ -1365,7 +1365,7 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
       notPicked.sort((a, b) => a.pick.localeCompare(b.pick) || a.reason.localeCompare(b.reason) || a.so.localeCompare(b.so) || Number(a.li) - Number(b.li));
       // the SAP and Korber data of every roll is checked first: problems are shown before the file is saved
       const issues: PLIssue[] = [];
-      const wb = packingListWorkbook(hh, { ids: new Set(target.map((r) => r.id)), combined: oneSheet, pfcSlocs, plan, planTitle: `Plan · ${weeks.map(pickName).join(', ')}`, issues, notPicked });
+      const wb = packingListWorkbook(hh, { ids: new Set(target.map((r) => r.id)), combined: oneSheet, pfcSlocs, plan, planTitle: `Plan · ${weeks.map(pickName).join(', ')}`, issues, notPicked, plantNames });
       const file = `Packing_List_${day}${ptag}${tag}.xlsx`;
       const tallyMsg = tallied ? ` · ${tallied} cut roll balance${tallied === 1 ? '' : 's'} tallied (${fmtQty(tallyQty)})` : '';
       if (tallyFail.length) toast(`Cut roll tally: ${tallyFail.length} not saved — ${tallyFail[0]}`);
