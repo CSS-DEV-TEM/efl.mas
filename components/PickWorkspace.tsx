@@ -568,7 +568,12 @@ export function autoPlan(c: Candidates, withPool = false): { sel: Sel; last: Las
   // rolls of a lot shared by several SO lines are ticked by the user, never by the system; "select suggested" takes the
   // suggested ones (the rolls whose Actual Qty adds up to this line's lot QTY), or all shared ones when none is suggested
   const anySuggested = c.rolls.some((r) => r.suggested);
-  const avail = c.rolls.filter((r) => r.available > 1e-9 && (!r.pool || (withPool && (!anySuggested || r.suggested))));
+  // rolls sharing their batch's ZROLLMGT Available (a little on each roll in SAP): taken together at most that — the QTY is
+  // cut from as few rolls as possible (copies: what one roll takes leaves less for the others)
+  const pooled = c.rolls.some((r) => r.zpool);
+  const avail = c.rolls.filter((r) => r.available > 1e-9 && (!r.pool || (withPool && (!anySuggested || r.suggested)))).map((r) => (r.zpool ? { ...r } : r));
+  const poolLeft = new Map(pooled ? avail.filter((r) => r.zpool).map((r) => [r.zpool!.batch, r.zpool!.avail] as [string, number]) : []);
+  const orig = new Map(c.rolls.map((r) => [r.pallet, r.available]));
   let last: LastRoll | null = null;
   // a ZINSR lot (Vendor Batch) gives this SO line at most its own QTY (less what it already gave): never more from one lot
   const lotLeft = new Map((c.lots || []).filter((l) => (l.cap ?? l.need) != null).map((l) => [String(l.lot), Number(l.cap ?? l.need)]));
@@ -586,8 +591,13 @@ export function autoPlan(c: Candidates, withPool = false): { sel: Sel; last: Las
     return true;
   };
   const take = (r: Candidate, q: number, need: Map<string, number> | null) => {
+    if (pooled && !(q > 1e-9)) return;
     sel[r.pallet] = { qty: String(r3(q)) };
     left = r3(left - q);
+    if (r.zpool) {
+      const pl = Math.max(0, r3((poolLeft.get(r.zpool.batch) ?? 0) - q)); poolLeft.set(r.zpool.batch, pl);
+      for (const o of avail) if (o.zpool?.batch === r.zpool.batch && !sel[o.pallet]) o.available = Math.min(orig.get(o.pallet) ?? 0, pl);
+    }
     { let rest = q; for (const l of lotsOf(r)) { if (rest <= 1e-9) break; const t = Math.min(lotLeft.get(l) ?? 0, rest); lotLeft.set(l, r3((lotLeft.get(l) ?? 0) - t)); rest = r3(rest - t); } }
     if (need) {
       let rest = q;

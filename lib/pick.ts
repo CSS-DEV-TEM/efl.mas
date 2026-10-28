@@ -24,6 +24,8 @@ export interface Candidate {
   fifo?: string | null;
   pallet: string; item: string; lot: string | null; supplier_hu: string | null; location: string | null; uom: string | null; invoice: string | null;
   actual_qty: number; base_qty: number; picked_before: number; available: number; roll_qty: number; shade: string | null;
+  /** its ZROLLMGT Available is shared with the other rolls of its batch (each has a little in SAP): together at most `avail` */
+  zpool?: { batch: string; avail: number; pallets: string[] };
   insp_lots: string[]; batches: string[]; checks: Record<string, boolean | null>; warnings: string[]; needsConfirm: boolean;
   picks: PalletPick[];
   /** in ZROLLMGT under the line's ZMMBE batch (System Batch) at the bin: Barcode Number = Korber Pallet */
@@ -85,7 +87,7 @@ export interface BlockedRoll { lot: string; batch: string | null; roll_no: strin
 export interface PickReq { id: number; day: string; seq: number; pick_no: string | null; week: string; line: string; so: string; li: string; item: string; plant: string | null; need: number; qty: number; rolls: number; by_user: string; at: string; cancelled_at: string | null; cancelled_by: string | null; match?: string | null; kind?: string | null; closed?: number | null; short?: number | null;
   /** the Pick's ZMMBE rows of the line (batch, storage location) when the pick did not keep them */
   zstock?: { batch: string; sloc: string | null; ur: number }[] }
-export interface PickRoll { id: number; req_id: number; day: string; week: string; line: string; so: string; li: string; item: string; pallet: string; qty: number; roll_qty: number; partial: number; shade: string | null; lot: string | null; insp_lot: string | null; batch: string | null; note: string | null; by_user: string; at: string; cancelled_at: string | null; korber: string | null }
+export interface PickRoll { id: number; req_id: number; day: string; week: string; line: string; so: string; li: string; item: string; pallet: string; qty: number; roll_qty: number; partial: number; shade: string | null; lot: string | null; insp_lot: string | null; batch: string | null; note: string | null; by_user: string; at: string; cancelled_at: string | null; korber: string | null; /** picked from the pallet before this pick */ prior?: number }
 export interface PickHistory { day: string | null; requests: PickReq[]; picks: PickRoll[]; days: { day: string; n: number; open: number }[]; korberHeader: unknown[] | null }
 
 export const ordinal = (n: number) => { const v = n % 100, s = ['th', 'st', 'nd', 'rd']; return n + (s[(v - 20) % 10] || s[v] || s[0]); };
@@ -332,7 +334,8 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
   // one pallet can be picked in pieces (several picks / batches): its pieces are one row, and it is a cut roll only when
   // the pieces together are less than the roll (Korber Actual Qty); pieces adding up to the whole roll are not a cut
   const aq = header.indexOf('actual qty');
-  const fullOf = (e: Entry) => Number(e.p.roll_qty) || Number(aq >= 0 ? e.raw[aq] : 0) || 0;
+  // the roll as it was when this pick took from it: a cut roll's balance picked later is the whole of what was left (not a cut)
+  const fullOf = (e: Entry) => Math.max(0, (Number(e.p.roll_qty) || Number(aq >= 0 ? e.raw[aq] : 0) || 0) - (Number(e.p.prior) || 0));
   const palTotal = new Map<string, number>(), palFull = new Map<string, number>();
   for (const e of entries) {
     palTotal.set(e.p.pallet, (palTotal.get(e.p.pallet) ?? 0) + Number(e.p.qty));
@@ -681,7 +684,7 @@ function korberSheet(korberHeader: unknown[], picks: PickRoll[]) {
   const by = new Map<string, { p: PickRoll; raw: unknown[]; qty: number; full: number }>();
   for (const p of picks) {
     const raw = (p.korber ? JSON.parse(p.korber) : []) as unknown[];
-    const full = Number(p.roll_qty) || Number(qi >= 0 ? raw[qi] : 0) || 0;
+    const full = Math.max(0, (Number(p.roll_qty) || Number(qi >= 0 ? raw[qi] : 0) || 0) - (Number(p.prior) || 0));
     const had = by.get(p.pallet);
     if (had) { had.qty += Number(p.qty); had.full = Math.max(had.full, full); } else by.set(p.pallet, { p, raw, qty: Number(p.qty), full });
   }

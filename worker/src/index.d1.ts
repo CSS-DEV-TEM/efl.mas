@@ -560,7 +560,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 66; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 67; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -2513,6 +2513,12 @@ async function handlePick(env: Env, req: Request, p: string) {
         note: [x.smart ? `Smart suggestion (auto) — Pick all matched by ${s.u}` : '', nb ? '' : x.manual?.free ? (x.smart ? 'Item roll of the line\'s ZMMBE batch (no ZINSR lot)' : `Manual pallet for a shortage — added by ${s.u}`) : x.manual ? `Manual pick for roll ${x.manual.roll_no || '?'}${x.manual.barcode ? ' (barcode ' + x.manual.barcode + ')' : ''}` : '', r.warnings.length ? `${nb && !r.needsConfirm ? '' : 'Confirmed: '}${r.warnings.join('; ')}` : ''].filter(Boolean).join(' · ') || null,
         by_user: s.u, at, korber: r.raw });
     }
+    // rolls whose ZROLLMGT Available is shared by their batch: together never more than the batch's Available
+    for (const r of cand.rolls) {
+      if (!r.zpool) continue;
+      const tot = r3(picks.filter((p0) => r.zpool!.pallets.includes(up(p0.pallet))).reduce((t, p0) => t + Number(p0.qty), 0));
+      if (tot > r.zpool.avail + 1e-6) throw new HttpError(409, `The rolls of batch ${r.zpool.batch} have ${r.zpool.avail} ZROLLMGT Available together — this pick takes ${tot} from them.`);
+    }
     // each user's picks are numbered 1st, 2nd … per day (their own packing list)
     const seq = ((await env.DB.prepare('SELECT MAX(seq) n FROM pick_req WHERE day = ? AND by_user = ?').bind(day, s.u).first<{ n: number | null }>())?.n ?? 0) + 1;
     const total = r3(picks.reduce((t, x) => t + Number(x.qty), 0));
@@ -2661,7 +2667,8 @@ async function handlePick(env: Env, req: Request, p: string) {
     const arg = day || week || colomboDay();
     const [reqs, rolls, days, hdr] = await env.DB.batch([
       env.DB.prepare(`SELECT * FROM pick_req WHERE ${where} ORDER BY day, by_user, seq`).bind(arg, owner),
-      env.DB.prepare(`SELECT * FROM picks WHERE ${where} ORDER BY req_id, id`).bind(arg, owner),
+      // prior = what was picked from the pallet before this pick (a cut roll's balance picked later is not a new cut)
+      env.DB.prepare(`SELECT picks.*, (SELECT COALESCE(SUM(q.qty), 0) FROM picks q WHERE q.pallet = picks.pallet AND q.cancelled_at IS NULL AND q.id < picks.id) prior FROM picks WHERE ${where} ORDER BY req_id, id`).bind(arg, owner),
       env.DB.prepare("SELECT d day, COUNT(*) n, COUNT(*) open FROM (SELECT day d FROM pick_req WHERE ?1 IS NULL OR by_user = ?1 UNION ALL SELECT substr(week, 1, 10) d FROM pick_req WHERE week GLOB '????-??-??~*' AND substr(week, 1, 10) <> day AND (?1 IS NULL OR by_user = ?1)) GROUP BY d ORDER BY d DESC LIMIT 60").bind(owner),
       env.DB.prepare("SELECT v FROM config WHERE k = 'korber_header'"),
     ]);
@@ -3201,6 +3208,8 @@ interface Candidate {
   zroll?: boolean;
   /** ZROLLMGT Available Quantity when less than Korber's (reserved in SAP) */
   zrollAvail?: number;
+  /** its ZROLLMGT Available is shared with the other rolls of its batch (each has a little in SAP) */
+  zpool?: { batch: string; avail: number; pallets: string[] };
   /** the ZCOMENT barcode is not a Korber pallet: found by Supplier Hu = Vendor Roll No (+ Lot, Invoice, Po) */
   byHu?: boolean;
   /** this lot's ZCOMENT row had no barcode: taken from the same roll's row under another inspection lot */
@@ -3297,10 +3306,30 @@ async function makeGate(env: Env) {
     for (const z of zs) out.set(up(z.barcode), Math.max(0, r3(Number(z.qty) - (after.get(up(z.barcode)) ?? 0))));
     return out;
   };
+  /** ZROLLMGT Available Quantity per System Batch over the given pallets, less what was picked from them since the upload */
+  const poolOf = async (pallets: string[]) => {
+    const out = new Map<string, { avail: number; pallets: string[] }>();
+    if (!loaded || !pallets.length) return out;
+    // a roll with a Reserved Quantity in SAP keeps its own Available (the reserved part is not picked): not shared
+    const reserved = (raw: unknown) => { try { const o = JSON.parse(String(raw ?? '{}')) as Record<string, unknown>; const k = Object.keys(o).find((x) => /^reserved\s*(quantity|qty)?$/i.test(x.trim())); return k ? Number(o[k]) || 0 : 0; } catch { return 0; } };
+    const zs = (await env.DB.prepare('SELECT barcode, qty, batch, rid, raw FROM zroll WHERE barcode IN (SELECT value FROM json_each(?)) AND qty IS NOT NULL').bind(JSON.stringify(Array.from(new Set(pallets.map(up))))).all<Row>()).results
+      .filter((z) => !(reserved(z.raw) > 1e-9));
+    if (!zs.length) return out;
+    const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zroll' AND rid = ?").bind(String(zs[0].rid ?? '')).first<{ at: string | null }>())?.at ?? '';
+    const after = new Map((await env.DB.prepare('SELECT upper(pallet) p, SUM(qty) q FROM picks WHERE cancelled_at IS NULL AND at > ? AND upper(pallet) IN (SELECT value FROM json_each(?)) GROUP BY upper(pallet)')
+      .bind(zAt, JSON.stringify(zs.map((z) => up(z.barcode)))).all<{ p: string; q: number }>()).results.map((x) => [x.p, Number(x.q) || 0]));
+    for (const z of zs) {
+      const b = normId(z.batch); if (!b) continue;
+      const e = out.get(b) ?? { avail: 0, pallets: [] }; if (!out.has(b)) out.set(b, e);
+      e.avail = r3(e.avail + Number(z.qty) - (after.get(up(z.barcode)) ?? 0)); e.pallets.push(up(z.barcode));
+    }
+    for (const e of out.values()) e.avail = Math.max(0, e.avail);
+    return out;
+  };
   const batchOf = async (pallet: string) => loaded ? ((await rowsOf([up(pallet)])).map((z) => z.batch as string | null).find(Boolean) ?? null) : null;
   const rowOk = (z: Row) => !on || !rowWhy(z);
   const locWhy = locBlocker(st);
-  return { on, bin, loaded, hasStatus, check, atBin, rowOk, rowWhy, batchOf, availOf, locWhy };
+  return { on, bin, loaded, hasStatus, check, atBin, rowOk, rowWhy, batchOf, availOf, poolOf, locWhy };
 }
 
 /**
@@ -3717,9 +3746,22 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
   // ZROLLMGT Available Quantity: a roll with a Reserved part in SAP is picked only up to what SAP has available
   if (gate.on) {
     const av = await gate.availOf(Array.from(rolls.keys()));
+    const limited: Candidate[] = [];
     for (const r of rolls.values()) {
       const a = av.get(up(r.pallet));
-      if (a !== undefined && a < r.available - 1e-6) { r.available = Math.max(0, r3(a)); r.zrollAvail = r3(a); r.qtyNote = [r.qtyNote, `ZROLLMGT Available Quantity ${r3(a)} (less than Korber ${r.actual_qty} — reserved in SAP)`].filter(Boolean).join(' · '); }
+      if (a !== undefined && a < r.available - 1e-6) limited.push(r);
+    }
+    // several rolls of one batch each with a small ZROLLMGT Available (SAP spread the batch's UR over its rolls): their
+    // Available counts together, so the QTY is cut from as few rolls as possible — never a little from each roll
+    const pools = limited.length > 1 ? await gate.poolOf(limited.map((r) => r.pallet)) : new Map<string, { avail: number; pallets: string[] }>();
+    for (const r of limited) {
+      const a = av.get(up(r.pallet))!;
+      const pool = Array.from(pools.entries()).find(([, e]) => e.pallets.includes(up(r.pallet)) && e.pallets.length > 1);
+      if (pool && pool[1].avail > a + 1e-6) {
+        const shared = Math.min(r.available, pool[1].avail);
+        r.available = Math.max(0, r3(shared)); r.zrollAvail = r3(pool[1].avail); r.zpool = { batch: pool[0], avail: r3(pool[1].avail), pallets: pool[1].pallets };
+        r.qtyNote = [r.qtyNote, `ZROLLMGT Available ${r3(a)} on this roll — the ${pool[1].pallets.length} rolls of batch ${pool[0]} have ${r3(pool[1].avail)} together: cut from one roll`].filter(Boolean).join(' · ');
+      } else { r.available = Math.max(0, r3(a)); r.zrollAvail = r3(a); r.qtyNote = [r.qtyNote, `ZROLLMGT Available Quantity ${r3(a)} (less than Korber ${r.actual_qty} — reserved in SAP)`].filter(Boolean).join(' · '); }
     }
   }
   const list = Array.from(rolls.values()).sort((a, b) => Number(b.available > 0) - Number(a.available > 0) || Number(!!b.suggested) - Number(!!a.suggested) || String(a.lot).localeCompare(String(b.lot)) || String(a.supplier_hu).localeCompare(String(b.supplier_hu), undefined, { numeric: true }));
