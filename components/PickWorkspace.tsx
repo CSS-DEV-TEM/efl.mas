@@ -15,6 +15,8 @@ import {
 
 type LineP = Line & { picked?: number; picked_rolls?: number };
 /** an item number without the client code and leading zeros (MASKRE-0001000256730 → 1000256730) */
+/** Packing List: plan lines checked at the same time (the Not Picked sheet) */
+const PL_PAR = 8;
 const normItem = (v: unknown) => String(v ?? '').trim().toUpperCase().replace(/^[A-Z]{2,10}-(?=[A-Z0-9])/, '').replace(/^0+(?=\d)/, '');
 const today = () => new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
 
@@ -1307,12 +1309,16 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
       const weeks = Array.from(new Set(target.map((r) => r.week).filter(Boolean)));
       const days = Array.from(new Set(weeks.map((w) => /^(\d{4}-\d{2}-\d{2})~/.exec(w)?.[1]).filter(Boolean))) as string[];
       let plan: LineP[] = [];
-      for (const d of days) { try { plan.push(...(await api<{ rows: LineP[] }>(`/api/pullplan?type=day&day=${d}`)).rows); } catch { /* plan not available */ } }
+      // each plan read once, all at the same time (the same plan is used for the Plan sheet and for the Not Picked lines)
+      const planCache = new Map<string, Promise<LineP[] | null>>();
+      const readPlan = (u: string) => { let p = planCache.get(u); if (!p) { p = api<{ rows: LineP[] }>(u).then((r) => r.rows).catch(() => null); planCache.set(u, p); } return p; };
+      for (const u of [...days.map((d) => `/api/pullplan?type=day&day=${d}`), ...weeks.filter((x) => /^\d{4}-W\d{2}$/.test(x)).map((w) => `/api/pullplan?week=${encodeURIComponent(w)}`)]) void readPlan(u);
+      for (const d of days) { const rows = await readPlan(`/api/pullplan?type=day&day=${d}`); if (rows) plan.push(...rows); }
       plan = plan.filter((l) => weeks.includes(l.week));
       // a week plan: its lines that were picked (the line = SO / LI / Item key + its day)
       const lineIds = new Set(target.map((r) => r.line));
       for (const w of weeks.filter((x) => /^\d{4}-W\d{2}$/.test(x))) {
-        try { plan.push(...(await api<{ rows: LineP[] }>(`/api/pullplan?week=${encodeURIComponent(w)}`)).rows.filter((l) => lineIds.has(`${l.key}|${l.date ?? ''}`))); } catch { /* plan not available */ }
+        const rows = await readPlan(`/api/pullplan?week=${encodeURIComponent(w)}`); if (rows) plan.push(...rows.filter((l) => lineIds.has(`${l.key}|${l.date ?? ''}`)));
       }
       // the lines the system did not pick (in full), and why: the day Picks' plan lines, and for a week plan its lines of
       // the same plants and plan dates as the picked lines
@@ -1321,7 +1327,7 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
         const picked = target.filter((r) => r.week === w);
         const dates = new Set(picked.map((r) => r.line.split('|')[3] || ''));
         const plants = new Set(picked.map((r) => String(r.plant || '').toUpperCase().replace(/\s+/g, '')));
-        try { scope.push(...(await api<{ rows: LineP[] }>(`/api/pullplan?week=${encodeURIComponent(w)}`)).rows.filter((l) => dates.has(l.date ?? '') && (!plants.size || plants.has(String(l.plant || '').toUpperCase().replace(/\s+/g, ''))))); } catch { /* plan not available */ }
+        const rows = await readPlan(`/api/pullplan?week=${encodeURIComponent(w)}`); if (rows) scope.push(...rows.filter((l) => dates.has(l.date ?? '') && (!plants.size || plants.has(String(l.plant || '').toUpperCase().replace(/\s+/g, '')))));
       }
       const open = scope.filter((l) => !isDone(l) && !isDispatched(l) && need(l) > 1e-9);
       const notPicked: NotPicked[] = [];
@@ -1352,7 +1358,7 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
       };
       // a few lines at a time
       const queue = [...open];
-      await Promise.all(Array.from({ length: Math.min(5, queue.length) }, async () => { for (let l = queue.shift(); l; l = queue.shift()) { await one(l); done++; setPlProg(`${done} / ${open.length}`); } }));
+      await Promise.all(Array.from({ length: Math.min(PL_PAR, queue.length) }, async () => { for (let l = queue.shift(); l; l = queue.shift()) { await one(l); done++; setPlProg(`${done} / ${open.length}`); } }));
       setPlProg('');
       // short picks: lines picked with less than their plan QTY (a pick closed short included) that are not listed yet
       for (const l of scope) {
@@ -1372,7 +1378,7 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
           reason: closed ? 'Picked short — closed' : 'Picked short',
           detail: `Picked ${fmtQty(picked)} of ${fmtQty(planQty)} — ${fmtQty(short)} short${closed ? ` · closed short${closed.by_user ? ` by ${closed.by_user}` : ''} (the rest is not picked later)` : ''}${Number(l.ur) > 0 && Number(l.ur) < planQty - 1e-9 ? ` · UR ${fmtQty(Number(l.ur))}` : ''}` });
       }
-      notPicked.sort((a, b) => a.pick.localeCompare(b.pick) || a.reason.localeCompare(b.reason) || a.so.localeCompare(b.so) || Number(a.li) - Number(b.li));
+      notPicked.sort((a, b) => a.pick.localeCompare(b.pick) || a.reason.localeCompare(b.reason) || a.so.localeCompare(b.so) || Number(a.li) - Number(b.li) || String(a.item).localeCompare(String(b.item)) || String(a.date ?? '').localeCompare(String(b.date ?? '')));
       // the SAP and Korber data of every roll is checked first: problems are shown before the file is saved
       const issues: PLIssue[] = [];
       const wb = packingListWorkbook(hh, { ids: new Set(target.map((r) => r.id)), combined: oneSheet, pfcSlocs, plan, planTitle: `Plan · ${weeks.map(pickName).join(', ')}`, issues, notPicked, plantNames });

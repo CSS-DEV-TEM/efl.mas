@@ -2186,7 +2186,9 @@ async function handlePick(env: Env, req: Request, p: string) {
     if (!line) throw new HttpError(404, 'That plan line is not in this week.');
     // the Pick's own ZMMBE / ZINR / ZCOMENT VIEW / Korber (else the shared ones); the pick history is shared by all
     const lrid = weekPlantRid(week, line.plant);
-    return json(await pickCandidates(await envFor(env, lrid), week, key, date, line, lrid));
+    const senv0 = await envFor(env, lrid);
+    // ?slow=1: without the read-ahead (to compare)
+    return json(await pickCandidates(url.searchParams.get('slow') ? senv0 : await fastEnv(senv0, normId(line.item)), week, key, date, line, lrid));
   }
 
   // Korber rolls to choose by hand: same item first; search by pallet, lot or supplier HU; with what is left of each
@@ -3155,6 +3157,92 @@ interface ManualFor { /** a Korber pallet added by hand for a shortage of the pi
  * (day plan round / week, SO / LI, HJ Pick No, day, who) — a cut roll keeps only its balance, a roll picked in full is gone.
  */
 interface PalletPick { day: string; by_user: string; qty: number; plan: string; so: string; li: string; pick_no: string | null; at: string; req: number }
+/**
+ * Speed only (the same answers): a plan line's candidate rolls read the same Korber / ZROLLMGT / ZCOMENT rows and pick
+ * history roll by roll — hundreds of small reads. The rolls of the line's Material are read once up front, and each roll's
+ * read is answered from them when the answer is certain (one row); anything else goes to the database as before. A read
+ * made twice in one request is read once. Only for reads (GET): the copies handed out are never shared.
+ */
+async function fastEnv(env: Env, material: string): Promise<Env> {
+  const db = env.DB;
+  const norm = (sql: string) => sql.replace(/\s+/g, ' ').trim();
+  const Q_KP = norm('SELECT * FROM korber WHERE pallet = ?');
+  const Q_KC = norm('SELECT * FROM korber WHERE pcore = ? AND item = ? LIMIT 1');
+  const Q_KF = norm("SELECT pallet, qty FROM korber WHERE pallet = ? AND COALESCE(pick_id, '0') IN ('0', '')");
+  const Q_ZR = norm('SELECT barcode, bin, batch, status, material, qty FROM zroll WHERE barcode IN (SELECT value FROM json_each(?))');
+  const Q_ZC = norm('SELECT 1 FROM zcoment WHERE barcode IN (SELECT value FROM json_each(?)) LIMIT 1');
+  const Q_PP = norm(`SELECT p.day, p.by_user, p.qty, p.roll_qty, p.week, p.so, p.li, p.at, p.req_id, r.pick_no FROM picks p LEFT JOIN pick_req r ON r.id = p.req_id
+    WHERE p.pallet = ? AND p.cancelled_at IS NULL ORDER BY p.id`);
+  // the rolls read up front: the Material's Korber pallets and the ZCOMENT barcodes of the Material's inspection lots
+  const [u1, u2] = material ? await db.batch([
+    db.prepare('SELECT DISTINCT pallet b FROM korber WHERE item = ?').bind(material),
+    db.prepare('SELECT DISTINCT barcode b FROM zcoment WHERE lot IN (SELECT lot FROM zinr WHERE material = ?) AND barcode IS NOT NULL').bind(material),
+  ]) : [{ results: [] }, { results: [] }];
+  const U = new Set([...(u1.results as Row[]), ...(u2.results as Row[])].map((x) => String(x.b ?? '')).filter(Boolean));
+  const pals = Array.from(U);
+  const J = JSON.stringify(pals);
+  const kAll = pals.length ? (await db.prepare('SELECT * FROM korber WHERE pallet IN (SELECT value FROM json_each(?))').bind(J).all<Row>()).results : [];
+  const byPal = new Map<string, Row[]>();
+  for (const k of kAll) { const p = String(k.pallet); const a = byPal.get(p); if (a) a.push(k); else byPal.set(p, [k]); }
+  const [zr, zc, pp] = pals.length ? await db.batch([
+    db.prepare('SELECT * FROM zroll WHERE barcode IN (SELECT value FROM json_each(?))').bind(J),
+    db.prepare('SELECT DISTINCT barcode FROM zcoment WHERE barcode IN (SELECT value FROM json_each(?))').bind(J),
+    db.prepare(`SELECT p.pallet _pal, p.day, p.by_user, p.qty, p.roll_qty, p.week, p.so, p.li, p.at, p.req_id, r.pick_no FROM picks p LEFT JOIN pick_req r ON r.id = p.req_id
+      WHERE p.pallet IN (SELECT value FROM json_each(?)) AND p.cancelled_at IS NULL ORDER BY p.id`).bind(J),
+  ]) : [{ results: [] }, { results: [] }, { results: [] }];
+  const zrBy = new Map<string, Row[]>();
+  for (const z of zr.results as Row[]) { const b = String(z.barcode); const a = zrBy.get(b); if (a) a.push(z); else zrBy.set(b, [z]); }
+  const zcHas = new Set((zc.results as Row[]).map((z) => String(z.barcode)));
+  const ppBy = new Map<string, Row[]>();
+  for (const x of pp.results as Row[]) { const p = String(x._pal); const { _pal, ...rest } = x; void _pal; const a = ppBy.get(p); if (a) a.push(rest); else ppBy.set(p, [rest]); }
+  const ok = <T>(v: T) => ({ hit: true as const, v });
+  const MISS = { hit: false as const, v: undefined };
+  /** an answer from the rows read up front, when it is certain */
+  const known = (sql: string, args: unknown[], mode: 'first' | 'all'): { hit: boolean; v: unknown } => {
+    const a0 = String(args[0] ?? '');
+    if (sql === Q_KP && mode === 'first' && args.length === 1 && U.has(a0)) { const r = byPal.get(a0) ?? []; return r.length <= 1 ? ok(r[0] ?? null) : MISS; }
+    if (sql === Q_KF && mode === 'first' && args.length === 1 && U.has(a0)) { const r = byPal.get(a0) ?? []; if (r.length > 1) return MISS; const k = r[0]; return ok(k && ['0', ''].includes(String(k.pick_id ?? '0')) ? { pallet: k.pallet, qty: k.qty } : null); }
+    if (sql === Q_KC && mode === 'first' && args.length === 2 && String(args[1]) === material) { const m = kAll.filter((k) => String(k.pcore ?? '') === a0 && String(k.item ?? '') === material); return m.length <= 1 ? ok(m[0] ?? null) : MISS; }
+    if (sql === Q_ZR && mode === 'all' && args.length === 1) {
+      let ids: unknown; try { ids = JSON.parse(a0); } catch { return MISS; }
+      if (!Array.isArray(ids) || ids.length !== 1 || !U.has(String(ids[0]))) return MISS;
+      const r = zrBy.get(String(ids[0])) ?? [];
+      return r.length <= 1 ? ok({ results: r.map((z) => ({ barcode: z.barcode, bin: z.bin, batch: z.batch, status: z.status, material: z.material, qty: z.qty })), success: true, meta: {} }) : MISS;
+    }
+    if (sql === Q_ZC && mode === 'first' && args.length === 1) {
+      let ids: unknown; try { ids = JSON.parse(a0); } catch { return MISS; }
+      if (!Array.isArray(ids) || !ids.length || !ids.every((x) => U.has(String(x)))) return MISS;
+      return ok(ids.some((x) => zcHas.has(String(x))) ? { 1: 1 } : null);
+    }
+    if (sql === Q_PP && mode === 'all' && args.length === 1 && U.has(a0)) return ok({ results: ppBy.get(a0) ?? [], success: true, meta: {} });
+    return MISS;
+  };
+  const memo = new Map<string, Promise<unknown>>();
+  const copy = <T>(v: T): T => (v == null ? v : structuredClone(v));
+  const wrapStmt = (sql: string, stm: D1PreparedStatement, args: unknown[]): D1PreparedStatement => new Proxy(stm, { get(t, k) {
+    if (k === 'bind') return (...a: unknown[]) => wrapStmt(sql, t.bind(...a), a);
+    if ((k === 'first' || k === 'all') && /^\s*(SELECT|WITH)\b/i.test(sql)) {
+      return (col?: string) => {
+        if (col !== undefined) return (t as unknown as { first: (c: string) => Promise<unknown> }).first(col);
+        const kn = known(norm(sql), args, k);
+        if (kn.hit) return Promise.resolve(copy(kn.v));
+        const key = `${k}\u0001${sql}\u0001${JSON.stringify(args)}`;
+        let p = memo.get(key);
+        if (!p) { p = (k === 'first' ? t.first() : t.all()); memo.set(key, p); p.catch(() => memo.delete(key)); }
+        return p.then(copy);
+      };
+    }
+    const v = Reflect.get(t, k);
+    return typeof v === 'function' ? v.bind(t) : v;
+  } });
+  const DB = new Proxy(db, { get(t, k) {
+    if (k === 'prepare') return (sql: string) => wrapStmt(sql, t.prepare(sql), []);
+    const v = Reflect.get(t, k);
+    return typeof v === 'function' ? v.bind(t) : v;
+  } });
+  return { ...env, DB } as Env;
+}
+
 async function palletPicks(env: Env, pallet: unknown) {
   const ph = (await env.DB.prepare(`SELECT p.day, p.by_user, p.qty, p.roll_qty, p.week, p.so, p.li, p.at, p.req_id, r.pick_no FROM picks p LEFT JOIN pick_req r ON r.id = p.req_id
     WHERE p.pallet = ? AND p.cancelled_at IS NULL ORDER BY p.id`).bind(String(pallet ?? '')).all<Row>()).results;
