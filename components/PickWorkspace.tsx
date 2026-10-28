@@ -1578,7 +1578,7 @@ interface FoundPick { id: number; day: string; plan: string; so: string; li: str
  * differ). The suggested QTYs fill the balance (the roll's own batch first); each saved one is a pick of that SO line, so it
  * is on the Packing List with that SO line's SAP details.
  */
-interface TallyTarget { key: string; so: string; li: string; item: string; plant: string | null; batch: string; sloc: string; sameBatch: boolean; ur: number; ur_free: number; lot_room: number; can: number; take: number; lots: { lot: string; batch: string; vendor_batch: string; qty: number }[] }
+interface TallyTarget { key: string; so: string; li: string; item: string; same?: boolean; plant: string | null; batch: string; sloc: string; sameBatch: boolean; ur: number; ur_free: number; lot_room: number; can: number; take: number; lots: { lot: string; batch: string; vendor_batch: string; qty: number }[] }
 interface TallyRoll { pallet: string; from: number; so: string; li: string; item: string; so_plant?: string | null; roll_qty: number; balance: number; lot: string | null; location: string | null; targets: TallyTarget[] }
 function TallyDialog({ ids, toast, onClose }: { ids: number[]; toast: (m: string) => void; onClose: (changed: boolean) => void }) {
   const [rolls, setRolls] = useState<TallyRoll[] | null>(null);
@@ -1615,7 +1615,7 @@ function TallyDialog({ ids, toast, onClose }: { ids: number[]; toast: (m: string
       <div className="modal xwide" role="dialog" aria-modal="true" aria-labelledby="tally-title">
         <div className="modal-head">
           <div><h2 id="tally-title">Tally cut roll balances</h2>
-            <p className="sub" style={{ margin: 0 }}>A cut roll&apos;s balance goes to another SO line of the <b>same SO Plant</b>: same <b>Material</b> and <b>LI</b> number, UR in <b>ZMMBE</b>, and a <b>ZINSR</b> lot whose <b>Vendor Batch</b> is the roll&apos;s Korber Lot Number (always the same — never another Vendor Batch). Only the SAP batch may differ. Each one is saved as a pick of that SO line and goes on the Packing List with its SAP details.</p></div>
+            <p className="sub" style={{ margin: 0 }}>A cut roll&apos;s balance goes first to the <b>SO line it was cut for</b> when that line still has UR (the whole roll for that SO), else to another SO line of the <b>same SO Plant</b>: same <b>Material</b> and <b>LI</b> number, UR in <b>ZMMBE</b>, and a <b>ZINSR</b> lot whose <b>Vendor Batch</b> is the roll&apos;s Korber Lot Number (always the same — never another Vendor Batch). Only the SAP batch may differ. Each one is saved as a pick of that SO line and goes on the Packing List with its SAP details.</p></div>
           <button className="btn sm" aria-label="Close" onClick={() => onClose(saved > 0)}>✕</button>
         </div>
         {!rolls && !err && <Loader label="Finding the cut rolls and the SO lines they can go to…" />}
@@ -1630,7 +1630,7 @@ function TallyDialog({ ids, toast, onClose }: { ids: number[]; toast: (m: string
                     <td rowSpan={Math.max(1, x.targets.length)}>{x.so} / {x.li}<div className="muted small">{x.item}{x.so_plant ? ` · SO Plant ${x.so_plant}` : ''}</div></td>
                     <td rowSpan={Math.max(1, x.targets.length)} className="n"><b>{fmtQty(x.balance)}</b><div className="muted small">of {fmtQty(x.roll_qty)}</div></td></>}
                   {t ? <>
-                    <td><b>{t.so} / {t.li}</b>{t.plant ? <span className="muted small"> · {t.plant}</span> : null}</td>
+                    <td><b>{t.so} / {t.li}</b>{t.plant ? <span className="muted small"> · {t.plant}</span> : null}{t.same && <span className="pill ok" style={{ marginLeft: 4 }} title="The SO line the roll was cut for: its own UR takes the balance first">same SO line</span>}</td>
                     <td>{t.batch} · {t.sloc}{!t.sameBatch && <span className="pill warn" style={{ marginLeft: 4 }} title="Only the SAP batch (ZMMBE) differs from the ZINSR lot's batch — the Vendor Batch is the same as the roll's Korber Lot Number">other SAP batch</span>}</td>
                     <td className="small">{t.lots.map((l) => `${l.lot} (${l.vendor_batch})`).join(', ')}</td>
                     <td className="n">{fmtQty(t.ur_free)}</td><td className="n">{fmtQty(t.lot_room)}</td>

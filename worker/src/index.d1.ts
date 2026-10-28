@@ -2219,22 +2219,31 @@ async function handlePick(env: Env, req: Request, p: string) {
       const k = await kenv.DB.prepare('SELECT * FROM korber WHERE pallet = ?').bind(up(pallet)).first<Row>();
       const pp = await palletPicks(env, pallet);
       // what the roll really has: the Korber QTY, at most its ZROLLMGT Available
-      const zr = await kenv.DB.prepare('SELECT qty, batch FROM zroll WHERE barcode = ?').bind(up(pallet)).first<Row>();
+      const zr = await kenv.DB.prepare('SELECT qty, batch, rid FROM zroll WHERE barcode = ?').bind(up(pallet)).first<Row>();
       const base0 = pp.base ?? Number(k?.qty ?? 0);
-      const base = zr && Number.isFinite(Number(zr.qty)) && zr.qty !== null ? Math.min(base0, Number(zr.qty)) : base0;
-      const balance = Math.max(0, r3(base - pp.before));
+      let balance = Math.max(0, r3(base0 - pp.before));
+      // ZROLLMGT Available is as of its upload: only what was picked from the roll after that upload comes off it
+      if (zr && zr.qty !== null && Number.isFinite(Number(zr.qty))) {
+        const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zroll' AND rid = ?").bind(String(zr.rid ?? '')).first<{ at: string | null }>())?.at ?? '';
+        const afterZ = Number((await env.DB.prepare('SELECT COALESCE(SUM(qty), 0) q FROM picks WHERE upper(pallet) = ? AND cancelled_at IS NULL AND at > ?').bind(up(pallet), zAt).first<{ q: number }>())?.q ?? 0);
+        balance = Math.max(0, Math.min(balance, r3(Number(zr.qty) - afterZ)));
+      }
+      const base = base0;
       const vb = up(k?.lot);
       const targets: Row[] = [];
       const srcPlants = new Set((await kenv.DB.prepare("SELECT DISTINCT COALESCE(NULLIF(trim(so_plant), ''), plant) p FROM stock WHERE src = 'zmmbe' AND so = ? AND li = ? AND material = ?").bind(normId(src.so), normId(src.li), normId(src.item)).all<Row>()).results
         .map((x) => up(String(x.p ?? '').replace(/\s+/g, ''))).filter(Boolean));
       if (!srcPlants.size && src.plant) srcPlants.add(up(String(src.plant).replace(/\s+/g, '')));
       if (k && vb && balance > 1e-9 && srcPlants.size) {
-        // ZMMBE: same Material and LI number, another SO, UR in the warehouse (not the plant storage locations)
-        const st = (await kenv.DB.prepare("SELECT key, so, li, material, batch, sloc, so_plant, ur, total, qi, block, assigned, plant FROM stock WHERE src = 'zmmbe' AND material = ? AND li = ? AND so <> ? AND ur > 0")
-          .bind(normId(src.item), normId(src.li), normId(src.so)).all<Row>()).results.filter((x) => !plantLocs.has(up(normId(x.sloc))))
+        // ZMMBE: same Material and LI number, UR in the warehouse (not the plant storage locations) — the cut roll's own SO
+        // line first (its UR left after the cut takes the balance), then another SO
+        const st = (await kenv.DB.prepare("SELECT key, so, li, material, batch, sloc, so_plant, ur, total, qi, block, assigned, plant FROM stock WHERE src = 'zmmbe' AND material = ? AND li = ? AND ur > 0")
+          .bind(normId(src.item), normId(src.li)).all<Row>()).results.filter((x) => !plantLocs.has(up(normId(x.sloc))))
           // only an SO of the same SO Plant as the cut roll's SO line (ZMMBE SO Plant; else the Pick's plant)
           .filter((x) => srcPlants.has(up(String((String(x.so_plant ?? '').trim() || x.plant) ?? '').replace(/\s+/g, ''))));
         const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(lrid).first<{ at: string | null }>())?.at ?? '';
+        // the SO lines the roll was cut for (in the plan): their own UR takes the balance first
+        const ownLines = new Set([`${normId(src.so)}|${normId(src.li)}`, ...pp.picks.map((x) => `${normId(x.so)}|${normId(x.li)}`)]);
         for (const key of Array.from(new Set(st.map((x) => String(x.key))))) {
           const rows = st.filter((x) => String(x.key) === key);
           const [so, li, item] = key.split('|');
@@ -2268,12 +2277,12 @@ async function handlePick(env: Env, req: Request, p: string) {
           const can = r3(Math.min(urFree, lotRoom));
           if (!(can > 1e-9)) continue;
           const bRow = pickB.row;
-          targets.push({ key, so, li, item, plant: bRow.so_plant ?? bRow.plant ?? null, batch: bRow.batch, sloc: bRow.sloc, sameBatch: lotB.has(normId(bRow.batch)), ur: r3(rows.reduce((t, x) => t + Number(x.ur || 0), 0)), ur_free: urFree, lot_room: lotRoom, can,
+          targets.push({ key, so, li, item, same: ownLines.has(`${normId(so)}|${normId(li)}`), plant: bRow.so_plant ?? bRow.plant ?? null, batch: bRow.batch, sloc: bRow.sloc, sameBatch: lotB.has(normId(bRow.batch)), ur: r3(rows.reduce((t, x) => t + Number(x.ur || 0), 0)), ur_free: urFree, lot_room: lotRoom, can,
             lots: lots.map((l) => ({ lot: String(l.lot), batch: l.batch, vendor_batch: l.vendor_batch, qty: Number(l.qty) })), zmmbe: rows });
         }
         // a suggested split of the balance: the roll's own batch first, then the most room
         const rollBatch = normId(String(zr?.batch ?? String(src.batch ?? '').split(',')[0]));
-        targets.sort((a, b) => Number(normId(b.batch) === rollBatch) - Number(normId(a.batch) === rollBatch) || Number(b.can) - Number(a.can));
+        targets.sort((a, b) => Number(!!b.same) - Number(!!a.same) || Number(normId(b.batch) === rollBatch) - Number(normId(a.batch) === rollBatch) || Number(b.can) - Number(a.can));
         let left = balance;
         // (what the rolls before this one were given counts: the UR of the SO line and the room of its lots are shared)
         for (const t of targets) {
@@ -2331,7 +2340,7 @@ async function handlePick(env: Env, req: Request, p: string) {
       const lot0 = (t.lots as Row[])[0];
       const match = JSON.stringify({ zmmbe: (t.zmmbe as Row[]).map((z) => ({ batch: z.batch, sloc: z.sloc, ur: z.ur, plant: z.plant, so_plant: z.so_plant })), zinr: t.lots, lots: t.lots, alloc: [{ pallet: up(b.pallet), batch: t.batch, qty }], tally: { from: src.id, pallet: up(b.pallet), so: src.so, li: src.li } });
       const shade = await zcomentShade(info.kenv, { pallet: info.k.pallet, item: info.k.item, lot: info.k.lot, supplier_hu: info.k.supplier_hu }, (t.lots as Row[]).map((l) => String(l.lot)));
-      const note = `Cut roll balance tallied — roll ${up(b.pallet)} cut for ${src.so} / ${src.li}; ${qty} to ${normId(b.so)} / ${normId(b.li)} (ZINSR lot ${(t.lots as Row[]).map((l) => l.lot).join(', ')}, Vendor Batch ${info.vb}) by ${s.u}`;
+      const note = `Cut roll balance tallied — roll ${up(b.pallet)} cut for ${src.so} / ${src.li}; ${qty} to ${t.same ? 'the same SO line ' : ''}${normId(b.so)} / ${normId(b.li)} (ZINSR lot ${(t.lots as Row[]).map((l) => l.lot).join(', ')}, Vendor Batch ${info.vb}) by ${s.u}`;
       const pick = { day, week: src.week, line: lineId, so: normId(b.so), li: normId(b.li), item: normId(b.item), pallet: up(b.pallet), qty, roll_qty: info.base, partial: 1, shade, lot: info.k.lot, insp_lot: (t.lots as Row[]).map((l) => l.lot).join(','), batch: t.batch, note, by_user: s.u, at, korber: info.k.raw ?? null };
       let reqId = 0;
       for (let attempt = 0; ; attempt++) {
@@ -3178,7 +3187,9 @@ async function fastEnv(env: Env, material: string): Promise<Env> {
     db.prepare('SELECT DISTINCT pallet b FROM korber WHERE item = ?').bind(material),
     db.prepare('SELECT DISTINCT barcode b FROM zcoment WHERE lot IN (SELECT lot FROM zinr WHERE material = ?) AND barcode IS NOT NULL').bind(material),
   ]) : [{ results: [] }, { results: [] }];
-  const U = new Set([...(u1.results as Row[]), ...(u2.results as Row[])].map((x) => String(x.b ?? '')).filter(Boolean));
+  const U0 = new Set([...(u1.results as Row[]), ...(u2.results as Row[])].map((x) => String(x.b ?? '')).filter(Boolean));
+  // a very large Material: no read-ahead (every read goes to the database, as before)
+  const U = U0.size > 4000 ? new Set<string>() : U0;
   const pals = Array.from(U);
   const J = JSON.stringify(pals);
   const kAll = pals.length ? (await db.prepare('SELECT * FROM korber WHERE pallet IN (SELECT value FROM json_each(?))').bind(J).all<Row>()).results : [];
@@ -3202,7 +3213,7 @@ async function fastEnv(env: Env, material: string): Promise<Env> {
     const a0 = String(args[0] ?? '');
     if (sql === Q_KP && mode === 'first' && args.length === 1 && U.has(a0)) { const r = byPal.get(a0) ?? []; return r.length <= 1 ? ok(r[0] ?? null) : MISS; }
     if (sql === Q_KF && mode === 'first' && args.length === 1 && U.has(a0)) { const r = byPal.get(a0) ?? []; if (r.length > 1) return MISS; const k = r[0]; return ok(k && ['0', ''].includes(String(k.pick_id ?? '0')) ? { pallet: k.pallet, qty: k.qty } : null); }
-    if (sql === Q_KC && mode === 'first' && args.length === 2 && String(args[1]) === material) { const m = kAll.filter((k) => String(k.pcore ?? '') === a0 && String(k.item ?? '') === material); return m.length <= 1 ? ok(m[0] ?? null) : MISS; }
+    if (sql === Q_KC && mode === 'first' && args.length === 2 && U.size > 0 && String(args[1]) === material) { const m = kAll.filter((k) => String(k.pcore ?? '') === a0 && String(k.item ?? '') === material); return m.length <= 1 ? ok(m[0] ?? null) : MISS; }
     if (sql === Q_ZR && mode === 'all' && args.length === 1) {
       let ids: unknown; try { ids = JSON.parse(a0); } catch { return MISS; }
       if (!Array.isArray(ids) || ids.length !== 1 || !U.has(String(ids[0]))) return MISS;
