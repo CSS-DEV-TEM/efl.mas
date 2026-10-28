@@ -812,6 +812,13 @@ async function handleUpload(env: Env, req: Request) {
       }
       notInSetup = Array.from(miss.values()).sort((a, b) => b.ur - a.ur);
       setupOut = mapped.length - keep.length;
+      // kept so Settings → ZMMBE plants can offer them (they are not in the stock table)
+      try {
+        const old = JSON.parse(String((await env.DB.prepare("SELECT v FROM config WHERE k = 'zmmbe_left_out'").first<{ v: string }>())?.v ?? '[]')) as { plant: string; soPlant: string; rows: number; ur: number; at: string }[];
+        const at = now();
+        const merged = [...notInSetup.map((m) => ({ ...m, at })), ...old.filter((o) => !notInSetup.some((m) => m.plant === o.plant && m.soPlant === o.soPlant))].slice(0, 100);
+        await env.DB.prepare("INSERT INTO config (k, v) VALUES ('zmmbe_left_out', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(JSON.stringify(merged)).run();
+      } catch { /* only a hint */ }
       mapped = keep;
       if (!mapped.length) throw new HttpError(400, `No row of this ZMMBE is a Plant + SO Plant set up in Settings → ZMMBE plants (${notInSetup.map((m) => `${m.plant} + ${m.soPlant || '–'}`).join(', ')}). Add them there first.`);
     }
@@ -4432,7 +4439,12 @@ export default {
       }
       else if (p === '/api/zmmbe-pairs' && req.method === 'GET') {
         await requireUser(env, req, 'admin');
-        res = json({ pairs: (await env.DB.prepare("SELECT upper(COALESCE(plant, '')) plant, upper(COALESCE(so_plant, '')) soPlant, COUNT(*) n, ROUND(SUM(ur), 3) ur FROM stock WHERE src = 'zmmbe' GROUP BY 1, 2 ORDER BY ur DESC").all()).results });
+        const inStock = (await env.DB.prepare("SELECT upper(COALESCE(plant, '')) plant, upper(COALESCE(so_plant, '')) soPlant, COUNT(*) n, ROUND(SUM(ur), 3) ur FROM stock WHERE src = 'zmmbe' GROUP BY 1, 2 ORDER BY ur DESC").all<Row>()).results;
+        // + the pairs left out at the last ZMMBE uploads (not set up here, so not in the stock)
+        let out: { plant: string; soPlant: string; rows: number; ur: number }[] = [];
+        try { out = JSON.parse(String((await env.DB.prepare("SELECT v FROM config WHERE k = 'zmmbe_left_out'").first<{ v: string }>())?.v ?? '[]')); } catch { /* none */ }
+        const extra = out.filter((o) => !inStock.some((x) => x.plant === o.plant && x.soPlant === o.soPlant)).map((o) => ({ plant: o.plant, soPlant: o.soPlant, n: o.rows, ur: o.ur, leftOut: true }));
+        res = json({ pairs: [...inStock, ...extra] });
       }
       else if (p === '/api/days') res = await handleDays(env, req);
       else if (p === '/api/backup' || p.startsWith('/api/backup/') || p.startsWith('/api/restore/')) res = await handleBackup(env, req, p);

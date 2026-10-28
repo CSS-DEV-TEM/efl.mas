@@ -335,65 +335,114 @@ function planPeriod(p: { week: string; day?: string | null }) {
 }
 
 /**
- * Settings → ZMMBE plants: the Plant + SO Plant pairs of ZMMBE that count, each linked to a plant (Settings → Plants).
- * Only rows of these pairs go into UR; the others are left out and listed at the upload. No pairs: every row counts.
+ * Settings → ZMMBE plants: for each plant (Settings → Plants), its ZMMBE Plants and, for each, the SO Plants that count —
+ * as many SO Plants as needed. Saved as Plant + SO Plant pairs (the same rule as before): only rows of these pairs go into UR;
+ * the others are left out and listed at the upload. No pairs: every row counts.
  */
+interface PlantGroup { link: string; plant: string; sos: string[]; add: string }
 function ZmmbePlants({ toast }: { toast: (m: string) => void }) {
-  const [rows, setRows] = useState<PlantPair[] | null>(null);
+  const [groups, setGroups] = useState<PlantGroup[] | null>(null);
   const [plants, setPlants] = useState<PlantInfo[]>([]);
-  const [seen, setSeen] = useState<{ plant: string; soPlant: string; n: number; ur: number }[]>([]);
+  const [seen, setSeen] = useState<{ plant: string; soPlant: string; n: number; ur: number; leftOut?: boolean }[]>([]);
   const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
+  const toGroups = (pairs: PlantPair[]) => {
+    const out: PlantGroup[] = [];
+    for (const x of pairs) {
+      const g = out.find((o) => o.link === (x.link || '') && o.plant === x.plant);
+      if (g) { if (!g.sos.includes(x.soPlant || '*')) g.sos.push(x.soPlant || '*'); } else out.push({ link: x.link || '', plant: x.plant, sos: [x.soPlant || '*'], add: '' });
+    }
+    return out;
+  };
   useEffect(() => {
-    api<{ settings: SystemSettings }>('/api/settings').then((r) => setRows(r.settings.zmmbePlants || [])).catch((e) => setErr(e instanceof Error ? e.message : 'Could not load.'));
+    api<{ settings: SystemSettings }>('/api/settings').then((r) => setGroups(toGroups(r.settings.zmmbePlants || []))).catch((e) => setErr(e instanceof Error ? e.message : 'Could not load.'));
     api<{ plants: PlantInfo[] }>('/api/plants').then((r) => setPlants(r.plants)).catch(() => {});
-    api<{ pairs: { plant: string; soPlant: string; n: number; ur: number }[] }>('/api/zmmbe-pairs').then((r) => setSeen(r.pairs)).catch(() => {});
+    api<{ pairs: { plant: string; soPlant: string; n: number; ur: number; leftOut?: boolean }[] }>('/api/zmmbe-pairs').then((r) => setSeen(r.pairs)).catch(() => {});
   }, []);
-  const set = (i: number, k: keyof PlantPair, v: string) => setRows((l) => (l || []).map((x, j) => (j === i ? { ...x, [k]: v.toUpperCase() } : x)));
+  const upd = (i: number, f: (g: PlantGroup) => PlantGroup) => setGroups((l) => (l || []).map((x, j) => (j === i ? f(x) : x)));
+  // "C068, C050 C070" → C068 / C050 / C070 (comma, space or new line between them)
+  const codes = (t: string) => t.toUpperCase().split(/[\s,;]+/).map((x) => x.trim()).filter(Boolean);
+  const addSo = (i: number) => upd(i, (g) => ({ ...g, sos: Array.from(new Set([...g.sos, ...codes(g.add)])), add: '' }));
+  const pairs = (gs: PlantGroup[]) => {
+    const out: PlantPair[] = [];
+    for (const g of gs) {
+      const plant = g.plant.trim().toUpperCase(); if (!plant) continue;
+      const sos = Array.from(new Set([...g.sos, ...codes(g.add)]));
+      for (const so of sos.length ? sos : ['*']) if (!out.some((o) => o.plant === plant && o.soPlant === so)) out.push({ plant, soPlant: so, link: g.link });
+    }
+    return out;
+  };
   // covered: the exact pair, or that Plant with SO Plant * (any)
-  const has = (p: string, sp: string) => (rows || []).some((x) => x.plant === p && (x.soPlant === (sp || '*') || x.soPlant === '*'));
+  const has = (p: string, sp: string) => pairs(groups || []).some((x) => x.plant === p && (x.soPlant === (sp || '*') || x.soPlant === '*'));
+  const linkName = (c: string) => { const p = plants.find((x) => x.code.toUpperCase() === c); return c ? (p?.name ? `${p.name} (${p.code})` : c) : '— no plant —'; };
   const save = async () => {
     setBusy(true); setErr('');
     try {
-      const clean = (rows || []).filter((x) => x.plant.trim());
+      const clean = pairs(groups || []);
+      // one Plant + SO Plant pair can belong to one plant only
+      const twice = clean.filter((x, i) => clean.findIndex((y) => y.plant === x.plant && y.soPlant === x.soPlant) !== i);
+      if (twice.length) throw new Error(`${twice.map((x) => `${x.plant} + ${x.soPlant}`).join(', ')} is set up twice — keep it under one plant.`);
       const r = await api<{ settings: SystemSettings }>('/api/settings', { method: 'POST', body: { zmmbePlants: clean } });
-      setRows(r.settings.zmmbePlants || []); toast(`ZMMBE plants saved (${(r.settings.zmmbePlants || []).length}) — they apply from the next ZMMBE upload`);
+      setGroups(toGroups(r.settings.zmmbePlants || [])); toast(`ZMMBE plants saved (${(r.settings.zmmbePlants || []).length} Plant + SO Plant) — they apply from the next ZMMBE upload`);
     } catch (e) { setErr(e instanceof Error ? e.message : 'Could not save.'); } finally { setBusy(false); }
   };
-  if (!rows) return <section className="card">{err ? <div className="notice bad">{err}</div> : <Loader />}</section>;
+  if (!groups) return <section className="card">{err ? <div className="notice bad">{err}</div> : <Loader />}</section>;
+  // grouped by the linked plant (Settings → Plants order), then by ZMMBE Plant
+  const order = (c: string) => { const i = plants.findIndex((p) => p.code.toUpperCase() === c); return i < 0 ? 999 : i; };
+  const shown = groups.map((g, i) => ({ g, i })).sort((a, b) => order(a.g.link) - order(b.g.link) || a.g.link.localeCompare(b.g.link) || a.i - b.i);
+  const quickAdd = (x: { plant: string; soPlant: string }) => setGroups((l) => {
+    const gs = [...(l || [])]; const so = x.soPlant || '*';
+    const j = gs.findIndex((g) => g.plant === x.plant);
+    if (j >= 0) { gs[j] = { ...gs[j], sos: Array.from(new Set([...gs[j].sos, so])) }; return gs; }
+    const link = plants.some((p) => p.code.toUpperCase() === (x.soPlant || x.plant)) ? (x.soPlant || x.plant) : '';
+    return [...gs, { link, plant: x.plant, sos: [so], add: '' }];
+  });
   return (
     <section className="card set-card">
       <h2>ZMMBE plants</h2>
-      <p className="sub">The ZMMBE <b>Plant</b> + <b>SO Plant</b> pairs that count, each linked to its plant. Only rows of these pairs go into UR (and KFC / PFC); a pair not set up here is left out and listed when the ZMMBE is uploaded. <b>SO Plant *</b> = any SO Plant of that Plant. With no pair set up, every ZMMBE row counts (as before).</p>
+      <p className="sub">For each plant: the ZMMBE <b>Plant</b>s and, for each, <b>all its SO Plants</b> that count (add as many as needed — type them with a comma, e.g. <span className="mono">C068, C050</span>). Only rows of these Plant + SO Plant go into UR (and KFC / PFC); the others are left out and listed when the ZMMBE is uploaded. <b>*</b> = any SO Plant of that Plant. With nothing set up, every ZMMBE row counts (as before).</p>
       <div className="table-wrap" style={{ maxHeight: 'none' }}>
         <table className="mini" data-nofilter>
-          <thead><tr><th>ZMMBE Plant</th><th>SO Plant</th><th>Linked plant</th><th /></tr></thead>
+          <thead><tr><th>Plant (linked)</th><th>ZMMBE Plant</th><th>SO Plants</th><th /></tr></thead>
           <tbody>
-            {rows.map((r, i) => (
-              <tr key={i}>
-                <td><input className="set-text" style={{ width: 110 }} value={r.plant} onChange={(e) => set(i, 'plant', e.target.value)} placeholder="C065" aria-label="ZMMBE Plant" /></td>
-                <td><input className="set-text" style={{ width: 110 }} value={r.soPlant} onChange={(e) => set(i, 'soPlant', e.target.value)} placeholder="C064 or *" aria-label="SO Plant" /></td>
-                <td><select value={r.link} onChange={(e) => set(i, 'link', e.target.value)} aria-label="Linked plant">
+            {shown.map(({ g, i }, n) => (
+              <tr key={i} style={n > 0 && shown[n - 1].g.link !== g.link ? { borderTop: '2px solid var(--line, #888)' } : undefined}>
+                <td><select value={g.link} onChange={(e) => upd(i, (x) => ({ ...x, link: e.target.value }))} aria-label="Linked plant">
                   <option value="">— none —</option>
                   {plants.map((p) => <option key={p.code} value={p.code.toUpperCase()}>{p.name ? `${p.name} (${p.code})` : p.code}</option>)}
+                  {g.link && !plants.some((p) => p.code.toUpperCase() === g.link) && <option value={g.link}>{g.link}</option>}
                 </select></td>
-                <td><button type="button" className="btn sm" aria-label="Remove" onClick={() => setRows((l) => (l || []).filter((_, j) => j !== i))}>✕</button></td>
+                <td><input className="set-text" style={{ width: 100 }} value={g.plant} onChange={(e) => upd(i, (x) => ({ ...x, plant: e.target.value.toUpperCase() }))} placeholder="C065" aria-label={`ZMMBE Plant of ${linkName(g.link)}`} /></td>
+                <td>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' }}>
+                    {g.sos.map((so) => (
+                      <span key={so} className="pill info" style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>{so === '*' ? '* any' : so}
+                        <button type="button" className="btn sm" style={{ padding: '0 5px', minHeight: 0 }} aria-label={`Remove SO Plant ${so}`} onClick={() => upd(i, (x) => ({ ...x, sos: x.sos.filter((y) => y !== so) }))}>✕</button>
+                      </span>
+                    ))}
+                    <input className="set-text" style={{ width: 150 }} value={g.add} onChange={(e) => upd(i, (x) => ({ ...x, add: e.target.value.toUpperCase() }))}
+                      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addSo(i); } }} placeholder="C068, C050 …" aria-label={`Add SO Plants to ${g.plant || 'this ZMMBE Plant'}`} />
+                    <button type="button" className="btn sm" disabled={!codes(g.add).length} onClick={() => addSo(i)}>+ Add</button>
+                  </div>
+                </td>
+                <td><button type="button" className="btn sm" aria-label="Remove this ZMMBE Plant" onClick={() => setGroups((l) => (l || []).filter((_, j) => j !== i))}>✕</button></td>
               </tr>
             ))}
-            {!rows.length && <tr><td colSpan={4} className="muted">No pair yet — every ZMMBE row counts. Add the pairs below.</td></tr>}
+            {!groups.length && <tr><td colSpan={4} className="muted">Nothing set up yet — every ZMMBE row counts. Add a plant below.</td></tr>}
           </tbody>
         </table>
       </div>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', margin: '10px 0' }}>
-        <button type="button" className="btn sm" onClick={() => setRows((l) => [...(l || []), { plant: '', soPlant: '', link: '' }])}>+ Add pair</button>
+        <button type="button" className="btn sm" onClick={() => setGroups((l) => [...(l || []), { link: plants[0]?.code.toUpperCase() ?? '', plant: '', sos: [], add: '' }])}>+ Add ZMMBE Plant</button>
       </div>
       {seen.length > 0 && (
         <div className="notice" style={{ display: 'grid', gap: 6 }}>
-          <b>Pairs in the ZMMBE uploaded</b>
+          <b>Plant + SO Plant in the ZMMBE uploaded</b>
+          <span className="muted small">Click one to add it (to its ZMMBE Plant&apos;s row, or a new row). “left out” = in the last ZMMBE but not set up here, so its UR did not count — upload the ZMMBE again after saving.</span>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
             {seen.map((x) => (
               <button key={`${x.plant}|${x.soPlant}`} type="button" className={`btn sm ${has(x.plant, x.soPlant) ? '' : 'primary'}`} disabled={has(x.plant, x.soPlant)}
-                title={`${x.n} rows · UR ${x.ur}`} onClick={() => setRows((l) => [...(l || []), { plant: x.plant, soPlant: x.soPlant || '*', link: plants.some((p) => p.code.toUpperCase() === (x.soPlant || x.plant)) ? (x.soPlant || x.plant) : '' }])}>
-                {has(x.plant, x.soPlant) ? '✓ ' : '+ '}{x.plant} + {x.soPlant || '–'} <span className="muted">· {x.n} rows</span>
+                title={`${x.n} rows · UR ${x.ur}${x.leftOut ? ' — left out at the last ZMMBE upload (not set up here)' : ''}`} onClick={() => quickAdd(x)}>
+                {has(x.plant, x.soPlant) ? '✓ ' : '+ '}{x.plant} + {x.soPlant || '–'} <span className="muted">· {x.n} rows{x.leftOut && !has(x.plant, x.soPlant) ? ` · UR ${x.ur} left out` : ''}</span>
               </button>
             ))}
           </div>
