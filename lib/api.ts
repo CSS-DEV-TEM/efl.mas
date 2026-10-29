@@ -5,7 +5,7 @@ export const API_URL = (process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:878
 /** The Worker version this website needs (see API_VERSION in worker/src/index.ts). */
 export const NEEDS_API = 72;
 /** This website's release (shown in the header and footer; the Worker's API version is shown next to it). */
-export const APP_VERSION = 'v122';
+export const APP_VERSION = 'v124';
 
 export type Role = 'admin' | 'head' | 'editor' | 'viewer';
 /** How each role is called on screen (the "editor" role is a planner's user account). */
