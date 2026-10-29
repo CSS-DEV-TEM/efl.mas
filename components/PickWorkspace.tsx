@@ -10,7 +10,7 @@ import { downloadLatest } from '@/lib/files';
 import { smartBest, smartSuggest, type Suggestion } from '@/lib/rollSuggest';
 import {
   PICK_SRCS, type PLIssue, type NotPicked, notPickedWhy, korberWorkbook, ordinal, packingListWorkbook, saveWorkbook, uploadPickFile,
-  pickNote, type Candidate, type Candidates, type KorberRow, type SapFit, type ManualRoll, type NbOption, type NoBarcodeRoll, type PickHistory, type PickSrc,
+  pickNote, parsePackingListFile, type PLPiece, type Candidate, type Candidates, type KorberRow, type SapFit, type ManualRoll, type NbOption, type NoBarcodeRoll, type PickHistory, type PickSrc,
 } from '@/lib/pick';
 
 type LineP = Line & { picked?: number; picked_rolls?: number };
@@ -43,6 +43,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
   const [q, setQ] = useState('');
   const [picking, setPicking] = useState<LineP | null>(null);
   const [histKey, setHistKey] = useState(0);
+  const [importOpen, setImportOpen] = useState(false);
   const inputs = useRef<Record<string, HTMLInputElement | null>>({});
 
   // the reports of the Pick on screen (a day plan round); the whole day / a week: the shared reports
@@ -291,6 +292,8 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
             {repRid && <button className="btn" onClick={() => setShowReport(true)} title="The plan report of this Pick — on screen and as Excel">📋 {report?.name || 'Plan report'}</button>}
             {showReport && repRid && <PlanReport rid={repRid} onClose={() => setShowReport(false)} />}
             {canEdit && <button className="btn primary run-all" disabled={!!run && !run.finished} onClick={runAll} title="Pick every roll where everything matches, line by line">⚡ Pick all matched</button>}
+            {canEdit && <button className="btn" onClick={() => setImportOpen(true)} title="A Packing List file (this system's format) into this Pick: its rolls are saved as picks of the Pick's SO lines">⬆ Import Packing List</button>}
+            {importOpen && <ImportPLDialog week={week} label={label || week} toast={toast} onClose={(changed) => { setImportOpen(false); if (changed) { reload(); setHistKey((k) => k + 1); } }} />}
           </div>
         </div>
         <div className="pick-tabs" role="tablist" aria-label="Plan → Pick views">
@@ -1573,13 +1576,105 @@ function RejectedRolls({ canEdit, toast, onChanged }: { canEdit: boolean; toast:
 
 interface FoundPick { id: number; day: string; plan: string; so: string; li: string; item: string; pallet: string; qty: number; roll_qty: number; partial: number; shade: string | null; lot: string | null; insp_lot: string | null; batch: string | null; note: string | null; by_user: string; at: string; seq: number; pick_no: string | null; kind: string | null }
 /**
+ * A Packing List file back into the system: its rolls (and how much of each, for which SO line and SAP batch) are saved
+ * as picks of this Pick. First a check — each SO line in the Pick's plan? each roll in Korber, already picked? — then Save.
+ * A roll already saved for the same SO line with the same QTY is skipped, so the same file twice adds nothing.
+ */
+interface ImportItem extends PLPiece { skip: string | null; warn: string[] }
+interface ImportLine { key: string; so: string; li: string; item: string; qty: number; rolls: number; ok: boolean; why: string | null; extra?: boolean; planQty: number | null; items: ImportItem[] }
+function ImportPLDialog({ week, label, toast, onClose }: { week: string; label: string; toast: (m: string) => void; onClose: (changed: boolean) => void }) {
+  const [file, setFile] = useState<File | null>(null);
+  const [parsed, setParsed] = useState<{ pieces: PLPiece[]; tables: number; warnings: string[] } | null>(null);
+  const [check, setCheck] = useState<ImportLine[] | null>(null);
+  const [busy, setBusy] = useState(''); const [err, setErr] = useState('');
+  const [open, setOpen] = useState<string | null>(null);
+  const read = async (f: File) => {
+    setFile(f); setParsed(null); setCheck(null); setErr(''); setBusy('Reading the file…');
+    try {
+      const p = parsePackingListFile(await f.arrayBuffer());
+      setParsed(p);
+      if (!p.pieces.length) { setErr('No Packing List table (Pallet … Actual Qty with its SAP lines SO | LI | Qty | Material | Batch) was found in this file.'); return; }
+      setBusy('Checking against the system…');
+      const r = await api<{ lines: ImportLine[] }>('/api/pick/import', { method: 'POST', body: { week, fileName: f.name, dry: true, pieces: p.pieces } });
+      setCheck(r.lines);
+    } catch (e) { setErr(e instanceof Error ? e.message : 'Could not read the file.'); } finally { setBusy(''); }
+  };
+  const toSave = (check || []).filter((l) => l.ok).flatMap((l) => l.items.filter((x) => !x.skip));
+  const save = async () => {
+    if (!parsed || !file) return;
+    setBusy('Saving…'); setErr('');
+    try {
+      const r = await api<{ picks: number; rolls: number }>('/api/pick/import', { method: 'POST', body: { week, fileName: file.name, pieces: parsed.pieces } });
+      toast(`Packing List imported into ${label}: ${r.picks} pick${r.picks === 1 ? '' : 's'}, ${r.rolls} roll${r.rolls === 1 ? '' : 's'}`);
+      onClose(true);
+    } catch (e) { setErr(e instanceof Error ? e.message : 'Could not save.'); setBusy(''); }
+  };
+  const lines = check || [];
+  const bad = lines.filter((l) => !l.ok);
+  const warnN = lines.reduce((t, l) => t + l.items.filter((x) => !x.skip && x.warn.length).length, 0);
+  const skipN = lines.reduce((t, l) => t + l.items.filter((x) => x.skip).length, 0);
+  return (
+    <div className="modal-back">
+      <div className="modal xwide" role="dialog" aria-modal="true" aria-labelledby="imp-title">
+        <div className="modal-head">
+          <div><h2 id="imp-title">Import Packing List → {label}</h2>
+            <p className="sub" style={{ margin: 0 }}>A Packing List in this system&apos;s format (KFC / PFC Packing List sheets: the rolls of each table and its SAP lines <b>SO | LI | Qty | Material | Batch</b>). Each roll is saved as a pick of that SO line in this Pick, with that SAP batch; a cut roll&apos;s pieces come from the <b>Cut Roll Balance</b> sheet when the file has one. Rolls already saved the same way are skipped.</p></div>
+          <button className="btn sm" aria-label="Close" onClick={() => onClose(false)}>✕</button>
+        </div>
+        <label className="btn" style={{ alignSelf: 'flex-start' }}>📂 {file ? file.name : 'Choose the Packing List file (.xlsx)'}
+          <input type="file" accept=".xlsx,.xls" style={{ display: 'none' }} onChange={(e) => { const f = e.target.files?.[0]; if (f) void read(f); e.target.value = ''; }} />
+        </label>
+        {busy && <Loader label={busy} />}
+        {parsed && <p className="muted small">{parsed.tables} table{parsed.tables === 1 ? '' : 's'} · {parsed.pieces.length} roll piece{parsed.pieces.length === 1 ? '' : 's'} · {fmtQty(r3(parsed.pieces.reduce((t, x) => t + x.qty, 0)))}</p>}
+        {parsed?.warnings.length ? <div className="notice warn"><b>In the file:</b> {parsed.warnings.slice(0, 6).join(' · ')}{parsed.warnings.length > 6 ? ` · +${parsed.warnings.length - 6} more` : ''}</div> : null}
+        {check && (
+          <>
+            <div className="chips" style={{ margin: '6px 0' }}>
+              <span className="pill ok">{toSave.length} roll{toSave.length === 1 ? '' : 's'} to save · {fmtQty(r3(toSave.reduce((t, x) => t + x.qty, 0)))}</span>
+              {skipN > 0 && <span className="pill mute">{skipN} already in the system (skipped)</span>}
+              {warnN > 0 && <span className="pill warn">{warnN} with a check</span>}
+              {bad.length > 0 && <span className="pill bad">{bad.length} SO line{bad.length === 1 ? '' : 's'} left out</span>}
+              {lines.some((l) => l.extra) && <span className="pill warn" title="Not in this Pick's plan (e.g. a cut roll balance tallied to another SO) — saved as extra lines">{lines.filter((l) => l.extra).length} SO line{lines.filter((l) => l.extra).length === 1 ? '' : 's'} not in the plan (saved as extra)</span>}
+            </div>
+            <div className="table-wrap" style={{ maxHeight: 460 }}>
+              <table className="mini">
+                <thead><tr><th>SO / LI / Item</th><th className="n">Rolls</th><th className="n">QTY</th><th className="n">Plan QTY</th><th>Check</th></tr></thead>
+                <tbody>{lines.map((l) => {
+                  const sk = l.items.filter((x) => x.skip).length, wn = l.items.filter((x) => !x.skip && x.warn.length);
+                  return [
+                    <tr key={l.key} className={l.ok ? '' : 'gone'} style={{ cursor: 'pointer' }} onClick={() => setOpen(open === l.key ? null : l.key)}>
+                      <td><b>{l.so} / {l.li}</b> · {l.item}</td><td className="n">{l.rolls}</td><td className="n">{fmtQty(l.qty)}</td><td className="n">{l.planQty == null ? '–' : fmtQty(l.planQty)}</td>
+                      <td>{!l.ok ? <span className="pill bad">{l.why}</span> : <>{sk === l.items.length ? <span className="pill mute">all in the system</span> : <span className="pill ok">{l.items.length - sk} to save</span>}{sk > 0 && sk < l.items.length && <span className="pill mute" style={{ marginLeft: 4 }}>{sk} skipped</span>}{wn.length > 0 && <span className="pill warn" style={{ marginLeft: 4 }}>{wn.length} check</span>}{l.extra && <span className="pill warn" style={{ marginLeft: 4 }} title={l.why ?? ''}>not in the plan</span>}</>} <span className="muted small">{open === l.key ? '▾' : '▸'}</span></td>
+                    </tr>,
+                    open === l.key && <tr key={l.key + '#'}><td colSpan={5}>
+                      <table className="mini"><thead><tr><th>Pallet</th><th className="n">QTY</th><th>Batch</th><th>Shade</th><th /></tr></thead>
+                        <tbody>{l.items.map((x, i) => <tr key={i}><td className="mono">{x.pallet}</td><td className="n">{fmtQty(x.qty)}</td><td>{x.batch}</td><td>{x.shade ?? ''}</td>
+                          <td className="small">{x.skip ? <span className="muted">{x.skip}</span> : x.warn.join(' · ')}</td></tr>)}</tbody></table>
+                    </td></tr>,
+                  ];
+                })}</tbody>
+              </table>
+            </div>
+          </>
+        )}
+        {err && <div className="notice bad">{err}</div>}
+        <div className="modal-foot"><span style={{ flex: 1 }} />
+          <button className="btn" onClick={() => onClose(false)}>Close</button>
+          <button className="btn primary" disabled={!!busy || !toSave.length} aria-busy={busy === 'Saving…' || undefined} onClick={save}>{busy === 'Saving…' ? 'Saving…' : `Save ${toSave.length} roll${toSave.length === 1 ? '' : 's'} as picks`}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
  * Cut roll balance tally: each cut roll of the picks on screen, its balance, and the SO lines it can go to — another SO with
  * the same Material and LI number in ZMMBE (UR in the warehouse) whose ZINSR lot has the roll's Vendor Batch (the batch may
  * differ). The suggested QTYs fill the balance (the roll's own batch first); each saved one is a pick of that SO line, so it
  * is on the Packing List with that SO line's SAP details.
  */
 interface TallyTarget { key: string; so: string; li: string; item: string; same?: boolean; plant: string | null; batch: string; sloc: string; sameBatch: boolean; ur: number; ur_free: number; lot_room: number; can: number; take: number; lots: { lot: string; batch: string; vendor_batch: string; qty: number }[] }
-interface TallyRoll { pallet: string; from: number; so: string; li: string; item: string; so_plant?: string | null; roll_qty: number; balance: number; lot: string | null; location: string | null; targets: TallyTarget[] }
+interface TallyRoll { pallet: string; from: number; so: string; li: string; item: string; so_plant?: string | null; plant_missing?: string | null; roll_qty: number; balance: number; lot: string | null; location: string | null; targets: TallyTarget[] }
 function TallyDialog({ ids, toast, onClose }: { ids: number[]; toast: (m: string) => void; onClose: (changed: boolean) => void }) {
   const [rolls, setRolls] = useState<TallyRoll[] | null>(null);
   const [err, setErr] = useState('');
@@ -1615,7 +1710,7 @@ function TallyDialog({ ids, toast, onClose }: { ids: number[]; toast: (m: string
       <div className="modal xwide" role="dialog" aria-modal="true" aria-labelledby="tally-title">
         <div className="modal-head">
           <div><h2 id="tally-title">Tally cut roll balances</h2>
-            <p className="sub" style={{ margin: 0 }}>A cut roll&apos;s balance goes first to the <b>SO line it was cut for</b> when that line still has UR (the whole roll for that SO), else to another SO line of the <b>same SO Plant</b>: same <b>Material</b> and <b>LI</b> number, UR in <b>ZMMBE</b>, and a <b>ZINSR</b> lot whose <b>Vendor Batch</b> is the roll&apos;s Korber Lot Number (always the same — never another Vendor Batch). Only the SAP batch may differ. Each one is saved as a pick of that SO line and goes on the Packing List with its SAP details.</p></div>
+            <p className="sub" style={{ margin: 0 }}>A cut roll&apos;s balance goes first to the <b>SO line it was cut for</b> when that line still has UR (the whole roll for that SO), else to another SO line whose <b>SO Plant</b> is the Pick plant&apos;s code (Settings → Plants &amp; target times): same <b>Material</b> and <b>LI</b> number, UR in <b>ZMMBE</b>, and a <b>ZINSR</b> lot whose <b>Vendor Batch</b> is the roll&apos;s Korber Lot Number (always the same — never another Vendor Batch). Only the SAP batch may differ. Each one is saved as a pick of that SO line and goes on the Packing List with its SAP details.</p></div>
           <button className="btn sm" aria-label="Close" onClick={() => onClose(saved > 0)}>✕</button>
         </div>
         {!rolls && !err && <Loader label="Finding the cut rolls and the SO lines they can go to…" />}
@@ -1636,7 +1731,7 @@ function TallyDialog({ ids, toast, onClose }: { ids: number[]; toast: (m: string
                     <td className="n">{fmtQty(t.ur_free)}</td><td className="n">{fmtQty(t.lot_room)}</td>
                     <td className="n"><input className="as-search" type="number" min="0" step="0.001" max={Math.min(x.balance, t.can)} style={{ width: 100 }} value={qty[`${x.pallet}|${t.key}`] ?? ''} placeholder="0"
                       onChange={(e) => setQty((v) => ({ ...v, [`${x.pallet}|${t.key}`]: e.target.value }))} aria-label={`Tally QTY to ${t.so} / ${t.li}`} /></td>
-                  </> : <td colSpan={6} className="muted">No other SO line can take it (same SO Plant{x.so_plant ? ` ${x.so_plant}` : ''}, same Material and LI, UR in ZMMBE, a ZINSR lot with Vendor Batch {x.lot ?? '–'})</td>}
+                  </> : <td colSpan={6} className="muted">{x.plant_missing ? `The Pick's plant ${x.plant_missing} has no Plant code in Settings → Plants & target times — add it there (the SO Plant a balance goes to)` : `No SO line can take it (SO Plant ${x.so_plant ?? '–'}, same Material and LI, UR in ZMMBE, a ZINSR lot with Vendor Batch ${x.lot ?? '–'})`}</td>}
                 </tr>
               )))}</tbody>
             </table>

@@ -735,3 +735,98 @@ export function pickSrcOf(name: string): PickSrc | null {
   if (/^ZMMTRR|^TRR/.test(n)) return 'ztrr';
   return null;
 }
+
+/**
+ * A Packing List file (this system's format: KFC / PFC Packing List sheets, each table of rolls with its SAP lines
+ * SO | LI | Qty | Material | Batch under it) → the pieces to save: which roll, how much, for which SO line and batch.
+ * A cut roll's exact pieces come from its "Cut Roll Balance" sheet when the file has one; the other rolls of a table fill
+ * its SAP lines in their order (a roll that crosses two SAP lines is split between them).
+ */
+export interface PLPiece { pallet: string; so: string; li: string; item: string; batch: string; qty: number; shade: string | null; insp_lot: string | null; sheet: string }
+export function parsePackingList(wb: XLSX.WorkBook): { pieces: PLPiece[]; tables: number; warnings: string[] } {
+  const U = XLSX.utils;
+  const r3 = (x: number) => Math.round(x * 1000) / 1000;
+  const s = (v: unknown) => String(v ?? '').trim();
+  const n = (v: unknown) => { const x = typeof v === 'number' ? v : Number(String(v ?? '').replace(/,/g, '')); return Number.isFinite(x) ? x : NaN; };
+  const id = (v: unknown) => s(v).replace(/^0+(?=\d)/, '').toUpperCase();
+  const warnings: string[] = [];
+  const pieces: PLPiece[] = [];
+  // exact pieces of cut rolls (Cut Roll Balance sheet)
+  const exact = new Map<string, PLPiece[]>();
+  const crb = wb.SheetNames.find((x) => /cut roll balance/i.test(x));
+  if (crb) {
+    const g = U.sheet_to_json<unknown[]>(wb.Sheets[crb], { header: 1, raw: true, defval: null, blankrows: true });
+    const hi = g.findIndex((r) => s(r[0]).toLowerCase() === 'pallet' && r.some((c) => s(c).toLowerCase() === 'piece'));
+    if (hi >= 0) {
+      const H = g[hi].map((c) => s(c).toLowerCase());
+      const c = (name: string) => H.findIndex((h) => h === name || h.startsWith(name));
+      const [cP, cPiece, cSo, cLi, cMat, cQ, cB, cLot] = [c('pallet'), c('piece'), c('so'), c('li'), c('material'), c('qty'), c('sap batch'), c('zinsr lot')];
+      let cur = '';
+      for (const r of g.slice(hi + 1)) {
+        if (s(r[cP])) cur = s(r[cP]).toUpperCase();
+        const piece = s(r[cPiece]).toLowerCase();
+        if (!cur || !(piece === 'cut for' || piece === 'balance tallied')) continue;
+        const q = n(r[cQ]); if (!(q > 0)) continue;
+        const p: PLPiece = { pallet: cur, so: id(r[cSo]), li: id(r[cLi]), item: id(r[cMat]), batch: id(r[cB]), qty: r3(q), shade: null, insp_lot: s(r[cLot]) || null, sheet: crb };
+        const a = exact.get(cur); if (a) a.push(p); else exact.set(cur, [p]);
+      }
+    }
+  }
+  let tables = 0;
+  // every sheet with Packing List tables (KFC / PFC Packing List, or one sheet per pick: "1st KFC" …)
+  for (const name of wb.SheetNames.filter((x) => !/cut roll|summary|tally|not picked|checks|^plan|korber/i.test(x))) {
+    const g = U.sheet_to_json<unknown[]>(wb.Sheets[name], { header: 1, raw: true, defval: null, blankrows: true });
+    for (let i = 0; i < g.length; i++) {
+      const H = (g[i] || []).map((c) => s(c).toLowerCase());
+      if (H[0] !== 'pallet' || !H.includes('actual qty')) continue;
+      tables++;
+      const cQ = H.indexOf('actual qty'), cSh = H.indexOf('shade');
+      const rolls: { pallet: string; qty: number; shade: string | null }[] = [];
+      let j = i + 1;
+      for (; j < g.length; j++) {
+        const r = g[j] || [];
+        if (!s(r[0])) break;
+        const q = n(r[cQ]);
+        if (q > 0) rolls.push({ pallet: s(r[0]).toUpperCase(), qty: r3(q), shade: cSh >= 0 ? s(r[cSh]) || null : null });
+      }
+      // the SAP lines under the table: SO | LI | Qty | Material | Batch
+      const saps: { so: string; li: string; qty: number; item: string; batch: string; left: number }[] = [];
+      for (; j < g.length; j++) {
+        const r = g[j] || [];
+        const a0 = s(r[0]);
+        if (!a0) { if (saps.length) break; continue; }
+        if (/^check:/i.test(a0)) continue;
+        if (a0.toLowerCase() === 'pallet') break;
+        const q = n(r[2]);
+        if (/^[A-Z]?\d{6,}$/i.test(a0) && Number.isFinite(n(r[1])) && q > 0 && s(r[3])) saps.push({ so: id(r[0]), li: id(r[1]), qty: r3(q), item: id(r[3]), batch: id(r[4]), left: r3(q) });
+        else break;
+      }
+      i = j - 1;
+      if (!saps.length) { warnings.push(`${name}: a table of ${rolls.length} roll(s) has no SAP lines (SO | LI | Qty | Material | Batch) — left out`); continue; }
+      const take = (so: string, li: string, item: string, batch: string, q: number) => { const sp = saps.find((x) => x.so === so && x.li === li && x.item === item && x.batch === batch); if (sp) sp.left = r3(sp.left - q); };
+      const rest: typeof rolls = [];
+      for (const r of rolls) {
+        const ex = exact.get(r.pallet)?.filter((p) => saps.some((x) => x.so === p.so && x.li === p.li && x.item === p.item));
+        if (ex?.length && Math.abs(r3(ex.reduce((t, p) => t + p.qty, 0)) - r.qty) <= 0.0005) {
+          for (const p of ex) { pieces.push({ ...p, shade: r.shade, sheet: name }); take(p.so, p.li, p.item, p.batch, p.qty); }
+        } else rest.push(r);
+      }
+      for (const r of rest) {
+        let q = r.qty;
+        for (const sp of saps) {
+          if (q <= 0.0005) break;
+          if (sp.left <= 0.0005) continue;
+          const t = r3(Math.min(q, sp.left));
+          pieces.push({ pallet: r.pallet, so: sp.so, li: sp.li, item: sp.item, batch: sp.batch, qty: t, shade: r.shade, insp_lot: null, sheet: name });
+          sp.left = r3(sp.left - t); q = r3(q - t);
+        }
+        if (q > 0.0005) warnings.push(`${name}: roll ${r.pallet} — ${q} more than its table's SAP lines (left out)`);
+      }
+      for (const sp of saps) if (sp.left > 0.0005) warnings.push(`${name}: SAP line ${sp.so} / ${sp.li} / ${sp.item} batch ${sp.batch} — ${sp.left} not covered by the table's rolls`);
+    }
+  }
+  return { pieces, tables, warnings };
+}
+
+/** the Packing List file (bytes) → its pieces */
+export function parsePackingListFile(buf: ArrayBuffer) { return parsePackingList(XLSX.read(buf, { type: 'array', cellDates: false, cellFormula: false })); }

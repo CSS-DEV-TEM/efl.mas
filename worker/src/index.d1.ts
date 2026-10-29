@@ -560,7 +560,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 67; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 68; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -2238,16 +2238,19 @@ async function handlePick(env: Env, req: Request, p: string) {
       const base = base0;
       const vb = up(k?.lot);
       const targets: Row[] = [];
-      const srcPlants = new Set((await kenv.DB.prepare("SELECT DISTINCT COALESCE(NULLIF(trim(so_plant), ''), plant) p FROM stock WHERE src = 'zmmbe' AND so = ? AND li = ? AND material = ?").bind(normId(src.so), normId(src.li), normId(src.item)).all<Row>()).results
-        .map((x) => up(String(x.p ?? '').replace(/\s+/g, ''))).filter(Boolean));
-      if (!srcPlants.size && src.plant) srcPlants.add(up(String(src.plant).replace(/\s+/g, '')));
+      // the SO Plant a balance may go to: the Plant code (Settings → Plants & target times) of the Pick's plant — by its
+      // code or its Name; only an SO line with that SO Plant in ZMMBE takes it
+      const sq = (v: unknown) => up(String(v ?? '').replace(/\s+/g, ''));
+      const pickPlant = sq(parseRound(src.week)?.plant ?? src.plant);
+      const pinfo = pickPlant ? (await env.DB.prepare('SELECT code, name FROM plant_info').all<Row>()).results.find((x) => sq(x.code) === pickPlant || sq(x.name) === pickPlant) : undefined;
+      const srcPlants = new Set<string>(pinfo ? [sq(pinfo.code)] : []);
       if (k && vb && balance > 1e-9 && srcPlants.size) {
         // ZMMBE: same Material and LI number, UR in the warehouse (not the plant storage locations) — the cut roll's own SO
         // line first (its UR left after the cut takes the balance), then another SO
         const st = (await kenv.DB.prepare("SELECT key, so, li, material, batch, sloc, so_plant, ur, total, qi, block, assigned, plant FROM stock WHERE src = 'zmmbe' AND material = ? AND li = ? AND ur > 0")
           .bind(normId(src.item), normId(src.li)).all<Row>()).results.filter((x) => !plantLocs.has(up(normId(x.sloc))))
           // only an SO of the same SO Plant as the cut roll's SO line (ZMMBE SO Plant; else the Pick's plant)
-          .filter((x) => srcPlants.has(up(String((String(x.so_plant ?? '').trim() || x.plant) ?? '').replace(/\s+/g, ''))));
+          .filter((x) => srcPlants.has(sq(x.so_plant)));
         const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(lrid).first<{ at: string | null }>())?.at ?? '';
         // the SO lines the roll was cut for (in the plan): their own UR takes the balance first
         const ownLines = new Set([`${normId(src.so)}|${normId(src.li)}`, ...pp.picks.map((x) => `${normId(x.so)}|${normId(x.li)}`)]);
@@ -2299,7 +2302,7 @@ async function handlePick(env: Env, req: Request, p: string) {
           if (take) { used.set(uk, r3((used.get(uk) ?? 0) + take)); used.set(lk, r3((used.get(lk) ?? 0) + take)); }
         }
       }
-      return { k, kenv, lrid, balance, base, vb, targets, plants: Array.from(srcPlants) };
+      return { k, kenv, lrid, balance, base, vb, targets, plants: Array.from(srcPlants), pickPlant, plantSet: !!pinfo };
     };
     if (req.method === 'GET') {
       const ids = (url.searchParams.get('ids') || '').split(',').map((x) => Number(x)).filter((x) => x > 0);
@@ -2317,7 +2320,7 @@ async function handlePick(env: Env, req: Request, p: string) {
           seen.add(pal);
           const info = await rollInfo(pal, { ...r, batch: p.batch }, used);
           if (!(info.balance > 1e-9)) continue;
-          out.push({ pallet: pal, from: r.id, so: r.so, li: r.li, item: r.item, week: r.week, so_plant: info.plants.join(', ') || null, roll_qty: info.base, balance: info.balance, lot: info.k?.lot ?? p.lot, location: info.k?.location ?? null,
+          out.push({ pallet: pal, from: r.id, so: r.so, li: r.li, item: r.item, week: r.week, so_plant: info.plants.join(', ') || null, plant_missing: info.plantSet ? null : (info.pickPlant || '–'), roll_qty: info.base, balance: info.balance, lot: info.k?.lot ?? p.lot, location: info.k?.location ?? null,
             targets: info.targets.map((t) => ({ ...t, zmmbe: undefined })) });
         }
       }
@@ -2334,7 +2337,7 @@ async function handlePick(env: Env, req: Request, p: string) {
       const t = info.targets.find((x) => x.key === key);
       const qty = r3(Number(b.qty) || 0);
       if (!info.k) throw new HttpError(404, `Pallet ${b.pallet} is not in the Korber Inventory of this Pick.`);
-      if (!t) throw new HttpError(409, `${b.so} / ${b.li} cannot take this roll: it needs the same SO Plant (${info.plants.join(', ') || '–'}), UR in ZMMBE (Material ${b.item}, LI ${b.li}) and a ZINSR lot with Vendor Batch ${info.vb}.`);
+      if (!t) throw new HttpError(409, `${b.so} / ${b.li} cannot take this roll: it needs SO Plant ${info.plants.join(', ') || `(no Plant code in Settings → Plants & target times for ${info.pickPlant || 'the Pick'})`}, UR in ZMMBE (Material ${b.item}, LI ${b.li}) and a ZINSR lot with Vendor Batch ${info.vb}.`);
       if (!(qty > 0)) throw new HttpError(400, 'Enter the QTY.');
       if (qty > info.balance + 0.0005) throw new HttpError(409, `Pallet ${b.pallet} has only ${info.balance} left.`);
       if (qty > Number(t.can) + 0.0005) throw new HttpError(409, `${b.so} / ${b.li} can take ${t.can} (UR free ${t.ur_free}, ZINSR lot ${t.lot_room}).`);
@@ -2374,6 +2377,97 @@ async function handlePick(env: Env, req: Request, p: string) {
       return json({ ok: true, id: reqId, qty, so: normId(b.so), li: normId(b.li) });
     }
     throw new HttpError(405, 'Method not allowed.');
+  }
+
+  // ---- a Packing List file back into the system: its rolls become picks of the Pick's plan lines ----
+  // POST /api/pick/import { week, fileName, dry, pieces: [{ pallet, so, li, item, batch, qty, shade?, insp_lot? }] }
+  //   dry: only checks — each SO line (in this Pick's plan?), each roll (in Korber? already picked?) — nothing is saved.
+  //   A roll already picked for the same SO line with the same QTY is skipped (the same file twice adds nothing).
+  if (part === 'import' && req.method === 'POST') {
+    const s = await requireUser(env, req, 'editor');
+    const b = (await req.json()) as { week?: string; fileName?: string; dry?: boolean; pieces?: { pallet?: string; so?: string; li?: string | number; item?: string | number; batch?: string | number; qty?: number; shade?: string; insp_lot?: string }[] };
+    const week = String(b.week || '');
+    if (!week) throw new HttpError(400, 'Choose the Pick to put the Packing List in.');
+    const pieces = (b.pieces || []).map((x) => ({ pallet: up(x.pallet), so: normId(x.so), li: normId(x.li), item: normId(x.item), batch: normId(x.batch), qty: r3(Number(x.qty) || 0), shade: String(x.shade ?? '').trim() || null, insp_lot: String(x.insp_lot ?? '').trim() || null }))
+      .filter((x) => x.pallet && x.so && x.li && x.item && x.qty > 0);
+    if (!pieces.length) throw new HttpError(400, 'No roll with an SO line and a QTY was found in the file.');
+    if (pieces.length > 2000) throw new HttpError(400, 'Too many rolls in one file (2000 at most).');
+    const file = String(b.fileName || 'Packing List').slice(0, 120);
+    const byKey = new Map<string, typeof pieces>();
+    for (const x of pieces) { const k = `${x.so}|${x.li}|${x.item}`; const a = byKey.get(k); if (a) a.push(x); else byKey.set(k, [x]); }
+    const day = colomboDay(), at = now();
+    const lines: Row[] = [];
+    const korberUse = new Map<string, number>();
+    for (const [key, ps] of byKey) {
+      const plan = await env.DB.prepare("SELECT so, li, item, qty, plant, date FROM plan WHERE week = ? AND key = ? ORDER BY COALESCE(date, '') LIMIT 1").bind(week, key).first<Row>();
+      // an SO line that is not in the plan (a cut roll balance tallied to another SO): saved too, as an extra line of the Pick
+      const ln: Row = { key, so: ps[0].so, li: ps[0].li, item: ps[0].item, qty: r3(ps.reduce((t, x) => t + x.qty, 0)), rolls: ps.length, ok: true, why: plan ? null : 'not in this Pick\'s plan — saved as an extra line', extra: !plan, planQty: plan ? Number(plan.qty) : null, date: plan?.date ?? parseRound(week)?.day ?? null, items: [] as Row[] };
+      lines.push(ln);
+      const senv = await envFor(env, weekPlantRid(week, plan?.plant ?? null));
+      const lineId = `${key}|${plan?.date ?? ''}`;
+      for (const x of ps) {
+        const k = await senv.DB.prepare('SELECT * FROM korber WHERE pallet = ?').bind(x.pallet).first<Row>();
+        const dup = await env.DB.prepare('SELECT id FROM picks WHERE pallet = ? AND line = ? AND week = ? AND cancelled_at IS NULL AND abs(qty - ?) < 0.0005 LIMIT 1').bind(x.pallet, lineId, week, x.qty).first<Row>();
+        const pp = await palletPicks(env, x.pallet);
+        const base = pp.base ?? (k ? Number(k.qty) : null);
+        const used = r3(pp.before + (korberUse.get(x.pallet) ?? 0));
+        const warn: string[] = [];
+        if (!k) warn.push('not in this Pick\'s Korber Inventory');
+        else if (String(k.pick_id ?? '0') !== '0' && String(k.pick_id ?? '') !== '') warn.push(`Korber Pick Id ${k.pick_id}`);
+        if (!dup && base !== null && used + x.qty > base + 0.0005) warn.push(`more than the roll: ${r3(used + x.qty)} of ${base} picked`);
+        if (k && normId(k.item) && normId(k.item) !== x.item) warn.push(`Korber item ${normId(k.item)}`);
+        if (!dup) korberUse.set(x.pallet, r3((korberUse.get(x.pallet) ?? 0) + x.qty));
+        (ln.items as Row[]).push({ ...x, skip: dup ? 'already in the system' : null, warn, k, base });
+      }
+    }
+    const out = lines.map((l) => ({ ...l, items: (l.items as Row[]).map(({ k: _k, ...r }) => { void _k; return r; }) }));
+    if (b.dry) return json({ dry: true, lines: out });
+    // save: one pick per SO line (its new rolls), as a hand pick of this Pick
+    let saved = 0, rollsSaved = 0;
+    const seq0 = ((await env.DB.prepare('SELECT MAX(seq) n FROM pick_req WHERE day = ? AND by_user = ?').bind(day, s.u).first<{ n: number | null }>())?.n ?? 0);
+    for (const l of lines) {
+      if (!l.ok) continue;
+      const items = (l.items as Row[]).filter((x) => !x.skip);
+      if (!items.length) continue;
+      const key = String(l.key); const lineId = `${key}|${l.date ?? ''}`;
+      const plan = await env.DB.prepare('SELECT plant FROM plan WHERE week = ? AND key = ? LIMIT 1').bind(week, key).first<Row>();
+      const senv = await envFor(env, weekPlantRid(week, plan?.plant ?? null));
+      const zm = (await senv.DB.prepare("SELECT batch, sloc, ur, plant, so_plant FROM stock WHERE src = 'zmmbe' AND key = ?").bind(key).all<Row>()).results;
+      const rows: Row[] = [];
+      for (const x of items) {
+        const k = x.k as Row | null;
+        let lots = x.insp_lot ? [String(x.insp_lot)] : [];
+        if (!lots.length) {
+          const zl = (await senv.DB.prepare('SELECT lot, vendor_batch FROM zinr WHERE so = ? AND li = ? AND material = ? AND batch = ? ORDER BY lot').bind(x.so, x.li, x.item, x.batch).all<Row>()).results;
+          const same = zl.filter((z) => k && up(z.vendor_batch) === up(k.lot));
+          lots = (same.length ? same : zl).map((z) => String(z.lot));
+        }
+        const shade = x.shade ?? (k ? await zcomentShade(senv, { pallet: k.pallet, item: k.item, lot: k.lot, supplier_hu: k.supplier_hu }, lots) : null);
+        const base = Number(x.base ?? 0) || Number(x.qty);
+        rows.push({ day, week, line: lineId, so: x.so, li: x.li, item: x.item, pallet: x.pallet, qty: x.qty, roll_qty: base, partial: Number(x.qty) < base - 0.0005 ? 1 : 0, shade, lot: k?.lot ?? null, insp_lot: lots.join(',') || null, batch: x.batch || null,
+          note: [`Imported from Packing List ${file} by ${s.u}`, ...((x.warn as string[]).length ? [`Check: ${(x.warn as string[]).join('; ')}`] : [])].join(' · '), by_user: s.u, at, korber: k?.raw ?? null });
+      }
+      const qty = r3(rows.reduce((t, x) => t + Number(x.qty), 0));
+      const match = JSON.stringify({ zmmbe: zm, alloc: rows.map((x) => ({ pallet: x.pallet, batch: x.batch, qty: x.qty })), imported: { file, by: s.u, at } });
+      const note = `Packing List ${file} imported: ${l.so} / ${l.li} / ${l.item} — ${rows.length} roll${rows.length === 1 ? '' : 's'}, ${qty}`;
+      for (let attempt = 0; ; attempt++) {
+        let next = Number((await env.DB.prepare('SELECT COALESCE(MAX(id), 0) + 1 n FROM pick_req').first<{ n: number }>())?.n ?? 1);
+        try { next = Math.max(next, Number((await env.DB.prepare("SELECT seq + 1 n FROM sqlite_sequence WHERE name = 'pick_req'").first<{ n: number }>())?.n ?? 0)); } catch { /* not readable */ }
+        const reqId = next + attempt;
+        try {
+          await env.DB.batch([
+            env.DB.prepare(`INSERT INTO pick_req (id, day, seq, pick_no, week, line, so, li, item, plant, need, qty, rolls, by_user, at, match, kind, closed, short, auto) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+              .bind(reqId, day, seq0 + saved + 1, null, week, lineId, l.so, l.li, l.item, plan?.plant ?? null, qty, qty, rows.length, s.u, at, match, 'normal', 0, 0, 0),
+            ...jsonInsert(env, 'picks', ['req_id', 'day', 'week', 'line', 'so', 'li', 'item', 'pallet', 'qty', 'roll_qty', 'partial', 'shade', 'lot', 'insp_lot', 'batch', 'note', 'by_user', 'at', 'korber'], rows.map((x) => ({ ...x, req_id: reqId })), 100),
+            env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(at, s.u, 'pick', note),
+          ]);
+          break;
+        } catch (e) { if (attempt < 4 && /UNIQUE|PRIMARY KEY|constraint/i.test(String((e as Error)?.message ?? e))) continue; throw e; }
+      }
+      saved++; rollsSaved += rows.length;
+    }
+    if (saved) await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: rollsSaved, weeks: [week] });
+    return json({ ok: true, picks: saved, rolls: rollsSaved, lines: out });
   }
 
   if (part === 'korber' && req.method === 'GET') {
