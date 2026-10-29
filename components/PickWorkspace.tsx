@@ -109,7 +109,8 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
         const wk = (l as LineP & { week?: string }).week || week;
         const c = await api<Candidates>(`/api/pick/candidates?week=${encodeURIComponent(wk)}&key=${encodeURIComponent(l.key)}&date=${encodeURIComponent(l.date ?? '')}`);
         const left = r3(c.need - c.picked);
-        if (left <= 1e-9) return;
+        // nothing left to pick (the UR is used up): kept too, so the State says so
+        if (left <= 1e-9) { out[l.id] = { auto: 0, left: 0, why: '' }; return; }
         const plan = autoPlan(autoRolls(c));
         const auto = r3(Object.values(plan.sel).reduce((t, x) => t + (Number(x.qty) || 0), 0));
         const short = r3(left - auto);
@@ -154,9 +155,12 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
     }
     const sc = scan[l.id];
     if (!sc) return <span className="pill mute" title="Checking the matched Korber rolls">{part}{scanning || runActive ? 'Checking…' : 'To pick'} {fmtQty(t)}</span>;
-    if (sc.auto >= t - 1e-6) return <span className="pill ok" title="The matched rolls cover the QTY — Pick all matched picks them">{part}Auto match {fmtQty(sc.auto)}</span>;
-    if (sc.auto > 1e-9) return <span className="pill accent" title={sc.why}>{part}Auto {fmtQty(sc.auto)} · manual {fmtQty(r3(t - sc.auto))}</span>;
-    return <span className="pill warn" title={sc.why}>{part}Needs manual {fmtQty(t)}</span>;
+    // what is left to pick as the server works it out (the plan balance, at most the UR free) — the same as Pick all matched
+    const lt = r3(Math.min(t, sc.left));
+    if (lt <= 1e-9) return <span className="pill warn" title="No UR left to pick for this line">{part}no UR for the rest</span>;
+    if (!sc.why || sc.auto >= lt - 1e-6) return <span className="pill ok" title="The matched rolls cover the QTY — Pick all matched picks them">{part}Auto match {fmtQty(sc.auto)}</span>;
+    if (sc.auto > 1e-9) return <span className="pill accent" title={sc.why}>{part}Auto {fmtQty(sc.auto)} · manual {fmtQty(r3(lt - sc.auto))}</span>;
+    return <span className="pill warn" title={sc.why}>{part}Needs manual {fmtQty(lt)}</span>;
   };
   /** Korber qty: the rolls this line can take now when checked (matched to it), else the rolls of its lots on the shelf */
   const korberOf = (l: LineP) => {
