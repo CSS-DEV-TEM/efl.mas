@@ -13,7 +13,7 @@ export const PICK_SRCS: { src: PickSrc; title: string; hint: string; needs: stri
   // either layout: the detail export (Inspection lot, Report Name, Roll qty.) or the roll view (Inspection #, Vendor Roll No, Shade, Barcode Number)
   { src: 'zcoment', title: 'ZCOMENT VIEW', hint: 'One row per roll: Inspection # / Inspection lot, Vendor Batch, Vendor Roll No, Shade, Barcode Number (only "Shade Report" rows when there is a Report Name)', needs: ['vendor roll no', 'shade'] },
   { src: 'ztrr', title: 'ZMM_TRR', hint: 'Transfer requests: Transfer Request Number, To Sales Order, Sales Document Item, Material (the plan report’s TRANSFER NOTE)', needs: ['transfer request number', 'to sales order'] },
-  { src: 'zroll', title: 'ZROLLMGT', hint: 'Roll management: Barcode Number and StorageBin (only rolls at EXPO-FIX can be picked)', needs: ['barcode number|barcode|barcode no|barcode no.', 'storagebin|storage bin|bin|bin location'] },
+  { src: 'zroll', title: 'ZROLLMGT', hint: 'Roll management: Barcode Number and StorageBin (the StorageBin rule in Settings → Pick rules decides which rolls can be picked)', needs: ['barcode number|barcode|barcode no|barcode no.', 'storagebin|storage bin|bin|bin location'] },
   { src: 'korber', title: 'Korber Inventory', hint: 'Only rolls of items in the plan are uploaded: Pallet, Item Number, Lot Number, Actual Qty, Supplier Hu', needs: ['pallet', 'item number', 'actual qty'] },
 ];
 

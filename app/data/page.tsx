@@ -57,8 +57,10 @@ function DataPage() {
 
   const s = res?.summary;
   const bin = res?.bin || 'EXPO-FIX';
+  // the bin rule: one bin only (EXPO-FIX), or any bin except some ("any bin except FIXED")
+  const anyBut = /^any bin except /i.test(bin);
   const tabs: [State, string, number | undefined][] = [
-    ['all', 'All', s?.n], ['ok', 'Pickable', s?.ok], ['bin', `Bin not ${bin}`, s ? s.n - s.bin : undefined],
+    ['all', 'All', s?.n], ['ok', 'Pickable', s?.ok], ['bin', anyBut ? `Bin ${bin.replace(/^any bin except /i, '')}` : `Bin not ${bin}`, s ? s.n - s.bin : undefined],
     ...(res?.hasStatus ? [['status', 'Status not UR', s ? s.n - s.st : undefined] as [State, string, number | undefined]] : []),
     ['nozm', 'System Batch not in ZMMBE', s ? s.n - s.zm : undefined],
     ['nozc', 'Not in ZCOMENT VIEW', s ? s.n - s.zc : undefined], ['nokorber', 'Not in Korber', s ? s.n - s.korber : undefined],
@@ -68,7 +70,7 @@ function DataPage() {
       <div className="page-head">
         <div>
           <h1>Data</h1>
-          <p>The Pick&apos;s ZROLLMGT (roll management). A roll is picked only when its <b>Barcode Number</b> is in ZROLLMGT at StorageBin <b>{bin}</b>, is a <b>ZCOMENT VIEW Barcode Number</b> (of the line&apos;s ZMMBE batch) and is the <b>Korber Pallet</b> (Pick Id 0). A roll with no ZCOMENT barcode is matched on Invoice, Item and Lot, and its <b>Korber Pallet</b> must be in ZROLLMGT at {bin}. Every pick, manual roll and replacement is checked against it.</p>
+          <p>The Pick&apos;s ZROLLMGT (roll management). A roll is picked only when its <b>Barcode Number</b> is in ZROLLMGT at {anyBut ? <>a StorageBin other than <b>{bin.replace(/^any bin except /i, '')}</b></> : <>StorageBin <b>{bin}</b></>}, is a <b>ZCOMENT VIEW Barcode Number</b> (of the line&apos;s ZMMBE batch) and is the <b>Korber Pallet</b> (Pick Id 0). A roll with no ZCOMENT barcode is matched on Invoice, Item and Lot, and its <b>Korber Pallet</b> must be in ZROLLMGT at {bin}. Every pick, manual roll and replacement is checked against it.</p>
         </div>
       </div>
 
@@ -93,7 +95,7 @@ function DataPage() {
         {s && s.n > 0 && (
           <div className="pk-stats" style={{ marginTop: 10 }}>
             <div><span>Rolls</span><b>{fmt(s.n)}</b></div>
-            <div className="ok"><span>At {bin}</span><b>{fmt(s.bin)}</b></div>
+            <div className="ok"><span>{anyBut ? 'In a bin to pick from' : `At ${bin}`}</span><b>{fmt(s.bin)}</b></div>
             <div><span>In ZCOMENT VIEW</span><b>{fmt(s.zc)}</b></div>
             <div><span>In Korber</span><b>{fmt(s.korber)}</b></div>
             <div className="em"><span>Pickable</span><b>{fmt(s.ok)}</b><small>{fmt(s.open)} not picked in full</small></div>

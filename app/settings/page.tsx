@@ -11,7 +11,7 @@ export default function Page() {
   return <Shell admin><Settings /></Shell>;
 }
 
-export interface SystemSettings { fullRollPct: number; defaultPickKind: 'normal' | 'offsite'; allowOffsite: boolean; allowNormalShort: boolean; allowNormalFull: boolean; deriveFromZmmbe: boolean; pfcSlocs: string[]; plantSlocs: string[]; soliPerHour: number; lateGraceMin: number; defaultTarget: string; zmmbePlants?: PlantPair[]; rollGate?: boolean; pickBin?: string; zrollNeedsZinsr?: boolean; blockLocs?: BlockLoc[] }
+export interface SystemSettings { pickBinMode?: 'only' | 'except'; pickBinExcept?: string; fullRollPct: number; defaultPickKind: 'normal' | 'offsite'; allowOffsite: boolean; allowNormalShort: boolean; allowNormalFull: boolean; deriveFromZmmbe: boolean; pfcSlocs: string[]; plantSlocs: string[]; soliPerHour: number; lateGraceMin: number; defaultTarget: string; zmmbePlants?: PlantPair[]; rollGate?: boolean; pickBin?: string; zrollNeedsZinsr?: boolean; blockLocs?: BlockLoc[] }
 export interface BlockLoc { wh: string; loc: string; note?: string }
 export interface PlantPair { plant: string; soPlant: string; link: string }
 
@@ -93,10 +93,18 @@ function PickRules({ toast }: { toast: (m: string) => void }) {
           <span><b>ZROLLMGT check</b><small>Pick only rolls whose Barcode Number is in ZROLLMGT at the StorageBin below, is a ZCOMENT VIEW Barcode Number and is the Korber Pallet. Off = the older matching (invoice / lot / supplier HU) is offered too.</small></span>
           <input type="checkbox" checked={s.rollGate !== false} onChange={(e) => set('rollGate', e.target.checked)} />
         </label>
-        <label className="set-row">
-          <span><b>ZROLLMGT StorageBin to pick from</b><small>Rolls in any other bin cannot be picked.</small></span>
-          <input type="text" value={s.pickBin ?? 'EXPO-FIX'} onChange={(e) => set('pickBin', e.target.value.toUpperCase())} style={{ width: 130 }} />
-        </label>
+        <div className="set-row">
+          <span><b>ZROLLMGT StorageBin to pick from</b><small>{(s.pickBinMode ?? 'only') === 'except' ? 'Rolls in any StorageBin can be picked, except the bins listed (comma between them).' : 'Only rolls in this StorageBin can be picked; rolls in any other bin cannot.'}</small></span>
+          <span style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+            <select value={s.pickBinMode ?? 'only'} onChange={(e) => set('pickBinMode', e.target.value as 'only' | 'except')} aria-label="StorageBin rule">
+              <option value="only">Only this bin</option>
+              <option value="except">Any bin except</option>
+            </select>
+            {(s.pickBinMode ?? 'only') === 'except'
+              ? <input type="text" value={s.pickBinExcept ?? 'FIXED'} onChange={(e) => set('pickBinExcept', e.target.value.toUpperCase())} style={{ width: 160 }} placeholder="FIXED" aria-label="Bins not picked from" />
+              : <input type="text" value={s.pickBin ?? 'EXPO-FIX'} onChange={(e) => set('pickBin', e.target.value.toUpperCase())} style={{ width: 130 }} aria-label="StorageBin to pick from" />}
+          </span>
+        </div>
         <label className="set-row">
           <span><b>ZMMBE batch → ZROLLMGT System Batch needs ZINSR</b><small>On: a roll found by its System Batch is picked only when ZINSR has the line&apos;s Sales Order + Line Item + Material + Batch. Off: the System Batch is enough (a batch that other SO lines also have is offered, not selected).</small></span>
           <input type="checkbox" checked={s.zrollNeedsZinsr !== false} onChange={(e) => set('zrollNeedsZinsr', e.target.checked)} />

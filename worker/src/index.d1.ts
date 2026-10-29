@@ -560,7 +560,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 70; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 71; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -975,14 +975,14 @@ interface Settings {
   /** ZMMBE Plant + SO Plant pairs that count (each linked to a plant of Settings → Plants); none = every row counts */
   zmmbePlants: { plant: string; soPlant: string; link: string }[];
   /** ZROLLMGT check: only rolls whose Barcode Number is in ZROLLMGT at this StorageBin, a ZCOMENT VIEW Barcode Number and the Korber Pallet */
-  rollGate: boolean; pickBin: string;
+  rollGate: boolean; pickBin: string; /** only: rolls in pickBin only · except: any bin but those in pickBinExcept */ pickBinMode?: 'only' | 'except'; pickBinExcept?: string;
   /** ZMMBE batch → ZROLLMGT System Batch rolls only when ZINSR has the SO + LI + Material + Batch too */
   zrollNeedsZinsr: boolean;
   /** Korber Wh Id + Location Id no Pick may take a roll from (wh '' = any Wh Id; a location ending in * = every location starting so) */
   blockLocs: { wh: string; loc: string; note?: string }[];
 }
 const DEFAULT_SETTINGS: Settings = { fullRollPct: 10, defaultPickKind: 'normal', allowOffsite: true, allowNormalShort: true, allowNormalFull: true,
-  deriveFromZmmbe: true, pfcSlocs: ['41', 'COMF'], plantSlocs: ['40', '70', '75'], soliPerHour: 12, lateGraceMin: 0, defaultTarget: '', zmmbePlants: [], rollGate: true, pickBin: 'EXPO-FIX', zrollNeedsZinsr: true, blockLocs: [] };
+  deriveFromZmmbe: true, pfcSlocs: ['41', 'COMF'], plantSlocs: ['40', '70', '75'], soliPerHour: 12, lateGraceMin: 0, defaultTarget: '', zmmbePlants: [], rollGate: true, pickBin: 'EXPO-FIX', pickBinMode: 'only', pickBinExcept: 'FIXED', zrollNeedsZinsr: true, blockLocs: [] };
 const slocList = (v: unknown, def: string[]) => Array.isArray(v) || typeof v === 'string'
   ? Array.from(new Set((Array.isArray(v) ? v : String(v).split(/[,\s]+/)).map((x) => normId(String(x).trim()).toUpperCase()).filter(Boolean))).slice(0, 30) : def;
 /** ZMMBE Plant + SO Plant pairs: upper case, no blanks, each pair once ("*" = any SO Plant) */
@@ -1369,14 +1369,17 @@ async function handleZroll(env: Env, req: Request) {
   const rid = scopeRid(sp.get('rid'));
   const senv = await envFor(env, rid);
   const st = await getSettings(env);
-  const bin = up(st.pickBin || 'EXPO-FIX').replace(/\s+/g, '');
+  const rule = binRule(st), bin = rule.label;
+  // ?1: the bin (only one) or the bins that are not picked from (JSON)
+  const binArg = rule.mode === 'only' ? rule.only : JSON.stringify(rule.ex);
+  const binSql = rule.mode === 'only' ? "replace(upper(COALESCE(z.bin, '')), ' ', '') = ?1" : "replace(upper(COALESCE(z.bin, '')), ' ', '') NOT IN (SELECT value FROM json_each(?1))";
   const q = up(sp.get('q')).trim();
   const state = sp.get('state') || 'all';
   const limit = Math.max(1, Math.min(2000, Number(sp.get('limit')) || 500));
   const hasStatus = !!(await senv.DB.prepare("SELECT 1 FROM zroll WHERE COALESCE(status, '') <> '' LIMIT 1").first());
   const K = "(k.pallet = z.barcode OR (z.pcore IS NOT NULL AND k.pcore = z.pcore))";
   const cte = `WITH x AS (SELECT z.barcode, z.bin, z.material, z.batch, z.qty, z.uom, z.sloc, z.plant, z.so, z.li, z.status,
-      replace(upper(COALESCE(z.bin, '')), ' ', '') = ?1 AS bin_at,
+      ${binSql} AS bin_at,
       (?4 = 0 OR replace(replace(upper(COALESCE(z.status, '')), ' ', ''), '-', '') IN ('UR', 'UNRESTRICTED', 'UNRESTRICTEDUSE', 'UNRESTRICTEDSTOCK', 'UNREST')) AS st_ok,
       (SELECT s.so || ' / ' || s.li FROM stock s WHERE s.src = 'zmmbe' AND s.batch = z.batch AND s.ur > 0 LIMIT 1) AS zm_line,
       (SELECT c.lot FROM zcoment c WHERE c.barcode = z.barcode LIMIT 1) AS zc_lot,
@@ -1392,10 +1395,10 @@ async function handleZroll(env: Env, req: Request) {
     y AS (SELECT *, (bin_at AND st_ok) AS bin_ok FROM x)`;
   const sum = await senv.DB.prepare(`${cte} SELECT COUNT(*) n, SUM(bin_at) bin, SUM(st_ok) st, SUM(zm_line IS NOT NULL) zm, SUM(zc_lot IS NOT NULL) zc, SUM(k_qty IS NOT NULL) korber,
       SUM(bin_ok AND k_qty IS NOT NULL AND k_pick = '0' AND NOT rejected) ok,
-      SUM(bin_ok AND k_qty IS NOT NULL AND k_pick = '0' AND NOT rejected AND COALESCE(picked, 0) < k_qty - 0.0005) open FROM y`).bind(bin, q, 0, hasStatus ? 1 : 0).first<Row>();
+      SUM(bin_ok AND k_qty IS NOT NULL AND k_pick = '0' AND NOT rejected AND COALESCE(picked, 0) < k_qty - 0.0005) open FROM y`).bind(binArg, q, 0, hasStatus ? 1 : 0).first<Row>();
   const where = state === 'ok' ? "bin_ok AND k_qty IS NOT NULL AND k_pick = '0' AND NOT rejected" : state === 'bin' ? 'NOT bin_at' : state === 'status' ? 'NOT st_ok'
     : state === 'nozm' ? 'zm_line IS NULL' : state === 'nozc' ? 'zc_lot IS NULL' : state === 'nokorber' ? 'k_qty IS NULL' : '1';
-  const rows = (await senv.DB.prepare(`${cte} SELECT * FROM y WHERE ${where} ORDER BY bin_ok DESC, barcode LIMIT ?3`).bind(bin, q, limit, hasStatus ? 1 : 0).all<Row>()).results;
+  const rows = (await senv.DB.prepare(`${cte} SELECT * FROM y WHERE ${where} ORDER BY bin_ok DESC, barcode LIMIT ?3`).bind(binArg, q, limit, hasStatus ? 1 : 0).all<Row>()).results;
   const upl = await env.DB.prepare("SELECT file_name, row_count, uploaded_by, uploaded_at, rid FROM uploads WHERE src = 'zroll' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC, id DESC LIMIT 1").bind(rid).first<Row>();
   return json({ rid, bin, hasStatus, gate: st.rollGate !== false, upload: upl ?? null, summary: sum, rows });
 }
@@ -3308,7 +3311,7 @@ async function sapFit(env: Env, ctx: Awaited<ReturnType<typeof sapLineCtx>>, pal
   const zcs = (await env.DB.prepare('SELECT barcode, lot, batch, vendor_batch, roll_no, shade FROM zcoment WHERE barcode IN (SELECT value FROM json_each(?))').bind(J).all<Row>()).results;
   const zrs = (await env.DB.prepare('SELECT barcode, batch, bin, status, so, li FROM zroll WHERE barcode IN (SELECT value FROM json_each(?))').bind(J).all<Row>()).results;
   const st = await getSettings(env);
-  const bin = up(st.pickBin || 'EXPO-FIX').replace(/\s+/g, '');
+  const rule = binRule(st), bin = rule.mode === 'only' ? rule.only : 'Bin';
   for (const p of ps) {
     const k = ks.get(p); if (!k) continue;
     const zc = zcs.filter((z) => up(z.barcode) === p), zr = zrs.filter((z) => up(z.barcode) === p);
@@ -3327,7 +3330,7 @@ async function sapFit(env: Env, ctx: Awaited<ReturnType<typeof sapLineCtx>>, pal
     add(hu.length && k.supplier_hu ? hu.includes(up(k.supplier_hu)) : null, 6, `HU ${k.supplier_hu}`, `HU ${k.supplier_hu} ≠ roll ${hu[0]}`);
     const zso = zr.find((z) => z.so || z.li);
     add(zso ? (!zso.so || normId(zso.so) === ctx.so) && (!zso.li || normId(zso.li) === ctx.li) : null, 6, 'SO / LI', `ZROLLMGT SO ${zso?.so ?? ''}/${zso?.li ?? ''}`);
-    add(zr.length ? zr.some((z) => up(z.bin).replace(/\s+/g, '') === bin) : null, 4, bin, `Bin ${zr[0]?.bin ?? ''}`);
+    add(zr.length ? zr.some((z) => rule.ok(z.bin)) : null, 4, bin, `Bin ${zr[0]?.bin ?? ''}`);
     out.set(p, { score, hits, miss, shade: (zc.find((z) => z.shade)?.shade as string) ?? null });
   }
   return out;
@@ -3643,9 +3646,21 @@ const PICKABLE = "COALESCE(pick_id, '0') IN ('0', '')";
  *   – is the Korber Pallet.
  * `env` is the Pick's scoped env (its own ZROLLMGT / ZCOMENT, else the shared ones). check() → null = pickable, else why not.
  */
+/** The ZROLLMGT StorageBin rule (Settings → Pick rules): only one bin, or any bin except some (e.g. FIXED) */
+function binRule(st: Settings) {
+  const sq = (v: unknown) => up(v).replace(/\s+/g, '');
+  const mode: 'only' | 'except' = st.pickBinMode === 'except' ? 'except' : 'only';
+  const only = sq(st.pickBin || 'EXPO-FIX');
+  const ex = Array.from(new Set(String(st.pickBinExcept ?? 'FIXED').split(/[,;\s]+/).map(sq).filter(Boolean)));
+  const ok = (b: unknown) => (mode === 'only' ? sq(b) === only : !ex.includes(sq(b)));
+  const label = mode === 'only' ? only : `any bin except ${ex.join(', ') || '–'}`;
+  const why = (b: unknown) => (mode === 'only' ? `ZROLLMGT StorageBin ${b || '–'} — must be ${only}` : `ZROLLMGT StorageBin ${b || '–'} — not picked from (${ex.join(', ')})`);
+  return { mode, only, ex, ok, label, why };
+}
 async function makeGate(env: Env) {
   const st = await getSettings(env);
-  const bin = up(st.pickBin || 'EXPO-FIX').replace(/\s+/g, '');
+  const rule = binRule(st);
+  const bin = rule.label;
   const on = st.rollGate !== false;
   const loaded = on ? !!(await env.DB.prepare('SELECT 1 FROM zroll LIMIT 1').first()) : true;
   // ZROLLMGT Status: when the report has it, a roll is picked only at Status UR (unrestricted)
@@ -3653,7 +3668,7 @@ async function makeGate(env: Env) {
   const statusOk = (v: unknown) => ['UR', 'UNRESTRICTED', 'UNRESTRICTEDUSE', 'UNRESTRICTEDSTOCK', 'UNREST'].includes(up(v).replace(/[^A-Z]/g, ''));
   /** why one ZROLLMGT row is not pickable (null = it is): StorageBin, Status */
   const rowWhy = (z: Row): string | null => {
-    if (up(z.bin).replace(/\s+/g, '') !== bin) return `ZROLLMGT StorageBin ${z.bin || '–'} — must be ${bin}`;
+    if (!rule.ok(z.bin)) return rule.why(z.bin);
     if (hasStatus && !statusOk(z.status)) return `ZROLLMGT Status ${z.status || '–'} — must be UR`;
     if (z.qty !== null && z.qty !== undefined && Number(z.qty) <= 1e-9) return 'ZROLLMGT Available Quantity 0';
     return null;
@@ -4690,6 +4705,8 @@ export default {
             zmmbePlants: b.zmmbePlants === undefined ? cur.zmmbePlants : plantPairs(b.zmmbePlants),
             rollGate: b.rollGate === undefined ? cur.rollGate : !!b.rollGate,
             pickBin: b.pickBin === undefined ? cur.pickBin : (String(b.pickBin).trim().toUpperCase().slice(0, 30) || 'EXPO-FIX'),
+            pickBinMode: b.pickBinMode === undefined ? (cur.pickBinMode ?? 'only') : (b.pickBinMode === 'except' ? 'except' : 'only'),
+            pickBinExcept: b.pickBinExcept === undefined ? (cur.pickBinExcept ?? 'FIXED') : String(b.pickBinExcept).toUpperCase().split(/[,;\s]+/).map((x) => x.trim()).filter(Boolean).slice(0, 20).join(', '),
             zrollNeedsZinsr: b.zrollNeedsZinsr === undefined ? cur.zrollNeedsZinsr !== false : !!b.zrollNeedsZinsr,
             blockLocs: b.blockLocs === undefined ? (cur.blockLocs || []) : blockLocList(b.blockLocs),
           };
