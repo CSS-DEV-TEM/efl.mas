@@ -78,7 +78,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
   /** what can be picked now: the balance, at most the UR left */
   const todo = useCallback((l: LineP) => (isDone(l) ? 0 : Math.max(0, r3(Math.min(bal(l), Math.max(0, avail(l)))))), [bal]);
   // "Needs manual": the open lines with UR are checked against their matched rolls (as "Pick all matched" would pick them)
-  type ScanR = { auto: number; left: number; why: string };
+  type ScanR = { auto: number; left: number; why: string; kq?: number; kn?: number };
   const [scan, setScan] = useState<Record<number, ScanR>>({});
   // "Pick all matched" running: the Needs manual check waits (both ask the server line by line — one at a time is faster)
   const [runActive, setRunActive] = useState(false);
@@ -120,7 +120,9 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
           : c.manual?.length ? 'Not matched — choose a Korber roll by hand'
           : (c.blocked?.length ?? 0) > 0 ? 'Rolls fail ZROLLMGT (StorageBin / Status) — see “Not pickable”, or add a Manual pallet'
           : 'No matched roll — add a Manual pallet';
-        out[l.id] = { auto, left, why: auto > 1e-9 && short > 1e-9 ? `${fmtQty(auto)} matched, ${fmtQty(short)} short · ${why}` : why };
+        // the Korber rolls this line can take now (matched to it, what is left of each)
+        const usable = c.rolls.filter((x) => x.available > 1e-9 && (!x.pool || x.suggested));
+        out[l.id] = { auto, left, why: auto > 1e-9 && short > 1e-9 ? `${fmtQty(auto)} matched, ${fmtQty(short)} short · ${why}` : why, kq: r3(usable.reduce((t, x) => t + x.available, 0)), kn: usable.length };
       } catch { /* the line is not in a Pick */ }
     };
     void (async () => {
@@ -133,6 +135,37 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
   const needsManual = useCallback((l: LineP) => !l.hold && todo(l) > 1e-9 && !!scan[l.id]?.why, [scan, todo]);
   // Auto match: the matched rolls cover all or part of the QTY (a part also shows under Needs manual for the rest)
   const autoReady = useCallback((l: LineP) => !l.hold && todo(l) > 1e-9 && (scan[l.id]?.auto ?? 0) > 1e-9, [scan, todo]);
+  /**
+   * The State of a line, from what can be done with it now: picked (all / part), and for the rest — the matched rolls
+   * (auto), the rolls to choose by hand (manual), or why nothing can be picked (no UR left, no stock, on hold …).
+   */
+  const stateOf = (l: LineP) => {
+    const pk = l.picked ?? 0, done = isDispatched(l), autoP = Number(l.auto_picked) > 0, cs = Number((l as LineP & { closed_short?: number }).closed_short) || 0;
+    if (l.hold && !isDone(l)) return <span className="pill bad" title={`On hold${l.hold_by ? ` by ${l.hold_by}` : ''}${l.hold_at ? ` · ${new Date(l.hold_at).toLocaleString()}` : ''}`}>On hold · {l.hold}</span>;
+    if (isDone(l) && !done) return <span className="pill ok" title={l.comment || ''}>Completed ✓</span>;
+    if (done) return cs > 0 ? <span className="pill ok" title="Closed short by a Normal pick">Picked ✓ · {fmtQty(cs)} short</span> : <span className="pill ok">{autoP ? 'Auto Picked ✓' : 'Picked ✓ · Dispatched'}</span>;
+    if (pk && sentOf(l) && bal(l) <= 1e-9) return <span className="pill ok" title="The picks and ALRADY SEND cover the QTY">Picked ✓ · rest sent</span>;
+    const part = pk > 1e-9 ? `${autoP ? 'Auto picked' : 'Picked'} ${fmtQty(pk)} · ` : '';
+    const t = todo(l);
+    if (t <= 1e-9) {
+      // nothing can be picked now: the UR is used up (the rest of the balance has no stock), or no stock at all
+      if (pk > 1e-9) return <span className="pill warn" title={`Balance ${fmtQty(bal(l))} — no UR left in ZMMBE for it`}>{part}no UR for the rest</span>;
+      return <span className={`pill ${PENDING_TONE[pendingWhy(l)] || 'mute'}`}>{pendingWhy(l)}</span>;
+    }
+    const sc = scan[l.id];
+    if (!sc) return <span className="pill mute" title="Checking the matched Korber rolls">{part}{scanning || runActive ? 'Checking…' : 'To pick'} {fmtQty(t)}</span>;
+    if (sc.auto >= t - 1e-6) return <span className="pill ok" title="The matched rolls cover the QTY — Pick all matched picks them">{part}Auto match {fmtQty(sc.auto)}</span>;
+    if (sc.auto > 1e-9) return <span className="pill accent" title={sc.why}>{part}Auto {fmtQty(sc.auto)} · manual {fmtQty(r3(t - sc.auto))}</span>;
+    return <span className="pill warn" title={sc.why}>{part}Needs manual {fmtQty(t)}</span>;
+  };
+  /** Korber qty: the rolls this line can take now when checked (matched to it), else the rolls of its lots on the shelf */
+  const korberOf = (l: LineP) => {
+    const sc = scan[l.id];
+    if (sc && sc.kq !== undefined && todo(l) > 1e-9) return <span className={sc.kq < todo(l) - 1e-6 ? 'kb-short' : ''} title={`${sc.kn} Korber roll${sc.kn === 1 ? '' : 's'} matched to this SO line, what is left of each${sc.kq < todo(l) - 1e-6 ? ` — ${fmtQty(r3(todo(l) - sc.kq))} less than the QTY to pick` : ''}`}>{fmtQty(sc.kq)} <span className="muted">({sc.kn})</span></span>;
+    if (l.korber_avail == null) return <span className="muted" title="No Korber Inventory uploaded">–</span>;
+    // not checked (nothing to pick now): the rolls of its lots on the shelf, for information (they may belong to other SO lines)
+    return <span className="muted" title={`${l.korber_rolls ?? 0} roll${l.korber_rolls === 1 ? '' : 's'} of this line's ZINR lots on the Korber shelf (shared lots: also other SO lines' rolls)`}>{fmtQty(l.korber_avail)} ({l.korber_rolls ?? 0})</span>;
+  };
   type Scope = typeof scope;
   const inScope = useCallback((sc: Scope, l: LineP, w = '') => (sc === 'possible' ? possible.has(`${l.key}|${l.date ?? ''}`) && !isDone(l) && bal(l) > 1e-9
     : sc === 'manual' ? !isDone(l) && needsManual(l)
@@ -395,8 +428,8 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
                                 <td>{l.li}</td><td>{l.item}</td><td>{l.plant}</td><td className="n">{fmtQty(l.qty)}</td><td className="n">{fmtQty(Number(l.ur) || 0)}</td>
                                 <td className="n"><b>{fmtQty(pickQty(l))}</b>{Number(l.qty) > (Number(l.ur) || 0) + 1e-9 && <span className="muted small" title="QTY is more than the UR: the UR is picked"> (UR)</span>}</td>
                                 <td className="n">{pk ? fmtQty(pk) : '–'}</td><td className="n">{fmtQty(bal(l))}</td>
-                                <td className="n">{l.korber_avail == null ? '–' : <span className={!isDone(l) && l.korber_avail < need(l) - 1e-6 ? 'kb-short' : ''}>{fmtQty(l.korber_avail)} <span className="muted">({l.korber_rolls ?? 0})</span></span>}</td>
-                                <td>{l.hold && !isDone(l) ? <span className="pill bad" title={l.hold}>On hold</span> : Number(l.auto_picked) > 0 ? <span className={`pill ${isDone(l) ? 'ok' : 'accent'}`} title={`${fmtQty(Number(l.auto_picked))} picked by “Pick all matched”`}>{isDone(l) ? 'Auto Picked ✓' : 'Auto Picked · part'}</span> : isDone(l) ? <span className="pill ok">Done</span> : <span className={`pill ${PENDING_TONE[pendingWhy(l)] || 'mute'}`}>{pendingWhy(l)}</span>}</td>
+                                <td className="n">{korberOf(l)}</td>
+                                <td>{stateOf(l)}</td>
                                 <td style={{ whiteSpace: 'nowrap' }}>{canEdit && !isDone(l) && !l.hold && <button className="btn sm primary" onClick={() => setPicking(l)}>{pk ? 'Pick more' : 'Pick'}</button>}</td>
                               </tr>
                             );
@@ -422,10 +455,8 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
                     <td className="n">{fmtQty(l.qty)}</td>
                     <td className="n">{pk ? <>{fmtQty(pk)} <span className="muted">({l.picked_rolls} roll{l.picked_rolls === 1 ? '' : 's'})</span></> : '–'}</td>
                     <td className="n"><b>{fmtQty(bal(l))}</b>{sentOf(l) && sentOf(l)!.sent > 1e-9 && <div className="muted small" title="ALRADY SEND (ZMMBE at the plant storage locations) is taken off the balance">sent {fmtQty(sentOf(l)!.sent)}</div>}</td><td className="n">{fmtQty(avail(l))}</td>
-                    <td className="n">{l.korber_avail == null ? <span className="muted" title="No Korber Inventory uploaded">–</span>
-                      : <span className={!isDone(l) && l.korber_avail < need(l) - 1e-6 ? 'kb-short' : ''} title={`${l.korber_rolls ?? 0} roll${l.korber_rolls === 1 ? '' : 's'} on the Korber shelf${!isDone(l) && l.korber_avail < need(l) - 1e-6 ? ` — ${fmtQty(need(l) - l.korber_avail)} less than the balance` : ''}`}>
-                        {fmtQty(l.korber_avail)} <span className="muted">({l.korber_rolls ?? 0})</span></span>}</td>
-                    <td>{l.hold && !isDone(l) ? <span className="pill bad" title={`On hold${l.hold_by ? ` by ${l.hold_by}` : ''}${l.hold_at ? ` · ${new Date(l.hold_at).toLocaleString()}` : ''}`}>On hold · {l.hold}</span> : isDone(l) && !done ? <span className="pill ok" title={l.comment || ''}>Completed ✓</span> : Number(l.auto_picked) > 0 ? <span className={`pill ${done ? 'ok' : 'accent'}`} title={`${fmtQty(Number(l.auto_picked))} picked by “Pick all matched”`}>{done ? 'Auto Picked ✓' : 'Auto Picked · part'}</span> : scope === 'pending' && !done ? <span className={`pill ${PENDING_TONE[pendingWhy(l)] || 'mute'}`}>{pendingWhy(l)}</span> : done && Number((l as LineP & { closed_short?: number }).closed_short) > 0 ? <span className="pill ok" title="Closed short by a Normal pick">Picked ✓ · {fmtQty(Number((l as LineP & { closed_short?: number }).closed_short))} short</span> : done ? <span className="pill ok">Picked ✓ · Dispatched</span> : pk && sentOf(l) && bal(l) <= 1e-9 ? <span className="pill ok" title="The picks and ALRADY SEND cover the QTY">Picked ✓ · rest sent</span> : pk ? <span className="pill accent">Part picked</span> : <span className="pill mute">To pick</span>}
+                    <td className="n">{korberOf(l)}</td>
+                    <td>{stateOf(l)}
                       {scope === 'manual' && (scan[l.id]?.why || runWhy[l.id]) && <div className="small run-why"><span className="pill warn">Manual</span> <span className="muted">{scan[l.id]?.why || runWhy[l.id]}</span></div>}
                       {scope === 'ready' && scan[l.id] && <div className="small run-why"><span className="pill ok">All match {fmtQty(scan[l.id].auto)}</span>{scan[l.id].why && <span className="muted"> · {fmtQty(r3(scan[l.id].left - scan[l.id].auto))} more by hand</span>}</div>}
                       {scope === 'possible' && (() => { const x = possible.get(`${l.key}|${l.date ?? ''}`); return x ? <div className="small run-why"><span className="pill warn">Posibal pending {fmtQty(Number(x.possible))}</span> <span className="muted">sent {fmtQty(x.sent)} · warehouse {fmtQty(x.wh)}{x.tn ? ` · TN ${x.tn}` : ''}</span></div> : null; })()}</td>

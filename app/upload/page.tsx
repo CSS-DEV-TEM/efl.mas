@@ -267,7 +267,7 @@ function Uploads() {
       const wk = r.weeks?.length ? ` to ${r.weeks.map((w) => roundName(w, plantNames)).join(', ')}` : '';
       await loadStatus(); setBarKey((k) => k + 1);
       if (j.src === 'zmmbe' || j.src === 'plan') setShowReady(true);
-      const plan = j.src === 'plan' && r.added !== undefined ? `${fmt(r.added)} new, ${fmt(r.updated)} updated${r.removed ? `, ${fmt(r.removed)} removed` : ''}${r.inFileDups ? `, ${fmt(r.inFileDups)} repeated rows (last row kept${r.dupQtyCount ? `; ${fmt(r.dupQtyCount)} had a different QTY` : ''})` : ''}` : `${fmt(r.accepted)} rows saved — ${j.stockMode === 'add' ? 'added to the current report' : 'whole report replaced, no duplicates'}${r.stockDups ? ` · ${fmt(r.stockDups)} repeated rows counted once` : ''}${r.changes ? ` · ${fmt(r.changes.unchanged)} unchanged, ${fmt(r.changes.added)} new or changed, ${fmt(r.changes.removed)} removed` : ''}${r.derived ? ` · also built ZMMBE KFC (${fmt(r.derived.kfc)}) and PFC (${fmt(r.derived.pfc)})${r.derived.plant ? ` · ${fmt(r.derived.plant)} plant-location row${r.derived.plant === 1 ? '' : 's'} left out` : ''}` : ''}`;
+      const plan = j.src === 'plan' && r.added !== undefined ? `${fmt(r.added)} new, ${fmt(r.updated)} updated${r.removed ? `, ${fmt(r.removed)} removed` : ''}${r.inFileDups ? `, ${fmt(r.inFileDups)} repeated SO / LI / Item rows (their QTYs added together)` : ''}` : `${fmt(r.accepted)} rows saved — ${j.stockMode === 'add' ? 'added to the current report' : 'whole report replaced, no duplicates'}${r.stockDups ? ` · ${fmt(r.stockDups)} repeated rows counted once` : ''}${r.changes ? ` · ${fmt(r.changes.unchanged)} unchanged, ${fmt(r.changes.added)} new or changed, ${fmt(r.changes.removed)} removed` : ''}${r.derived ? ` · also built ZMMBE KFC (${fmt(r.derived.kfc)}) and PFC (${fmt(r.derived.pfc)})${r.derived.plant ? ` · ${fmt(r.derived.plant)} plant-location row${r.derived.plant === 1 ? '' : 's'} left out` : ''}` : ''}`;
       // Plant + SO Plant pairs not in Settings → ZMMBE plants: left out, listed so they can be added
       const notSet = r.notInSetup?.length ? ` · ${fmt(r.setupOut || 0)} row${r.setupOut === 1 ? '' : 's'} left out — Plant + SO Plant not in Settings → ZMMBE plants: ${r.notInSetup.map((m) => `${m.plant} + ${m.soPlant || '–'} (${fmt(m.rows)} rows, UR ${fmt(m.ur, 2)})`).join(', ')}` : '';
       await keepFile(fileObj.current[j.file], [j.src], rid || null);
@@ -502,6 +502,7 @@ function show(v: unknown, id: string) {
   return String(v);
 }
 
+const r3n = (x: number) => Math.round(x * 1000) / 1000;
 interface PlanPreview { owner?: string; planType?: string; days?: string[]; round?: number; added: number; updated: number; removed: number; kept: number; inFileDups: number; dupQty?: { so: string; li: string; item: string; date: string | null; was: number; now: number }[]; dupQtyCount?: number; lines: number; plant: string | null; mode: string }
 /** A Pick's upload: the plan and ZMMBE go to the chosen Pick (rid). */
 function planOpts(j: SheetJob, rid: string) {
@@ -610,8 +611,8 @@ function SheetCard({ job, rid, ridLabel, owners, me, onChange, onSend, onRemove 
                 <span className="muted">No line is ever added twice: a line with the same SO, LI and Item in this Pick is updated.</span>
                 {!!preview.dupQtyCount && (
                   <div className="notice warn dup-qty" style={{ width: '100%' }}>
-                    <b>{preview.dupQtyCount} repeated line{preview.dupQtyCount === 1 ? '' : 's'} with a different QTY</b> — the last row&apos;s QTY is used. Check these in the file:
-                    <ul>{(preview.dupQty || []).map((d, i) => <li key={i}>{d.so} / {d.li} / {d.item} · {fmtDate(d.date)}: {fmt(d.was, 3)} → <b>{fmt(d.now, 3)}</b></li>)}</ul>
+                    <b>{preview.dupQtyCount} repeated SO / LI / Item row{preview.dupQtyCount === 1 ? '' : 's'}</b> — one line each, the QTYs added together (picked against the UR as one line):
+                    <ul>{(preview.dupQty || []).map((d, i) => <li key={i}>{d.so} / {d.li} / {d.item} · {fmtDate(d.date)}: {fmt(d.was, 3)} + {fmt(r3n(d.now - d.was), 3)} = <b>{fmt(d.now, 3)}</b></li>)}</ul>
                     {preview.dupQtyCount > (preview.dupQty?.length || 0) && <span className="muted">… and {preview.dupQtyCount - (preview.dupQty?.length || 0)} more</span>}
                   </div>
                 )}

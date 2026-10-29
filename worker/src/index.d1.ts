@@ -724,14 +724,19 @@ async function handleUpload(env: Env, req: Request) {
     if (mode === 'replace-plant' && !plant) throw new HttpError(400, 'Choose the plant whose lines this file replaces.');
     if (planType === 'day' && mapped.some((r) => !r.date)) throw new HttpError(400, 'A day plan needs a date on every line.');
     for (const r of mapped) { r.plant = rid ? r.plant : cleanPlant(r.plant) || plant; r.src_user = s.u; r.src_at = now(); r.owner = owner; r.plan_type = planType; }
-    // the same line twice in one file: keep the last one
+    // the same SO / LI / Item Code more than once in one file: one line, its QTYs added together (it is picked against the UR
+    // as one) — listed so the person can check
     const byId = new Map<string, Row>();
-    // repeats whose QTY differs: the last row wins — listed so the person can check
     const dupQty: { so: unknown; li: unknown; item: unknown; date: unknown; was: number; now: number }[] = [];
     for (const r of mapped) {
       const had = byId.get(lineId(r));
-      if (had && Math.abs(Number(had.qty) - Number(r.qty)) > 0.0005) dupQty.push({ so: r.so, li: r.li, item: r.item, date: r.date, was: Number(had.qty), now: Number(r.qty) });
-      byId.set(lineId(r), r);
+      if (had) {
+        const was = Number(had.qty);
+        had.qty = r3(was + Number(r.qty || 0));
+        const rm = [had.remarks, r.remarks].map((x) => String(x ?? '').trim()).filter(Boolean);
+        had.remarks = Array.from(new Set(rm)).join(' · ') || null;
+        dupQty.push({ so: r.so, li: r.li, item: r.item, date: r.date, was, now: Number(had.qty) });
+      } else byId.set(lineId(r), { ...r });
     }
     const inFileDups = mapped.length - byId.size;
     mapped = Array.from(byId.values());
@@ -2289,15 +2294,20 @@ async function handlePick(env: Env, req: Request, p: string) {
           const lotB = new Set(lots.map((l) => normId(l.batch)));
           const byB = new Map<string, { row: Row; ur: number }>();
           for (const x of rows) { const b0 = normId(x.batch); const e = byB.get(b0); if (e) e.ur = r3(e.ur + Number(x.ur || 0)); else byB.set(b0, { row: x, ur: Number(x.ur || 0) }); }
-          const free = [...byB.entries()].map(([b0, e]) => ({ b0, row: e.row, free: Math.max(0, r3(e.ur - (usedB.get(b0) ?? 0))) })).filter((e) => e.free > 1e-9)
+          // and never more from a batch than ZINSR's Insp. Lot Quantity of it for this SO line (less what the line took from it)
+          const lotQ = await batchLotQty(kenv, so, li, item), takenB = await batchTaken(env, so, li, item);
+          const free = [...byB.entries()].map(([b0, e]) => ({ b0, row: e.row, free: Math.max(0, r3(Math.min(e.ur - (usedB.get(b0) ?? 0), (lotQ.get(b0) ?? 0) - (takenB.get(b0) ?? 0)))) })).filter((e) => e.free > 1e-9)
             .sort((a, b) => Number(lotB.has(b.b0)) - Number(lotB.has(a.b0)) || b.free - a.free);
           const pickB = free[0];
           if (!pickB) continue;
           const urFree = r3(Math.min(urAll, pickB.free));
-          const can = r3(Math.min(urFree, lotRoom));
+          // the lot room: the vendor-batch lots of the chosen batch only (a lot of another batch does not give to this one)
+          const lotsB = lots.filter((l) => normId(l.batch) === pickB.b0);
+          const lotRoomB = lotsB.length ? Math.max(0, r3(lotsB.reduce((t, l) => t + Number(l.qty || 0), 0) - fromLots)) : lotRoom;
+          const can = r3(Math.min(urFree, lotRoom, lotRoomB));
           if (!(can > 1e-9)) continue;
           const bRow = pickB.row;
-          targets.push({ key, so, li, item, same: ownLines.has(`${normId(so)}|${normId(li)}`), plant: bRow.so_plant ?? bRow.plant ?? null, batch: bRow.batch, sloc: bRow.sloc, sameBatch: lotB.has(normId(bRow.batch)), ur: r3(rows.reduce((t, x) => t + Number(x.ur || 0), 0)), ur_free: urFree, lot_room: lotRoom, can,
+          targets.push({ key, so, li, item, same: ownLines.has(`${normId(so)}|${normId(li)}`), plant: bRow.so_plant ?? bRow.plant ?? null, batch: bRow.batch, sloc: bRow.sloc, sameBatch: lotB.has(normId(bRow.batch)), ur: r3(rows.reduce((t, x) => t + Number(x.ur || 0), 0)), ur_free: urFree, lot_room: r3(Math.min(lotRoom, lotRoomB)), can,
             lots: lots.map((l) => ({ lot: String(l.lot), batch: l.batch, vendor_batch: l.vendor_batch, qty: Number(l.qty) })), zmmbe: rows });
         }
         // a suggested split of the balance: the roll's own batch first, then the most room
@@ -2307,7 +2317,7 @@ async function handlePick(env: Env, req: Request, p: string) {
         // (what the rolls before this one were given counts: the UR of the SO line and the room of its lots are shared)
         for (const t of targets) {
           const uk = 'u' + t.key + '|' + normId(t.batch), lk = 'l' + t.key + '|' + vb;
-          const q = r3(Math.max(0, Math.min(left, Number(t.ur_free) - (used.get(uk) ?? 0), Number(t.lot_room) - (used.get(lk) ?? 0))));
+          const q = r3(Math.max(0, Math.min(left, Number(t.can) - Math.max(used.get(uk) ?? 0, used.get(lk) ?? 0), Number(t.ur_free) - (used.get(uk) ?? 0), Number(t.lot_room) - (used.get(lk) ?? 0))));
           const take = q > 1e-9 ? q : 0; t.take = take; left = r3(left - take);
           if (take) { used.set(uk, r3((used.get(uk) ?? 0) + take)); used.set(lk, r3((used.get(lk) ?? 0) + take)); }
         }
@@ -2451,6 +2461,24 @@ async function handlePick(env: Env, req: Request, p: string) {
         const skip = dup ? 'already in the system' : notMine.length ? `picked in ${Array.from(new Set(notMine.map((o) => periodLabel(o.week)))).join(', ')} by ${Array.from(new Set(notMine.map((o) => o.by_user))).join(', ')} — only Admin / Head can move it here` : null;
         if (!skip) korberUse.set(x.pallet, r3((korberUse.get(x.pallet) ?? 0) + x.qty));
         (ln.items as Row[]).push({ ...x, skip, warn, k, base, move: moving.map((o) => ({ id: o.id, req_id: o.req_id, week: o.week, plan: periodLabel(o.week), so: o.so, li: o.li, qty: o.qty, by: o.by_user, day: o.req_day })) });
+      }
+      // more from a batch than ZINSR's Insp. Lot Quantity of it (a check: the file is what was sent)
+      {
+        let lotQ = await batchLotQty(senv, ln.so, ln.li, ln.item);
+        if (!lotQ.size) lotQ = await batchLotQty(env, ln.so, ln.li, ln.item);
+        if (lotQ.size) {
+          const taken = await batchTaken(env, ln.so, ln.li, ln.item);
+          const moved = new Map<string, number>();
+          for (const x of ln.items as Row[]) for (const o of (x.move as Row[]) || []) if (normId(o.so) === normId(ln.so) && normId(o.li) === normId(ln.li)) moved.set(normId(x.batch), r3((moved.get(normId(x.batch)) ?? 0) + Number(o.qty)));
+          const add = new Map<string, number>();
+          for (const x of (ln.items as Row[]).filter((y) => !y.skip)) add.set(normId(x.batch), r3((add.get(normId(x.batch)) ?? 0) + Number(x.qty)));
+          for (const [bt, q] of add) {
+            const cap = lotQ.get(bt);
+            const tot = r3((taken.get(bt) ?? 0) - (moved.get(bt) ?? 0) + q);
+            const msg = cap === undefined ? `batch ${bt} has no ZINSR lot for this SO line` : tot > cap + 0.0005 ? `batch ${bt}: ${tot} of ZINSR Insp. Lot Quantity ${cap} (${r3(tot - cap)} over)` : '';
+            if (msg) for (const x of (ln.items as Row[]).filter((y) => !y.skip && normId(y.batch) === bt)) (x.warn as string[]).push(msg);
+          }
+        }
       }
     }
     const out = lines.map((l) => ({ ...l, items: (l.items as Row[]).map(({ k: _k, ...r }) => { void _k; return r; }) }));
@@ -2780,11 +2808,23 @@ async function handlePick(env: Env, req: Request, p: string) {
     // that still needs QTY (the smallest part first), then to its other parts
     const need = new Map((cand.batchNeed || []).map((x) => [String(x.batch), Number(x.need)]));
     const alloc: { pallet: string; batch: string; qty: number }[] = [];
+    const lineBatches = new Set((cand.stock || []).filter((z) => Number(z.ur) > 0).map((z) => normId(z.batch)));
     for (const x of picks) {
       const r = byPallet.get(String(x.pallet));
       const parts = (r?.parts?.length ? r.parts : String(x.batch || '').split(',').filter(Boolean).map((bt) => ({ batch: bt, lot: '', qty: Infinity })))
         .map((pt) => ({ ...pt, left: Number(pt.qty) })).sort((p1, p2) => p1.left - p2.left);
       let q = Number(x.qty);
+      // the roll's own SAP batch (ZROLLMGT System Batch) takes its QTY first when it is a batch of this SO line
+      const sysB = gate.loaded ? normId(await gate.batchOf(String(x.pallet))) : '';
+      if (sysB && lineBatches.has(sysB)) {
+        const pt = parts.find((p0) => normId(p0.batch) === sysB) ?? { batch: sysB, lot: '', qty: Infinity, left: Infinity };
+        const t = Math.min(q, pt.left);
+        if (t > 1e-9) {
+          const had = alloc.find((y) => y.pallet === x.pallet && normId(y.batch) === sysB);
+          if (had) had.qty = r3(had.qty + t); else alloc.push({ pallet: String(x.pallet), batch: pt.batch, qty: r3(t) });
+          pt.left -= t; q = r3(q - t); need.set(pt.batch, r3((need.get(pt.batch) ?? 0) - t));
+        }
+      }
       const give = (pt: { batch: string; left: number }, t: number) => {
         if (t <= 1e-9) return;
         const had = alloc.find((y) => y.pallet === x.pallet && y.batch === pt.batch);
@@ -2794,6 +2834,25 @@ async function handlePick(env: Env, req: Request, p: string) {
       for (const pt of parts) give(pt, Math.min(q, pt.left, Math.max(0, need.get(pt.batch) ?? 0)));
       for (const pt of parts) give(pt, Math.min(q, pt.left));
       if (q > 1e-9 && parts.length) give({ ...parts[0], left: Infinity }, q);
+    }
+    // ZINSR per SAP batch: the SO line never takes more from a batch than its Insp. Lot Quantity (SAP would take the
+    // transfer from UR outside the lot)
+    {
+      const lotB = await batchLotQty(senv, line.so, line.li, line.item);
+      if (lotB.size) {
+        const taken = await batchTaken(env, line.so, line.li, line.item);
+        const thisB = new Map<string, number>();
+        for (const a of alloc) thisB.set(normId(a.batch), r3((thisB.get(normId(a.batch)) ?? 0) + Number(a.qty)));
+        for (const [bt, q] of thisB) {
+          const cap = lotB.get(bt); if (cap === undefined) continue;
+          const before = taken.get(bt) ?? 0;
+          if (before + q > cap + 0.0005) {
+            const room = Math.max(0, r3(cap - before));
+            const other = Array.from(lotB).filter(([b0, c0]) => b0 !== bt && c0 - (taken.get(b0) ?? 0) > 0.0005).map(([b0, c0]) => `batch ${b0} (${r3(c0 - (taken.get(b0) ?? 0))} left)`);
+            throw new HttpError(409, `Batch ${bt} of ${line.so} / ${line.li}: ZINSR Insp. Lot Quantity ${cap}${before > 0.0005 ? `, ${before} already picked` : ''} — this pick takes ${q} from it, ${r3(before + q - cap)} more than the lot${room > 0.0005 ? ` (at most ${room} more)` : ' (the batch is used up)'}. More than the lot would take UR outside it in the SAP transfer.${other.length ? ` The rest is in ${other.join(', ')}.` : ''}`);
+          }
+        }
+      }
     }
     // every ZMMBE row of the line (its storage location decides KFC / PFC on the packing list, not the inspection lot's)
     const match = JSON.stringify({ zmmbe: cand.stock, zinr: zinrUsed, lots: cand.lots.filter((l) => usedLots.has(String(l.lot))), alloc });
@@ -3432,6 +3491,39 @@ async function fastEnv(env: Env, material: string): Promise<Env> {
   return { ...env, DB } as Env;
 }
 
+/**
+ * What an SO line has taken from each SAP batch (every pick of it, in any Pick): a pick's QTY goes to the batches it was
+ * allocated to (kept with the pick), else to its first batch. An SO line never takes more from a batch than ZINSR gives it
+ * for that batch (its Insp. Lot Quantity) — more would make the SAP transfer take UR from elsewhere.
+ */
+async function batchTaken(env: Env, so: unknown, li: unknown, item: unknown, exceptReq?: number) {
+  const rows = (await env.DB.prepare(`SELECT p.pallet, p.qty, p.batch, p.req_id, q.match FROM picks p JOIN pick_req q ON q.id = p.req_id
+    WHERE p.so = ? AND p.li = ? AND p.item = ? AND p.cancelled_at IS NULL AND q.cancelled_at IS NULL`).bind(normId(so), normId(li), normId(item)).all<Row>()).results;
+  const out = new Map<string, number>();
+  const add = (b: unknown, q: number) => { const k = normId(b); if (!k) return; out.set(k, r3((out.get(k) ?? 0) + q)); };
+  const allocOf = new Map<number, { pallet: string; batch: string; qty: number }[]>();
+  for (const x of rows) {
+    if (exceptReq && Number(x.req_id) === exceptReq) continue;
+    let al = allocOf.get(Number(x.req_id));
+    if (!al) { try { al = ((JSON.parse(String(x.match ?? '{}')) as { alloc?: { pallet: string; batch: string; qty: number }[] }).alloc) || []; } catch { al = []; } allocOf.set(Number(x.req_id), al); }
+    const mine = al.filter((a) => up(a.pallet) === up(x.pallet));
+    const sum = r3(mine.reduce((t, a) => t + Number(a.qty), 0));
+    if (mine.length && Math.abs(sum - Number(x.qty)) <= 0.0005) for (const a of mine) add(a.batch, Number(a.qty));
+    else add(String(x.batch ?? '').split(',')[0], Number(x.qty));
+  }
+  return out;
+}
+/** ZINSR Insp. Lot Quantity of an SO line per SAP batch (the batches with lots only) */
+async function batchLotQty(env: Env, so: unknown, li: unknown, item: unknown) {
+  const out = new Map<string, number>();
+  const seen = new Set<string>();
+  for (const z of (await env.DB.prepare('SELECT lot, batch, qty FROM zinr WHERE so = ? AND li = ? AND material = ?').bind(normId(so), normId(li), normId(item)).all<Row>()).results) {
+    if (seen.has(String(z.lot))) continue; seen.add(String(z.lot));
+    const k = normId(z.batch); if (!k) continue;
+    out.set(k, r3((out.get(k) ?? 0) + Number(z.qty || 0)));
+  }
+  return out;
+}
 async function palletPicks(env: Env, pallet: unknown) {
   const ph = (await env.DB.prepare(`SELECT p.day, p.by_user, p.qty, p.roll_qty, p.week, p.so, p.li, p.at, p.req_id, r.pick_no FROM picks p LEFT JOIN pick_req r ON r.id = p.req_id
     WHERE p.pallet = ? AND p.cancelled_at IS NULL ORDER BY p.id`).bind(String(pallet ?? '')).all<Row>()).results;
