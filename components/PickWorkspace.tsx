@@ -1583,6 +1583,14 @@ interface FoundPick { id: number; day: string; plan: string; so: string; li: str
 interface ImportItem extends PLPiece { skip: string | null; warn: string[] }
 interface ImportLine { key: string; so: string; li: string; item: string; qty: number; rolls: number; ok: boolean; why: string | null; extra?: boolean; planQty: number | null; items: ImportItem[] }
 function ImportPLDialog({ week, label, toast, onClose }: { week: string; label: string; toast: (m: string) => void; onClose: (changed: boolean) => void }) {
+  // where it goes: a new Pick of its own (default: the day and plant of the Pick on screen) or this Pick
+  const cur = /^(\d{4}-\d{2}-\d{2})~([^~]*)~\d+$/.exec(week);
+  const [mode, setMode] = useState<'new' | 'this'>('new');
+  const [nDay, setNDay] = useState(cur?.[1] ?? new Date(Date.now() + 5.5 * 3600e3).toISOString().slice(0, 10));
+  const [nPlant, setNPlant] = useState(cur && cur[2] !== '-' ? cur[2] : '');
+  const [plantList, setPlantList] = useState<{ code: string; name: string | null }[]>([]);
+  useEffect(() => { api<{ plants: { code: string; name: string | null }[] }>('/api/plants').then((r) => setPlantList(r.plants)).catch(() => {}); }, []);
+  const target = () => (mode === 'new' ? { newPick: { day: nDay, plant: nPlant } } : { week });
   const [file, setFile] = useState<File | null>(null);
   const [parsed, setParsed] = useState<{ pieces: PLPiece[]; tables: number; warnings: string[] } | null>(null);
   const [check, setCheck] = useState<ImportLine[] | null>(null);
@@ -1595,7 +1603,7 @@ function ImportPLDialog({ week, label, toast, onClose }: { week: string; label: 
       setParsed(p);
       if (!p.pieces.length) { setErr('No Packing List table (Pallet … Actual Qty with its SAP lines SO | LI | Qty | Material | Batch) was found in this file.'); return; }
       setBusy('Checking against the system…');
-      const r = await api<{ lines: ImportLine[] }>('/api/pick/import', { method: 'POST', body: { week, fileName: f.name, dry: true, pieces: p.pieces } });
+      const r = await api<{ lines: ImportLine[] }>('/api/pick/import', { method: 'POST', body: { ...target(), fileName: f.name, dry: true, pieces: p.pieces } });
       setCheck(r.lines);
     } catch (e) { setErr(e instanceof Error ? e.message : 'Could not read the file.'); } finally { setBusy(''); }
   };
@@ -1604,8 +1612,13 @@ function ImportPLDialog({ week, label, toast, onClose }: { week: string; label: 
     if (!parsed || !file) return;
     setBusy('Saving…'); setErr('');
     try {
-      const r = await api<{ picks: number; rolls: number }>('/api/pick/import', { method: 'POST', body: { week, fileName: file.name, pieces: parsed.pieces } });
-      toast(`Packing List imported into ${label}: ${r.picks} pick${r.picks === 1 ? '' : 's'}, ${r.rolls} roll${r.rolls === 1 ? '' : 's'}`);
+      const r = await api<{ picks: number; rolls: number; week: string; label: string }>('/api/pick/import', { method: 'POST', body: { ...target(), fileName: file.name, pieces: parsed.pieces } });
+      toast(`Packing List imported${mode === 'new' ? ` as a new Pick — ${r.label}` : ` into ${label}`}: ${r.picks} pick${r.picks === 1 ? '' : 's'}, ${r.rolls} roll${r.rolls === 1 ? '' : 's'}`);
+      if (mode === 'new' && r.week) {
+        // open the new Pick
+        try { localStorage.setItem('mas-pick-type', 'day'); localStorage.setItem('mas-day', r.week.slice(0, 10)); localStorage.setItem('mas-rid', r.week); } catch { /* private mode */ }
+        setTimeout(() => window.location.reload(), 900);
+      }
       onClose(true);
     } catch (e) { setErr(e instanceof Error ? e.message : 'Could not save.'); setBusy(''); }
   };
@@ -1617,11 +1630,25 @@ function ImportPLDialog({ week, label, toast, onClose }: { week: string; label: 
     <div className="modal-back">
       <div className="modal xwide" role="dialog" aria-modal="true" aria-labelledby="imp-title">
         <div className="modal-head">
-          <div><h2 id="imp-title">Import Packing List → {label}</h2>
+          <div><h2 id="imp-title">Import Packing List</h2>
             <p className="sub" style={{ margin: 0 }}>A Packing List in this system&apos;s format (KFC / PFC Packing List sheets: the rolls of each table and its SAP lines <b>SO | LI | Qty | Material | Batch</b>). Each roll is saved as a pick of that SO line in this Pick, with that SAP batch; a cut roll&apos;s pieces come from the <b>Cut Roll Balance</b> sheet when the file has one. Rolls already saved the same way are skipped.</p></div>
           <button className="btn sm" aria-label="Close" onClick={() => onClose(false)}>✕</button>
         </div>
-        <label className="btn" style={{ alignSelf: 'flex-start' }}>📂 {file ? file.name : 'Choose the Packing List file (.xlsx)'}
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', margin: '4px 0 8px' }}>
+          <div className="seg" role="group" aria-label="Import into">
+            <button type="button" className={mode === 'new' ? 'on' : ''} onClick={() => { setMode('new'); setCheck(null); setParsed(null); setFile(null); }}>New Pick</button>
+            <button type="button" className={mode === 'this' ? 'on' : ''} onClick={() => { setMode('this'); setCheck(null); setParsed(null); setFile(null); }}>Into {label}</button>
+          </div>
+          {mode === 'new' && <>
+            <label className="small">Day <input type="date" className="as-search" value={nDay} onChange={(e) => { setNDay(e.target.value); setCheck(null); setParsed(null); setFile(null); }} /></label>
+            <label className="small">Plant <select className="as-search" value={nPlant} onChange={(e) => { setNPlant(e.target.value); setCheck(null); setParsed(null); setFile(null); }}>
+              <option value="">— choose —</option>
+              {Array.from(new Set([...(nPlant ? [nPlant] : []), ...plantList.map((p) => p.code.toUpperCase())])).map((c) => { const p = plantList.find((x) => x.code.toUpperCase() === c); return <option key={c} value={c}>{p?.name ? `${p.name} (${c})` : c}</option>; })}
+            </select></label>
+            <span className="muted small">→ the next Pick No of that plant on that day; its plan = the file&apos;s SO lines</span>
+          </>}
+        </div>
+        <label className={`btn ${mode === 'new' && (!nDay || !nPlant) ? 'disabled' : ''}`} style={{ alignSelf: 'flex-start', pointerEvents: mode === 'new' && (!nDay || !nPlant) ? 'none' : undefined, opacity: mode === 'new' && (!nDay || !nPlant) ? 0.5 : 1 }}>📂 {file ? file.name : 'Choose the Packing List file (.xlsx)'}
           <input type="file" accept=".xlsx,.xls" style={{ display: 'none' }} onChange={(e) => { const f = e.target.files?.[0]; if (f) void read(f); e.target.value = ''; }} />
         </label>
         {busy && <Loader label={busy} />}

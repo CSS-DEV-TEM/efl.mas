@@ -8,7 +8,7 @@ import PlanReport from '@/components/PlanReport';
 import { todayLocal } from '@/lib/smart';
 
 export interface DayRow { day: string; picks: number; lines: number }
-export interface PickRound { id: string; plant: string | null; round: number; lines: number; qty: number; src_at?: string | null; created_by?: string; reports: string[] }
+export interface PickRound { id: string; plant: string | null; round: number; lines: number; qty: number; src_at?: string | null; created_by?: string; reports: string[]; /** made from a Packing List (Import Packing List) */ imported?: number }
 interface Report { src: string; uses: 'own' | 'shared' | 'none'; rows: number; missing?: string[]; own: { file_name: string | null; uploaded_by: string; uploaded_at: string } | null; shared: { file_name: string | null; uploaded_by: string; uploaded_at: string } | null }
 
 const REPORT_NAME: Record<string, string> = { plan: 'Plan', zmmbe: 'ZMMBE', zinr: 'ZINSR / ZINR', zcoment: 'ZCOMENT VIEW', korber: 'Korber Inventory', zroll: 'ZROLLMGT', ztrr: 'ZMM_TRR' };
@@ -127,6 +127,7 @@ export default function DayPickBar({ day, setDay, rid, setRid, toast, refreshKey
         </span>}
         {cur && <button className="btn sm" onClick={() => setReport(true)} title="The plan report of this Pick (AVALABALE, ALRADY SEND, Pending, POSIBAL PENDING, QI, BLOCK, TRANSFER NOTE) — on screen and as Excel">📋 Plan report</button>}
         {report && rid && <PlanReport rid={rid} onClose={() => setReport(false)} />}
+        {cur && !boss && cur.imported === 1 && cur.created_by === getSession()?.user.username && <button className="btn sm danger" onClick={deleteWithHistory} title="This Pick was made from your Packing List: delete it with its plan and its picks">Delete imported Pick</button>}
         {boss && cur && <button className="btn sm danger" onClick={deletePick} title="Delete this Pick with its plan and its own reports">Delete Pick</button>}
         {boss && cur && <button className="btn sm danger" onClick={deleteWithHistory} title="Delete this Pick with its plan, reports AND its pick history (picks, packing lists, rejected rolls, balances)">Delete Pick + history</button>}
       </div>

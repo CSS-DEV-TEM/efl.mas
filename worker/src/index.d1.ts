@@ -560,7 +560,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 68; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 69; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1419,9 +1419,18 @@ async function handleRounds(env: Env, req: Request) {
   // DELETE ?rid= (Admin / Head): a Pick with its plan and its own reports; not when picks were saved for it
   if (req.method === 'DELETE') {
     const s = await requireUser(env, req, 'editor');
-    if (!isBoss(s)) throw new HttpError(403, 'Only Admin or Head can delete a Pick.');
     const rid = String(sp.get('rid') || '');
     if (!parseRound(rid)) throw new HttpError(400, 'Unknown Pick.');
+    // a Pick made from a Packing List: the user who imported it may delete it (with its history) too
+    if (!isBoss(s)) {
+      const mine = await env.DB.prepare(`SELECT
+        (SELECT created_by FROM pick_round WHERE rid = ?1) by_,
+        (SELECT COUNT(*) FROM plan WHERE week = ?1) n,
+        (SELECT COUNT(*) FROM plan WHERE week = ?1 AND remarks LIKE 'Imported from Packing List%') imp,
+        (SELECT COUNT(*) FROM pick_req WHERE week = ?1 AND by_user <> ?2) other`).bind(rid, s.u).first<Row>();
+      const own = mine && mine.by_ === s.u && Number(mine.n) > 0 && Number(mine.imp) === Number(mine.n) && Number(mine.other) === 0;
+      if (!own) throw new HttpError(403, 'Only Admin or Head can delete a Pick (a Pick imported from a Packing List: also the user who imported it).');
+    }
     const n = Number((await env.DB.prepare('SELECT COUNT(*) n FROM pick_req WHERE week = ? AND cancelled_at IS NULL').bind(rid).first<{ n: number }>())?.n ?? 0);
     // ?history=1: the Pick's pick history goes too (its picks, packing lists, rejected rolls, balance follow-up) — Admin / Head
     const withHistory = sp.get('history') === '1';
@@ -1453,7 +1462,8 @@ async function handleRounds(env: Env, req: Request) {
   if (!day) throw new HttpError(400, 'Choose a day.');
   const plant = cleanPlant(sp.get('plant'));
   const made = (await env.DB.prepare('SELECT rid AS id, plant, round, created_by, created_at FROM pick_round WHERE day = ?').bind(day).all<Row>()).results;
-  const withPlan = (await env.DB.prepare(`SELECT week AS id, MAX(plant) AS plant, COUNT(*) AS lines, ROUND(SUM(qty), 3) AS qty, MAX(src_at) AS src_at, MAX(src_user) AS src_user
+  const withPlan = (await env.DB.prepare(`SELECT week AS id, MAX(plant) AS plant, COUNT(*) AS lines, ROUND(SUM(qty), 3) AS qty, MAX(src_at) AS src_at, MAX(src_user) AS src_user,
+    MIN(CASE WHEN remarks LIKE 'Imported from Packing List%' THEN 1 ELSE 0 END) AS imported
     FROM plan WHERE plan_type = 'day' AND date = ?1 AND (?2 IS NULL OR owner = ?2) AND instr(week, '~') > 0 GROUP BY week`).bind(day, owner).all<Row>()).results;
   const own = (await env.DB.prepare("SELECT rid, group_concat(DISTINCT src) srcs FROM uploads WHERE rid LIKE ? || '~%' GROUP BY rid").bind(day).all<{ rid: string; srcs: string }>()).results;
   const ownOf = new Map(own.map((o) => [o.rid, String(o.srcs || '').split(',').filter(Boolean)]));
@@ -2385,8 +2395,13 @@ async function handlePick(env: Env, req: Request, p: string) {
   //   A roll already picked for the same SO line with the same QTY is skipped (the same file twice adds nothing).
   if (part === 'import' && req.method === 'POST') {
     const s = await requireUser(env, req, 'editor');
-    const b = (await req.json()) as { week?: string; fileName?: string; dry?: boolean; pieces?: { pallet?: string; so?: string; li?: string | number; item?: string | number; batch?: string | number; qty?: number; shade?: string; insp_lot?: string }[] };
-    const week = String(b.week || '');
+    const b = (await req.json()) as { week?: string; newPick?: { day?: string; plant?: string }; fileName?: string; dry?: boolean; pieces?: { pallet?: string; so?: string; li?: string | number; item?: string | number; batch?: string | number; qty?: number; shade?: string; insp_lot?: string }[] };
+    let week = String(b.week || '');
+    // newPick: the Packing List becomes a Pick of its own (the next Pick No of that plant on that day), its SO lines its plan
+    const np0 = b.newPick ? { day: normDate(b.newPick.day), plant: cleanPlant(b.newPick.plant) } : null;
+    if (np0 && (!np0.day || !np0.plant)) throw new HttpError(400, 'Choose the day and the plant of the new Pick.');
+    const np = np0 ? { day: String(np0.day), plant: String(np0.plant) } : null;
+    if (np) week = `${np.day}~${np.plant}~0`;
     if (!week) throw new HttpError(400, 'Choose the Pick to put the Packing List in.');
     const pieces = (b.pieces || []).map((x) => ({ pallet: up(x.pallet), so: normId(x.so), li: normId(x.li), item: normId(x.item), batch: normId(x.batch), qty: r3(Number(x.qty) || 0), shade: String(x.shade ?? '').trim() || null, insp_lot: String(x.insp_lot ?? '').trim() || null }))
       .filter((x) => x.pallet && x.so && x.li && x.item && x.qty > 0);
@@ -2398,15 +2413,19 @@ async function handlePick(env: Env, req: Request, p: string) {
     const day = colomboDay(), at = now();
     const lines: Row[] = [];
     const korberUse = new Map<string, number>();
+    const planQ = (ps: { qty: number }[]) => r3(ps.reduce((t, x) => t + x.qty, 0));
     for (const [key, ps] of byKey) {
-      const plan = await env.DB.prepare("SELECT so, li, item, qty, plant, date FROM plan WHERE week = ? AND key = ? ORDER BY COALESCE(date, '') LIMIT 1").bind(week, key).first<Row>();
+      const plan = np ? { so: ps[0].so, li: ps[0].li, item: ps[0].item, qty: planQ(ps), plant: np.plant, date: np.day } as Row
+        : await env.DB.prepare("SELECT so, li, item, qty, plant, date FROM plan WHERE week = ? AND key = ? ORDER BY COALESCE(date, '') LIMIT 1").bind(week, key).first<Row>();
       // an SO line that is not in the plan (a cut roll balance tallied to another SO): saved too, as an extra line of the Pick
       const ln: Row = { key, so: ps[0].so, li: ps[0].li, item: ps[0].item, qty: r3(ps.reduce((t, x) => t + x.qty, 0)), rolls: ps.length, ok: true, why: plan ? null : 'not in this Pick\'s plan — saved as an extra line', extra: !plan, planQty: plan ? Number(plan.qty) : null, date: plan?.date ?? parseRound(week)?.day ?? null, items: [] as Row[] };
       lines.push(ln);
       const senv = await envFor(env, weekPlantRid(week, plan?.plant ?? null));
       const lineId = `${key}|${plan?.date ?? ''}`;
       for (const x of ps) {
-        const k = await senv.DB.prepare('SELECT * FROM korber WHERE pallet = ?').bind(x.pallet).first<Row>();
+        // the Pick's Korber (its own or the shared one); else the roll as last uploaded to any Pick (a new Pick has none of its own)
+        const k = (await senv.DB.prepare('SELECT * FROM korber WHERE pallet = ?').bind(x.pallet).first<Row>())
+          ?? (await env.DB.prepare('SELECT * FROM korber WHERE pallet = ? ORDER BY rowid DESC LIMIT 1').bind(x.pallet).first<Row>());
         const dup = await env.DB.prepare('SELECT id FROM picks WHERE pallet = ? AND line = ? AND week = ? AND cancelled_at IS NULL AND abs(qty - ?) < 0.0005 LIMIT 1').bind(x.pallet, lineId, week, x.qty).first<Row>();
         const pp = await palletPicks(env, x.pallet);
         const base = pp.base ?? (k ? Number(k.qty) : null);
@@ -2422,27 +2441,51 @@ async function handlePick(env: Env, req: Request, p: string) {
     }
     const out = lines.map((l) => ({ ...l, items: (l.items as Row[]).map(({ k: _k, ...r }) => { void _k; return r; }) }));
     if (b.dry) return json({ dry: true, lines: out });
+    if (np) {
+      // the new Pick and its plan: one line per SO line of the file (QTY = what the file has for it)
+      const max = Number((await env.DB.prepare(`SELECT MAX(n) m FROM (SELECT round n FROM pick_round WHERE day = ?1 AND upper(COALESCE(plant, '')) = ?2
+        UNION ALL SELECT CAST(substr(week, 12 + instr(substr(week, 12), '~')) AS INTEGER) FROM plan WHERE plan_type = 'day' AND date = ?1 AND upper(COALESCE(plant, '')) = ?2 AND instr(week, '~') > 0)`).bind(np.day, np.plant).first<{ m: number | null }>())?.m ?? 0);
+      week = roundId(np.day, np.plant, max + 1);
+      const planRows = lines.map((l, i) => ({ key: l.key, so: l.so, li: l.li, item: l.item, date: np.day, week, qty: l.qty, plant: np.plant, remarks: `Imported from Packing List ${file}`, row_no: i + 1, src_user: s.u, src_at: at, owner: s.u, plan_type: 'day', plan_date: null }));
+      await env.DB.batch([
+        env.DB.prepare('INSERT OR IGNORE INTO plan_day (day, created_by, created_at) VALUES (?,?,?)').bind(np.day, s.u, at),
+        env.DB.prepare('INSERT OR IGNORE INTO pick_round (rid, day, plant, round, created_by, created_at) VALUES (?,?,?,?,?,?)').bind(week, np.day, np.plant, max + 1, s.u, at),
+        ...jsonInsert(env, 'plan', ['key', 'so', 'li', 'item', 'date', 'week', 'qty', 'plant', 'remarks', 'row_no', 'src_user', 'src_at', 'owner', 'plan_type', 'plan_date'], planRows),
+        env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(at, s.u, 'pick-round', `Created ${periodLabel(week)} from Packing List ${file}`),
+      ]);
+      for (const l of lines) for (const x of l.items as Row[]) x.skip = null; // a new Pick: nothing of it is saved yet
+    }
     // save: one pick per SO line (its new rolls), as a hand pick of this Pick
     let saved = 0, rollsSaved = 0;
     const seq0 = ((await env.DB.prepare('SELECT MAX(seq) n FROM pick_req WHERE day = ? AND by_user = ?').bind(day, s.u).first<{ n: number | null }>())?.n ?? 0);
     for (const l of lines) {
       if (!l.ok) continue;
-      const items = (l.items as Row[]).filter((x) => !x.skip);
-      if (!items.length) continue;
-      const key = String(l.key); const lineId = `${key}|${l.date ?? ''}`;
+      const all = (l.items as Row[]).filter((x) => !x.skip);
+      if (!all.length) continue;
+      // one pick per SO line and SAP batch (a roll's pieces of two batches stay two SAP lines); a roll twice in one: together
+      const byB = new Map<string, Row[]>();
+      for (const x of all) {
+        const g = byB.get(String(x.batch)) ?? []; if (!byB.has(String(x.batch))) byB.set(String(x.batch), g);
+        const same = g.find((y) => y.pallet === x.pallet);
+        if (same) { same.qty = r3(Number(same.qty) + Number(x.qty)); same.warn = Array.from(new Set([...(same.warn as string[]), ...(x.warn as string[])])); } else g.push({ ...x });
+      }
+      for (const items of byB.values()) {
+      const key = String(l.key); const lineId = `${key}|${np ? np.day : (l.date ?? '')}`;
       const plan = await env.DB.prepare('SELECT plant FROM plan WHERE week = ? AND key = ? LIMIT 1').bind(week, key).first<Row>();
       const senv = await envFor(env, weekPlantRid(week, plan?.plant ?? null));
-      const zm = (await senv.DB.prepare("SELECT batch, sloc, ur, plant, so_plant FROM stock WHERE src = 'zmmbe' AND key = ?").bind(key).all<Row>()).results;
+      let zm = (await senv.DB.prepare("SELECT batch, sloc, ur, plant, so_plant FROM stock WHERE src = 'zmmbe' AND key = ?").bind(key).all<Row>()).results;
+      if (!zm.length) { const r0 = await env.DB.prepare("SELECT rid FROM stock WHERE src = 'zmmbe' AND key = ? ORDER BY rowid DESC LIMIT 1").bind(key).first<Row>(); if (r0) zm = (await env.DB.prepare("SELECT batch, sloc, ur, plant, so_plant FROM stock WHERE src = 'zmmbe' AND key = ? AND rid = ?").bind(key, r0.rid).all<Row>()).results; }
       const rows: Row[] = [];
       for (const x of items) {
         const k = x.k as Row | null;
         let lots = x.insp_lot ? [String(x.insp_lot)] : [];
         if (!lots.length) {
-          const zl = (await senv.DB.prepare('SELECT lot, vendor_batch FROM zinr WHERE so = ? AND li = ? AND material = ? AND batch = ? ORDER BY lot').bind(x.so, x.li, x.item, x.batch).all<Row>()).results;
+          let zl = (await senv.DB.prepare('SELECT lot, vendor_batch FROM zinr WHERE so = ? AND li = ? AND material = ? AND batch = ? ORDER BY lot').bind(x.so, x.li, x.item, x.batch).all<Row>()).results;
+          if (!zl.length) zl = (await env.DB.prepare('SELECT DISTINCT lot, vendor_batch FROM zinr WHERE so = ? AND li = ? AND material = ? AND batch = ? ORDER BY lot').bind(x.so, x.li, x.item, x.batch).all<Row>()).results;
           const same = zl.filter((z) => k && up(z.vendor_batch) === up(k.lot));
           lots = (same.length ? same : zl).map((z) => String(z.lot));
         }
-        const shade = x.shade ?? (k ? await zcomentShade(senv, { pallet: k.pallet, item: k.item, lot: k.lot, supplier_hu: k.supplier_hu }, lots) : null);
+        const shade = x.shade ?? (k ? (await zcomentShade(senv, { pallet: k.pallet, item: k.item, lot: k.lot, supplier_hu: k.supplier_hu }, lots)) ?? (await zcomentShade(env, { pallet: k.pallet, item: k.item, lot: k.lot, supplier_hu: k.supplier_hu }, lots)) : null);
         const base = Number(x.base ?? 0) || Number(x.qty);
         rows.push({ day, week, line: lineId, so: x.so, li: x.li, item: x.item, pallet: x.pallet, qty: x.qty, roll_qty: base, partial: Number(x.qty) < base - 0.0005 ? 1 : 0, shade, lot: k?.lot ?? null, insp_lot: lots.join(',') || null, batch: x.batch || null,
           note: [`Imported from Packing List ${file} by ${s.u}`, ...((x.warn as string[]).length ? [`Check: ${(x.warn as string[]).join('; ')}`] : [])].join(' · '), by_user: s.u, at, korber: k?.raw ?? null });
@@ -2465,9 +2508,11 @@ async function handlePick(env: Env, req: Request, p: string) {
         } catch (e) { if (attempt < 4 && /UNIQUE|PRIMARY KEY|constraint/i.test(String((e as Error)?.message ?? e))) continue; throw e; }
       }
       saved++; rollsSaved += rows.length;
+      }
     }
+    if (np) await broadcast(env, { type: 'data', src: 'plan', by: s.u, rows: lines.length });
     if (saved) await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: rollsSaved, weeks: [week] });
-    return json({ ok: true, picks: saved, rolls: rollsSaved, lines: out });
+    return json({ ok: true, picks: saved, rolls: rollsSaved, lines: out, week, label: periodLabel(week) });
   }
 
   if (part === 'korber' && req.method === 'GET') {
