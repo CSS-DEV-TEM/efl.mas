@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { api, clearSession, DIV_NAME, getDiv, getSession, saveSession, setDiv, userDivs, type Div, type User } from '@/lib/api';
+import { APP_VERSION, api, clearSession, DIV_NAME, getDiv, getSession, saveSession, setDiv, userDivs, type Div, type User } from '@/lib/api';
 import { Credit, Logo } from '@/components/Brand';
 
 export default function LoginPage() {
@@ -42,6 +42,7 @@ export default function LoginPage() {
         <div className="login-logo"><Logo size={56} /></div>
         <div>
           <h1>MAS AUTOMATE PICK SYSTEM</h1>
+          <p className="muted small" style={{ margin: 0 }}>{APP_VERSION}</p>
           <p>Sign in to plan, pick and dispatch against ZMMBE, ZINSR, ZCOMENT and Korber stock.</p>
         </div>
         <div className="login-div" role="radiogroup" aria-label="System">

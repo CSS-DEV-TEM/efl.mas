@@ -2,7 +2,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { ApiError, DIV_NAME, NEEDS_API, ROLE_NAME, api, clearSession, getDiv, getSession, getViewUser, onApiBusy, saveSession, setDiv, setViewUser, userDivs, type Div, type User } from '@/lib/api';
+import { APP_VERSION, ApiError, DIV_NAME, NEEDS_API, ROLE_NAME, api, clearSession, getDiv, getSession, getViewUser, onApiBusy, saveSession, setDiv, setViewUser, userDivs, type Div, type User } from '@/lib/api';
 import { useLive, type LiveMessage, type LiveState } from '@/lib/live';
 import { Credit, Logo } from '@/components/Brand';
 import TableFilters from '@/components/TableFilters';
@@ -86,9 +86,10 @@ export default function Shell({ children, admin, allowGuest }: { children: React
 
   // warn when the website was updated but the Cloudflare Worker was not
   const [oldApi, setOldApi] = useState<number | null>(null);
+  const [apiV, setApiV] = useState<number | null>(null);
   useEffect(() => {
     if (!user || guest) return;
-    api<{ version?: number }>('/api/health').then((h) => setOldApi((h.version ?? 0) < NEEDS_API ? h.version ?? 0 : null)).catch(() => {});
+    api<{ version?: number }>('/api/health').then((h) => { setApiV(h.version ?? null); setOldApi((h.version ?? 0) < NEEDS_API ? h.version ?? 0 : null); }).catch(() => {});
   }, [user, guest]);
 
   // admins and viewers choose whose plan / picks they look at; editors only ever see their own
@@ -151,6 +152,7 @@ export default function Shell({ children, admin, allowGuest }: { children: React
       <header className="bar">
         <div className="bar-in">
           <Link href="/" className="brand"><Logo size={30} /><span className="tpl-badge" aria-label="3PL"><span>3PL</span></span><span className="brand-text">MAS AUTOMATE PICK SYSTEM</span></Link>
+          <span className="ver-badge" title={`Website ${APP_VERSION}${apiV ? ` · Worker API ${apiV}` : ''}`}>{APP_VERSION}{apiV ? ` · API ${apiV}` : ''}</span>
           {/* the system open now: MAS Active or MAS Kreeda — a user with both switches here */}
           {userDivs(user).length > 1 ? (
             <div className={`div-switch ${div}`} role="radiogroup" aria-label="System">
@@ -194,7 +196,7 @@ export default function Shell({ children, admin, allowGuest }: { children: React
         </div>
       )}
       {children}
-      <footer className="site-foot"><Logo size={22} /><span>EFL 3PL · MAS AUTOMATE PICK SYSTEM</span><Credit /></footer>
+      <footer className="site-foot"><Logo size={22} /><span>EFL 3PL · MAS AUTOMATE PICK SYSTEM · {APP_VERSION}{apiV ? ` · API ${apiV}` : ''}</span><Credit /></footer>
       <div className="toasts" aria-live="polite">
         {toasts.map((t) => <div key={t.id} className="toast">{t.text}</div>)}
       </div>

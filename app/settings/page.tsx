@@ -343,21 +343,22 @@ function planPeriod(p: { week: string; day?: string | null }) {
 }
 
 /**
- * Settings → ZMMBE plants: for each plant (Settings → Plants), its ZMMBE Plants and, for each, the SO Plants that count —
- * as many SO Plants as needed. Saved as Plant + SO Plant pairs (the same rule as before): only rows of these pairs go into UR;
- * the others are left out and listed at the upload. No pairs: every row counts.
+ * Settings → ZMMBE plants (v122): for each plant (Settings → Plants & target times), the SO Plants it may take stock from — as
+ * many as needed. The ZMMBE Plant is not set up: a row of any Plant in the uploaded ZMMBE counts, by its SO Plant. A Pick takes
+ * stock only from the SO Plants of its own plant. Saved as pairs with Plant "*". Nothing set up: every row counts.
  */
-interface PlantGroup { link: string; plant: string; sos: string[]; add: string }
+interface PlantGroup { link: string; sos: string[]; add: string }
 function ZmmbePlants({ toast }: { toast: (m: string) => void }) {
   const [groups, setGroups] = useState<PlantGroup[] | null>(null);
   const [plants, setPlants] = useState<PlantInfo[]>([]);
   const [seen, setSeen] = useState<{ plant: string; soPlant: string; n: number; ur: number; leftOut?: boolean }[]>([]);
   const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
+  // one row per plant: the SO Plants of all its old ZMMBE Plant rows together
   const toGroups = (pairs: PlantPair[]) => {
     const out: PlantGroup[] = [];
     for (const x of pairs) {
-      const g = out.find((o) => o.link === (x.link || '') && o.plant === x.plant);
-      if (g) { if (!g.sos.includes(x.soPlant || '*')) g.sos.push(x.soPlant || '*'); } else out.push({ link: x.link || '', plant: x.plant, sos: [x.soPlant || '*'], add: '' });
+      const g = out.find((o) => o.link === (x.link || ''));
+      if (g) { if (!g.sos.includes(x.soPlant || '*')) g.sos.push(x.soPlant || '*'); } else out.push({ link: x.link || '', sos: [x.soPlant || '*'], add: '' });
     }
     return out;
   };
@@ -373,53 +374,49 @@ function ZmmbePlants({ toast }: { toast: (m: string) => void }) {
   const pairs = (gs: PlantGroup[]) => {
     const out: PlantPair[] = [];
     for (const g of gs) {
-      const plant = g.plant.trim().toUpperCase(); if (!plant) continue;
       const sos = Array.from(new Set([...g.sos, ...codes(g.add)]));
-      for (const so of sos.length ? sos : ['*']) if (!out.some((o) => o.plant === plant && o.soPlant === so)) out.push({ plant, soPlant: so, link: g.link });
+      for (const so of sos) if (!out.some((o) => o.link === g.link && o.soPlant === so)) out.push({ plant: '*', soPlant: so, link: g.link });
     }
     return out;
   };
-  // covered: the exact pair, or that Plant with SO Plant * (any)
-  const has = (p: string, sp: string) => pairs(groups || []).some((x) => x.plant === p && (x.soPlant === (sp || '*') || x.soPlant === '*'));
-  const linkName = (c: string) => { const p = plants.find((x) => x.code.toUpperCase() === c); return c ? (p?.name ? `${p.name} (${p.code})` : c) : '— no plant —'; };
+  // covered: that SO Plant under any plant, or "*" (any SO Plant)
+  const has = (sp: string) => pairs(groups || []).some((x) => x.soPlant === (sp || '*') || x.soPlant === '*');
   const save = async () => {
     setBusy(true); setErr('');
     try {
       const clean = pairs(groups || []);
-      // one Plant + SO Plant pair can belong to one plant only
-      const twice = clean.filter((x, i) => clean.findIndex((y) => y.plant === x.plant && y.soPlant === x.soPlant) !== i);
-      if (twice.length) throw new Error(`${twice.map((x) => `${x.plant} + ${x.soPlant}`).join(', ')} is set up twice — keep it under one plant.`);
       const r = await api<{ settings: SystemSettings }>('/api/settings', { method: 'POST', body: { zmmbePlants: clean } });
-      setGroups(toGroups(r.settings.zmmbePlants || [])); toast(`ZMMBE plants saved (${(r.settings.zmmbePlants || []).length} Plant + SO Plant) — they apply from the next ZMMBE upload`);
+      const g2 = toGroups(r.settings.zmmbePlants || []);
+      setGroups(g2); toast(`ZMMBE plants saved (${g2.length} plant${g2.length === 1 ? '' : 's'}) — they apply from the next ZMMBE upload`);
     } catch (e) { setErr(e instanceof Error ? e.message : 'Could not save.'); } finally { setBusy(false); }
   };
   if (!groups) return <section className="card">{err ? <div className="notice bad">{err}</div> : <Loader />}</section>;
-  // grouped by the linked plant (Settings → Plants order), then by ZMMBE Plant
   const order = (c: string) => { const i = plants.findIndex((p) => p.code.toUpperCase() === c); return i < 0 ? 999 : i; };
   const shown = groups.map((g, i) => ({ g, i })).sort((a, b) => order(a.g.link) - order(b.g.link) || a.g.link.localeCompare(b.g.link) || a.i - b.i);
-  const quickAdd = (x: { plant: string; soPlant: string }) => setGroups((l) => {
+  const quickAdd = (x: { soPlant: string }) => setGroups((l) => {
     const gs = [...(l || [])]; const so = x.soPlant || '*';
-    const j = gs.findIndex((g) => g.plant === x.plant);
+    const j = gs.findIndex((g) => g.link === so);
     if (j >= 0) { gs[j] = { ...gs[j], sos: Array.from(new Set([...gs[j].sos, so])) }; return gs; }
-    const link = plants.some((p) => p.code.toUpperCase() === (x.soPlant || x.plant)) ? (x.soPlant || x.plant) : '';
-    return [...gs, { link, plant: x.plant, sos: [so], add: '' }];
+    const link = plants.some((p) => p.code.toUpperCase() === so) ? so : '';
+    return [...gs, { link, sos: [so], add: '' }];
   });
+  // a plant chosen on two rows: they are one plant (merged when saved)
+  const linksTwice = new Set(groups.map((g) => g.link).filter((l, i, a) => a.indexOf(l) !== i));
   return (
     <section className="card set-card">
       <h2>ZMMBE plants</h2>
-      <p className="sub">For each plant: the ZMMBE <b>Plant</b>s and, for each, <b>all its SO Plants</b> that count (add as many as needed — type them with a comma, e.g. <span className="mono">C068, C050</span>). Only rows of these Plant + SO Plant go into UR (and KFC / PFC); the others are left out and listed when the ZMMBE is uploaded. <b>*</b> = any SO Plant of that Plant. With nothing set up, every ZMMBE row counts (as before).</p>
+      <p className="sub">For each plant (Settings → Plants &amp; target times): <b>the SO Plants</b> its Picks take stock from (add as many as needed — type them with a comma, e.g. <span className="mono">C068, C050</span>). The ZMMBE <b>Plant</b> is not set up — a row of <b>any Plant</b> in the uploaded ZMMBE counts for UR, but a Pick takes stock <b>only from the SO Plants of its own plant</b>; rows of other SO Plants are left out and listed when the ZMMBE is uploaded. <b>*</b> = any SO Plant. A plant with nothing set up takes every SO Plant set up here (nothing set up at all: every row counts).</p>
       <div className="table-wrap" style={{ maxHeight: 'none' }}>
         <table className="mini" data-nofilter>
-          <thead><tr><th>Plant (linked)</th><th>ZMMBE Plant</th><th>SO Plants</th><th /></tr></thead>
+          <thead><tr><th>Plant (linked)</th><th>SO Plants</th><th /></tr></thead>
           <tbody>
-            {shown.map(({ g, i }, n) => (
-              <tr key={i} style={n > 0 && shown[n - 1].g.link !== g.link ? { borderTop: '2px solid var(--line, #888)' } : undefined}>
+            {shown.map(({ g, i }) => (
+              <tr key={i}>
                 <td><select value={g.link} onChange={(e) => upd(i, (x) => ({ ...x, link: e.target.value }))} aria-label="Linked plant">
                   <option value="">— none —</option>
                   {plants.map((p) => <option key={p.code} value={p.code.toUpperCase()}>{p.name ? `${p.name} (${p.code})` : p.code}</option>)}
                   {g.link && !plants.some((p) => p.code.toUpperCase() === g.link) && <option value={g.link}>{g.link}</option>}
-                </select></td>
-                <td><input className="set-text" style={{ width: 100 }} value={g.plant} onChange={(e) => upd(i, (x) => ({ ...x, plant: e.target.value.toUpperCase() }))} placeholder="C065" aria-label={`ZMMBE Plant of ${linkName(g.link)}`} /></td>
+                </select>{linksTwice.has(g.link) && <div className="muted small">on 2 rows — merged when saved</div>}</td>
                 <td>
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' }}>
                     {g.sos.map((so) => (
@@ -428,29 +425,29 @@ function ZmmbePlants({ toast }: { toast: (m: string) => void }) {
                       </span>
                     ))}
                     <input className="set-text" style={{ width: 150 }} value={g.add} onChange={(e) => upd(i, (x) => ({ ...x, add: e.target.value.toUpperCase() }))}
-                      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addSo(i); } }} placeholder="C068, C050 …" aria-label={`Add SO Plants to ${g.plant || 'this ZMMBE Plant'}`} />
+                      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addSo(i); } }} placeholder="C068, C050 …" aria-label="Add SO Plants" />
                     <button type="button" className="btn sm" disabled={!codes(g.add).length} onClick={() => addSo(i)}>+ Add</button>
                   </div>
                 </td>
-                <td><button type="button" className="btn sm" aria-label="Remove this ZMMBE Plant" onClick={() => setGroups((l) => (l || []).filter((_, j) => j !== i))}>✕</button></td>
+                <td><button type="button" className="btn sm" aria-label="Remove this plant" onClick={() => setGroups((l) => (l || []).filter((_, j) => j !== i))}>✕</button></td>
               </tr>
             ))}
-            {!groups.length && <tr><td colSpan={4} className="muted">Nothing set up yet — every ZMMBE row counts. Add a plant below.</td></tr>}
+            {!groups.length && <tr><td colSpan={3} className="muted">Nothing set up yet — every ZMMBE row counts. Add a plant below.</td></tr>}
           </tbody>
         </table>
       </div>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', margin: '10px 0' }}>
-        <button type="button" className="btn sm" onClick={() => setGroups((l) => [...(l || []), { link: plants[0]?.code.toUpperCase() ?? '', plant: '', sos: [], add: '' }])}>+ Add ZMMBE Plant</button>
+        <button type="button" className="btn sm" onClick={() => setGroups((l) => [...(l || []), { link: plants.find((p) => !(l || []).some((g) => g.link === p.code.toUpperCase()))?.code.toUpperCase() ?? '', sos: [], add: '' }])}>+ Add plant</button>
       </div>
       {seen.length > 0 && (
         <div className="notice" style={{ display: 'grid', gap: 6 }}>
-          <b>Plant + SO Plant in the ZMMBE uploaded</b>
-          <span className="muted small">Click one to add it (to its ZMMBE Plant&apos;s row, or a new row). “left out” = in the last ZMMBE but not set up here, so its UR did not count — upload the ZMMBE again after saving.</span>
+          <b>SO Plants in the ZMMBE uploaded</b>
+          <span className="muted small">Click one to add it (to the plant of that code, or a new row). “left out” = in the last ZMMBE but not set up here, so its UR did not count — upload the ZMMBE again after saving.</span>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
             {seen.map((x) => (
-              <button key={`${x.plant}|${x.soPlant}`} type="button" className={`btn sm ${has(x.plant, x.soPlant) ? '' : 'primary'}`} disabled={has(x.plant, x.soPlant)}
+              <button key={x.soPlant} type="button" className={`btn sm ${has(x.soPlant) ? '' : 'primary'}`} disabled={has(x.soPlant)}
                 title={`${x.n} rows · UR ${x.ur}${x.leftOut ? ' — left out at the last ZMMBE upload (not set up here)' : ''}`} onClick={() => quickAdd(x)}>
-                {has(x.plant, x.soPlant) ? '✓ ' : '+ '}{x.plant} + {x.soPlant || '–'} <span className="muted">· {x.n} rows{x.leftOut && !has(x.plant, x.soPlant) ? ` · UR ${x.ur} left out` : ''}</span>
+                {has(x.soPlant) ? '✓ ' : '+ '}{x.soPlant || '–'} <span className="muted">· {x.n} rows{x.leftOut && !has(x.soPlant) ? ` · UR ${x.ur} left out` : ''}</span>
               </button>
             ))}
           </div>

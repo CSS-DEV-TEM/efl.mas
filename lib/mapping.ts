@@ -107,6 +107,10 @@ export function guessSrcFromGrid(grid: Grid): Src | null {
   for (let r = 0; r < Math.min(12, grid.length); r++) {
     const row = (grid[r] || []).map((v) => String(v ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim());
     const has = (...a: string[]) => a.some((x) => row.includes(x));
+    // a pull plan (also the weekly pull workbook: its TRANSFER NOTE column is a report column, not a TRR) — SO / LI / ITEM
+    // CODE / QTY and none of the TRR's own columns; a TRR report keeps its TN number / TN QTY / plants
+    const trrOwn = has('tn qty', 'tn number', 'tn no', 'tn date', 'created by', 'from plant', 'to plant', 'supplying plant', 'receiving plant');
+    if (!trrOwn && has('item code') && has('qty', 'quantity') && has('so', 'sales order') && has('li', 'line item', 'so item')) return 'plan';
     if (has('tn', 'tn number', 'tn no', 'transfer note') && has('so', 'sales order')) return 'trr';
     if (has('item code') && has('qty', 'quantity') && has('so', 'sales order')) return 'plan';
     if (has('unrestricted', 'ur', 'unrestricted stock', 'sales order ur stock', 'so qi stock') && has('material')) return 'zmmbe';

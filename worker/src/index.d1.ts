@@ -560,7 +560,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 71; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 72; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -807,12 +807,15 @@ async function handleUpload(env: Env, req: Request) {
       const plantLoc = new Set(rules.plantSlocs.map(up));
       const keep: Row[] = [];
       const miss = new Map<string, { plant: string; soPlant: string; rows: number; ur: number }>();
+      // a Pick's ZMMBE: only the SO Plants of the Pick's plant (Settings → Plants & target times) — any ZMMBE Plant
+      const pCode = pickRid ? await pickPlantCode(env, pickRid) : '';
+      const use = pickSoPairs(rules.zmmbePlants, pCode);
       for (const r of mapped) {
-        const pr = pairOf(rules.zmmbePlants, r.plant, r.so_plant);
+        const pr = pairOf(use.pairs, r.plant, r.so_plant, pCode);
         if (pr) { r.plant_link = pr.link || null; keep.push(r); continue; }
         if (plantLoc.has(up(r.sloc))) { keep.push(r); continue; } // a plant-location row: left out by its own rule below
-        const k = `${up(r.plant)}|${up(r.so_plant)}`;
-        const m = miss.get(k) || { plant: up(r.plant), soPlant: up(r.so_plant), rows: 0, ur: 0 };
+        const k = up(r.so_plant); // left out by its SO Plant (any ZMMBE Plant)
+        const m = miss.get(k) || { plant: '*', soPlant: up(r.so_plant), rows: 0, ur: 0 };
         m.rows++; m.ur = r3(m.ur + Number(r.ur || 0)); miss.set(k, m);
       }
       notInSetup = Array.from(miss.values()).sort((a, b) => b.ur - a.ur);
@@ -821,11 +824,11 @@ async function handleUpload(env: Env, req: Request) {
       try {
         const old = JSON.parse(String((await env.DB.prepare("SELECT v FROM config WHERE k = 'zmmbe_left_out'").first<{ v: string }>())?.v ?? '[]')) as { plant: string; soPlant: string; rows: number; ur: number; at: string }[];
         const at = now();
-        const merged = [...notInSetup.map((m) => ({ ...m, at })), ...old.filter((o) => !notInSetup.some((m) => m.plant === o.plant && m.soPlant === o.soPlant))].slice(0, 100);
+        const merged = [...notInSetup.map((m) => ({ ...m, at })), ...old.filter((o) => !notInSetup.some((m) => m.soPlant === o.soPlant))].slice(0, 100);
         await env.DB.prepare("INSERT INTO config (k, v) VALUES ('zmmbe_left_out', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(JSON.stringify(merged)).run();
       } catch { /* only a hint */ }
       mapped = keep;
-      if (!mapped.length) throw new HttpError(400, `No row of this ZMMBE is a Plant + SO Plant set up in Settings → ZMMBE plants (${notInSetup.map((m) => `${m.plant} + ${m.soPlant || '–'}`).join(', ')}). Add them there first.`);
+      if (!mapped.length) throw new HttpError(400, `No row of this ZMMBE has an SO Plant set up${use.own ? ` for ${pCode}` : ''} in Settings → ZMMBE plants (it has ${notInSetup.map((m) => m.soPlant || '–').join(', ')}). Add them there first.`);
     }
     if (body.src === 'zmmbe' && rules.deriveFromZmmbe) {
       // one ZMMBE gives the other reports, like the Pull Plan workbook: PFC = the PFC storage locations (41, COMF),
@@ -989,9 +992,11 @@ const slocList = (v: unknown, def: string[]) => Array.isArray(v) || typeof v ===
 function plantPairs(v: unknown): Settings['zmmbePlants'] {
   const out: Settings['zmmbePlants'] = [];
   for (const x of Array.isArray(v) ? v : []) {
-    const plant = String((x as Row)?.plant ?? '').trim().toUpperCase(), soPlant = String((x as Row)?.soPlant ?? '').trim().toUpperCase() || '*';
-    if (!plant || out.some((o) => o.plant === plant && o.soPlant === soPlant)) continue;
-    out.push({ plant, soPlant, link: String((x as Row)?.link ?? '').trim().toUpperCase() });
+    // v122: the ZMMBE Plant is not set up (any Plant of the uploaded ZMMBE): "*"; one SO Plant may be under several plants
+    const plant = '*', soPlant = String((x as Row)?.soPlant ?? '').trim().toUpperCase() || '*';
+    const link = String((x as Row)?.link ?? '').trim().toUpperCase();
+    if (out.some((o) => o.link === link && o.soPlant === soPlant)) continue;
+    out.push({ plant, soPlant, link });
   }
   return out.slice(0, 200);
 }
@@ -1034,10 +1039,28 @@ function locBlocker(st: Settings) {
   };
 }
 /** the setup pair a ZMMBE row belongs to (exact SO Plant first, then "*"); null = not in the setup */
-const pairOf = (pairs: Settings['zmmbePlants'], plant: unknown, soPlant: unknown) => {
-  const p0 = String(plant ?? '').trim().toUpperCase(), s0 = String(soPlant ?? '').trim().toUpperCase();
-  return pairs.find((x) => x.plant === p0 && x.soPlant === s0) ?? pairs.find((x) => x.plant === p0 && x.soPlant === '*') ?? null;
+// v122: a ZMMBE row counts by its SO Plant only (any ZMMBE Plant). `pairs` are the SO Plants that count — for a Pick, those of
+// its plant (pickSoPairs); the link is the Pick's plant when it is one of them, else the plant of that code, else the first
+const pairOf = (pairs: Settings['zmmbePlants'], _plant: unknown, soPlant: unknown, prefer = '') => {
+  const s0 = String(soPlant ?? '').trim().toUpperCase();
+  const hit = pairs.filter((x) => x.soPlant === s0);
+  const any = hit.length ? hit : pairs.filter((x) => x.soPlant === '*');
+  if (!any.length) return null;
+  return any.find((x) => prefer && x.link === prefer) ?? any.find((x) => x.link === s0) ?? any[0];
 };
+/** the plant code (Settings → Plants & target times, by code or Name) of a Pick's plant */
+async function pickPlantCode(env: Env, rid: string): Promise<string> {
+  const rp = parseRound(rid)?.plant ?? '';
+  if (!rp) return '';
+  const sq = (v: unknown) => String(v ?? '').replace(/\s+/g, '').toUpperCase();
+  const hit = (await env.DB.prepare('SELECT code, name FROM plant_info').all<Row>()).results.find((x) => sq(x.code) === sq(rp) || sq(x.name) === sq(rp));
+  return hit ? sq(hit.code) : '';
+}
+/** Settings → ZMMBE plants for a Pick: the SO Plants set up for the Pick's plant only; none set up for it (or no Pick) = all */
+function pickSoPairs(pairs: Settings['zmmbePlants'], code: string) {
+  const own = code ? pairs.filter((x) => x.link === code) : [];
+  return { pairs: own.length ? own : pairs, own: own.length > 0 };
+}
 async function getSettings(env: Env): Promise<Settings> {
   try {
     const v = (await env.DB.prepare("SELECT v FROM config WHERE k = 'settings'").first<{ v: string }>())?.v;
@@ -2301,7 +2324,10 @@ async function handlePick(env: Env, req: Request, p: string) {
           for (const x of rows) { const b0 = normId(x.batch); const e = byB.get(b0); if (e) e.ur = r3(e.ur + Number(x.ur || 0)); else byB.set(b0, { row: x, ur: Number(x.ur || 0) }); }
           // and never more from a batch than ZINSR's Insp. Lot Quantity of it for this SO line (less what the line took from it)
           const lotQ = await batchLotQty(kenv, so, li, item), takenB = await batchTaken(E, so, li, item);
+          // the roll is stock of its ZROLLMGT System Batch: its balance goes only to that SAP batch (never another batch)
+          const sysB = normId(zr?.batch ?? '');
           const free = [...byB.entries()].map(([b0, e]) => ({ b0, row: e.row, free: Math.max(0, r3(Math.min(e.ur - (usedB.get(b0) ?? 0), (lotQ.get(b0) ?? 0) - (takenB.get(b0) ?? 0)))) })).filter((e) => e.free > 1e-9)
+            .filter((e) => (sysB ? e.b0 === sysB : true))
             .sort((a, b) => Number(lotB.has(b.b0)) - Number(lotB.has(a.b0)) || b.free - a.free);
           const pickB = free[0];
           if (!pickB) continue;
@@ -3771,9 +3797,17 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
   const lineId = `${key}|${date}`;
   // the warehouse stock of the line (ZMMBE): plant storage locations (40, 70, 75) are ALRADY SEND, not UR to pick;
   // UR = Total − SO QI − SO Blocked − Assigned (an Assigned Qty is never picked)
-  const plantLocs = new Set(((await getSettings(env)).plantSlocs || []).map((x) => up(normId(x))));
-  const stock = (await env.DB.prepare("SELECT plant, sloc, so_plant, so, li, material, batch, style, ur, qi, block, assigned, total FROM stock WHERE src = 'zmmbe' AND key = ? ORDER BY batch").bind(key).all<Row>()).results
+  const st0 = await getSettings(env);
+  const plantLocs = new Set((st0.plantSlocs || []).map((x) => up(normId(x))));
+  // v122: only the SO Plants set up for the Pick's plant (Settings → ZMMBE plants, by its Plants & target times code) give
+  // stock — whatever the ZMMBE Plant; nothing set up for that plant = every SO Plant (as before)
+  const pCode = (st0.zmmbePlants || []).length ? await pickPlantCode(env, week) : '';
+  const own = pickSoPairs(st0.zmmbePlants || [], pCode);
+  const soOk = own.own ? new Set(own.pairs.map((x) => x.soPlant)) : null;
+  const stockAll = (await env.DB.prepare("SELECT plant, sloc, so_plant, so, li, material, batch, style, ur, qi, block, assigned, total FROM stock WHERE src = 'zmmbe' AND key = ? ORDER BY batch").bind(key).all<Row>()).results
     .filter((x) => !plantLocs.has(up(normId(x.sloc))));
+  const stock = soOk && !soOk.has('*') ? stockAll.filter((x) => soOk.has(up(x.so_plant))) : stockAll;
+  if (stock.length < stockAll.length) steps.push(`${stockAll.length - stock.length} ZMMBE row(s) of SO Plant ${Array.from(new Set(stockAll.filter((x) => !stock.includes(x)).map((x) => up(x.so_plant) || '–'))).join(', ')} left out — not an SO Plant of ${pCode} in Settings → ZMMBE plants.`);
   const pickedLine = Number((await env.DB.prepare('SELECT COALESCE(SUM(qty), 0) q FROM picks WHERE week = ? AND line = ? AND cancelled_at IS NULL').bind(week, lineId).first<{ q: number }>())?.q ?? 0);
   const urTotal = r3(stock.reduce((t, x) => t + Math.max(0, Number(x.ur) || 0), 0));
   const planQty = r3(Number(line.qty));
@@ -4753,11 +4787,18 @@ export default {
       }
       else if (p === '/api/zmmbe-pairs' && req.method === 'GET') {
         await requireUser(env, req, 'admin');
-        const inStock = (await env.DB.prepare("SELECT upper(COALESCE(plant, '')) plant, upper(COALESCE(so_plant, '')) soPlant, COUNT(*) n, ROUND(SUM(ur), 3) ur FROM stock WHERE src = 'zmmbe' GROUP BY 1, 2 ORDER BY ur DESC").all<Row>()).results;
+        // by SO Plant only (the ZMMBE Plant is not set up any more)
+        const inStock = (await env.DB.prepare("SELECT '*' plant, upper(COALESCE(so_plant, '')) soPlant, COUNT(*) n, ROUND(SUM(ur), 3) ur FROM stock WHERE src = 'zmmbe' GROUP BY 2 ORDER BY ur DESC").all<Row>()).results;
         // + the pairs left out at the last ZMMBE uploads (not set up here, so not in the stock)
         let out: { plant: string; soPlant: string; rows: number; ur: number }[] = [];
         try { out = JSON.parse(String((await env.DB.prepare("SELECT v FROM config WHERE k = 'zmmbe_left_out'").first<{ v: string }>())?.v ?? '[]')); } catch { /* none */ }
-        const extra = out.filter((o) => !inStock.some((x) => x.plant === o.plant && x.soPlant === o.soPlant)).map((o) => ({ plant: o.plant, soPlant: o.soPlant, n: o.rows, ur: o.ur, leftOut: true }));
+        const lo = new Map<string, { plant: string; soPlant: string; n: number; ur: number; leftOut: boolean }>();
+        for (const o of out) {
+          if (inStock.some((x) => x.soPlant === o.soPlant)) continue;
+          const m = lo.get(o.soPlant) || { plant: '*', soPlant: o.soPlant, n: 0, ur: 0, leftOut: true };
+          m.n += Number(o.rows) || 0; m.ur = r3(m.ur + (Number(o.ur) || 0)); lo.set(o.soPlant, m);
+        }
+        const extra = Array.from(lo.values());
         res = json({ pairs: [...inStock, ...extra] });
       }
       else if (p === '/api/days') res = await handleDays(env, req);

@@ -983,3 +983,6 @@ tr.on-hold td { background: color-mix(in srgb, #ef4444 9%, transparent); }
 .div-pick label { display: inline-flex; gap: 5px; align-items: center; font-size: 12.5px; white-space: nowrap; }
 @media (max-width: 760px) { .div-switch button { padding: 4px 7px; font-size: 11px; } }
 .run-panel.offline { border-color: color-mix(in srgb, var(--warn, #b7791f) 60%, var(--line)); background: color-mix(in srgb, var(--warn, #b7791f) 8%, var(--panel)); }
+
+/* release shown next to the name */
+.ver-badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line, #ccc); color: var(--muted, #666); white-space: nowrap; align-self: center; }
