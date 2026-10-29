@@ -1081,7 +1081,7 @@ async function cached<T>(env: Env, k: string, make: () => Promise<T>): Promise<T
  * Never in a backup: the users and their passwords, the login key and the database link (config).
  */
 // the original Excel files are not in a backup (they are big; the reports' data is)
-const BACKUP_SKIP = new Set(['users', 'sqlite_sequence', '_cf_METADATA', '_cf_KV', 'upload_file', 'upload_file_part']);
+const BACKUP_SKIP = new Set(['users', 'cand_cache', 'sqlite_sequence', '_cf_METADATA', '_cf_KV', 'upload_file', 'upload_file_part']);
 const CONFIG_SECRET = "k IN ('jwt_secret', 'database_url', 'schema_v', 'rev') OR k LIKE 'c\\_%' ESCAPE '\\'";
 async function backupTables(env: Env) {
   const t = (await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\' ORDER BY name").all<{ name: string }>()).results;
@@ -2209,8 +2209,9 @@ async function handlePick(env: Env, req: Request, p: string) {
     // the Pick's own ZMMBE / ZINR / ZCOMENT VIEW / Korber (else the shared ones); the pick history is shared by all
     const lrid = weekPlantRid(week, line.plant);
     const senv0 = await envFor(env, lrid);
-    // ?slow=1: without the read-ahead (to compare)
-    return json(await pickCandidates(url.searchParams.get('slow') ? senv0 : await fastEnv(senv0, normId(line.item)), week, key, date, line, lrid));
+    // ?slow=1: without the read-ahead and the kept answer (to compare)
+    if (url.searchParams.get('slow')) return json(await pickCandidates(senv0, week, key, date, line, lrid));
+    return json(await candCached(env, `${week}|${key}|${date}|${lrid}`, async () => pickCandidates(await fastEnv(senv0, normId(line.item)), week, key, date, line, lrid)));
   }
 
   // Korber rolls to choose by hand: same item first; search by pallet, lot or supplier HU; with what is left of each
@@ -2235,19 +2236,20 @@ async function handlePick(env: Env, req: Request, p: string) {
     const s = await requireUser(env, req, 'editor');
     const plantLocs = new Set(((await getSettings(env)).plantSlocs || []).map((x) => up(normId(x))));
     /** a cut roll: its balance and where it can go */
-    const rollInfo = async (pallet: string, src: Row, used: Map<string, number> = new Map()) => {
+    // E: the database to read (a GET reads through a per-request read cache: the same read once)
+    const rollInfo = async (pallet: string, src: Row, used: Map<string, number> = new Map(), E: Env = env) => {
       const lrid = weekPlantRid(String(src.week), src.plant);
-      const kenv = await envFor(env, lrid);
+      const kenv = await envFor(E, lrid);
       const k = await kenv.DB.prepare('SELECT * FROM korber WHERE pallet = ?').bind(up(pallet)).first<Row>();
-      const pp = await palletPicks(env, pallet);
+      const pp = await palletPicks(E, pallet);
       // what the roll really has: the Korber QTY, at most its ZROLLMGT Available
       const zr = await kenv.DB.prepare('SELECT qty, batch, rid FROM zroll WHERE barcode = ?').bind(up(pallet)).first<Row>();
       const base0 = pp.base ?? Number(k?.qty ?? 0);
       let balance = Math.max(0, r3(base0 - pp.before));
       // ZROLLMGT Available is as of its upload: only what was picked from the roll after that upload comes off it
       if (zr && zr.qty !== null && Number.isFinite(Number(zr.qty))) {
-        const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zroll' AND rid = ?").bind(String(zr.rid ?? '')).first<{ at: string | null }>())?.at ?? '';
-        const afterZ = Number((await env.DB.prepare('SELECT COALESCE(SUM(qty), 0) q FROM picks WHERE upper(pallet) = ? AND cancelled_at IS NULL AND at > ?').bind(up(pallet), zAt).first<{ q: number }>())?.q ?? 0);
+        const zAt = (await E.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zroll' AND rid = ?").bind(String(zr.rid ?? '')).first<{ at: string | null }>())?.at ?? '';
+        const afterZ = Number((await E.DB.prepare('SELECT COALESCE(SUM(qty), 0) q FROM picks WHERE upper(pallet) = ? AND cancelled_at IS NULL AND at > ?').bind(up(pallet), zAt).first<{ q: number }>())?.q ?? 0);
         balance = Math.max(0, Math.min(balance, r3(Number(zr.qty) - afterZ)));
       }
       const base = base0;
@@ -2257,7 +2259,7 @@ async function handlePick(env: Env, req: Request, p: string) {
       // code or its Name; only an SO line with that SO Plant in ZMMBE takes it
       const sq = (v: unknown) => up(String(v ?? '').replace(/\s+/g, ''));
       const pickPlant = sq(parseRound(src.week)?.plant ?? src.plant);
-      const pinfo = pickPlant ? (await env.DB.prepare('SELECT code, name FROM plant_info').all<Row>()).results.find((x) => sq(x.code) === pickPlant || sq(x.name) === pickPlant) : undefined;
+      const pinfo = pickPlant ? (await E.DB.prepare('SELECT code, name FROM plant_info').all<Row>()).results.find((x) => sq(x.code) === pickPlant || sq(x.name) === pickPlant) : undefined;
       const srcPlants = new Set<string>(pinfo ? [sq(pinfo.code)] : []);
       if (k && vb && balance > 1e-9 && srcPlants.size) {
         // ZMMBE: same Material and LI number, UR in the warehouse (not the plant storage locations) — the cut roll's own SO
@@ -2266,7 +2268,7 @@ async function handlePick(env: Env, req: Request, p: string) {
           .bind(normId(src.item), normId(src.li)).all<Row>()).results.filter((x) => !plantLocs.has(up(normId(x.sloc))))
           // only an SO of the same SO Plant as the cut roll's SO line (ZMMBE SO Plant; else the Pick's plant)
           .filter((x) => srcPlants.has(sq(x.so_plant)));
-        const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(lrid).first<{ at: string | null }>())?.at ?? '';
+        const zAt = (await E.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(lrid).first<{ at: string | null }>())?.at ?? '';
         // the SO lines the roll was cut for (in the plan): their own UR takes the balance first
         const ownLines = new Set([`${normId(src.so)}|${normId(src.li)}`, ...pp.picks.map((x) => `${normId(x.so)}|${normId(x.li)}`)]);
         for (const key of Array.from(new Set(st.map((x) => String(x.key))))) {
@@ -2278,7 +2280,7 @@ async function handlePick(env: Env, req: Request, p: string) {
           // what that SO line already took: since the ZMMBE upload (not in its UR yet), and from these lots
           // what that SO line took since the ZMMBE upload (not out of its UR yet), by SAP batch: a roll counts on its
           // ZROLLMGT batch, a tallied balance on the batch it was tallied to
-          const took = (await env.DB.prepare("SELECT pallet, qty, batch, note FROM picks WHERE substr(line, 1, length(?1) + 1) = ?1 || '|' AND cancelled_at IS NULL AND at > ?2").bind(key, zAt).all<Row>()).results;
+          const took = (await E.DB.prepare("SELECT pallet, qty, batch, note FROM picks WHERE substr(line, 1, length(?1) + 1) = ?1 || '|' AND cancelled_at IS NULL AND at > ?2").bind(key, zAt).all<Row>()).results;
           const after = r3(took.reduce((t, x) => t + Number(x.qty || 0), 0));
           const usedB = new Map<string, number>();
           for (const x of took) {
@@ -2287,7 +2289,7 @@ async function handlePick(env: Env, req: Request, p: string) {
             usedB.set(b0, r3((usedB.get(b0) ?? 0) + Number(x.qty || 0)));
           }
           const lotIds = lots.map((l) => String(l.lot));
-          const fromLots = r3(Number((await env.DB.prepare("SELECT COALESCE(SUM(qty), 0) q FROM picks WHERE substr(line, 1, length(?1) + 1) = ?1 || '|' AND cancelled_at IS NULL AND EXISTS (SELECT 1 FROM json_each('[\"' || replace(COALESCE(insp_lot, ''), ',', '\",\"') || '\"]') j WHERE j.value IN (SELECT value FROM json_each(?2)))").bind(key, JSON.stringify(lotIds)).first<{ q: number }>())?.q ?? 0));
+          const fromLots = r3(Number((await E.DB.prepare("SELECT COALESCE(SUM(qty), 0) q FROM picks WHERE substr(line, 1, length(?1) + 1) = ?1 || '|' AND cancelled_at IS NULL AND EXISTS (SELECT 1 FROM json_each('[\"' || replace(COALESCE(insp_lot, ''), ',', '\",\"') || '\"]') j WHERE j.value IN (SELECT value FROM json_each(?2)))").bind(key, JSON.stringify(lotIds)).first<{ q: number }>())?.q ?? 0));
           const urAll = Math.max(0, r3(rows.reduce((t, x) => t + Number(x.ur || 0), 0) - after));
           const lotRoom = Math.max(0, r3(lots.reduce((t, l) => t + Number(l.qty || 0), 0) - fromLots));
           // the SAP line: a batch of the SO line with UR left — the ZINSR lot's batch first, then the most UR left
@@ -2295,7 +2297,7 @@ async function handlePick(env: Env, req: Request, p: string) {
           const byB = new Map<string, { row: Row; ur: number }>();
           for (const x of rows) { const b0 = normId(x.batch); const e = byB.get(b0); if (e) e.ur = r3(e.ur + Number(x.ur || 0)); else byB.set(b0, { row: x, ur: Number(x.ur || 0) }); }
           // and never more from a batch than ZINSR's Insp. Lot Quantity of it for this SO line (less what the line took from it)
-          const lotQ = await batchLotQty(kenv, so, li, item), takenB = await batchTaken(env, so, li, item);
+          const lotQ = await batchLotQty(kenv, so, li, item), takenB = await batchTaken(E, so, li, item);
           const free = [...byB.entries()].map(([b0, e]) => ({ b0, row: e.row, free: Math.max(0, r3(Math.min(e.ur - (usedB.get(b0) ?? 0), (lotQ.get(b0) ?? 0) - (takenB.get(b0) ?? 0)))) })).filter((e) => e.free > 1e-9)
             .sort((a, b) => Number(lotB.has(b.b0)) - Number(lotB.has(a.b0)) || b.free - a.free);
           const pickB = free[0];
@@ -2333,12 +2335,13 @@ async function handlePick(env: Env, req: Request, p: string) {
       const out: Row[] = [];
       const seen = new Set<string>();
       const used = new Map<string, number>();
+      const memo = url.searchParams.get('slow') ? env : await fastEnv(env, ''); // ?slow=1: without the read cache (to compare)
       for (const r of reqs) {
         for (const p of (await env.DB.prepare('SELECT pallet, qty, batch, lot FROM picks WHERE req_id = ? AND cancelled_at IS NULL').bind(r.id).all<Row>()).results) {
           const pal = up(p.pallet);
           if (seen.has(pal)) continue;
           seen.add(pal);
-          const info = await rollInfo(pal, { ...r, batch: p.batch }, used);
+          const info = await rollInfo(pal, { ...r, batch: p.batch }, used, memo);
           if (!(info.balance > 1e-9)) continue;
           out.push({ pallet: pal, from: r.id, so: r.so, li: r.li, item: r.item, week: r.week, so_plant: info.plants.join(', ') || null, plant_missing: info.plantSet ? null : (info.pickPlant || '–'), roll_qty: info.base, balance: info.balance, lot: info.k?.lot ?? p.lot, location: info.k?.location ?? null,
             targets: info.targets.map((t) => ({ ...t, zmmbe: undefined })) });
@@ -2424,6 +2427,8 @@ async function handlePick(env: Env, req: Request, p: string) {
     const lines: Row[] = [];
     const korberUse = new Map<string, number>();
     const planQ = (ps: { qty: number }[]) => r3(ps.reduce((t, x) => t + x.qty, 0));
+    // the checks read through a per-request read cache (the same roll / SO line read once); the plan and the saving below use the database
+    const R = await fastEnv(env, '');
     for (const [key, ps] of byKey) {
       let plan = np ? { so: ps[0].so, li: ps[0].li, item: ps[0].item, qty: planQ(ps), plant: np.plant, date: np.day } as Row
         : await env.DB.prepare("SELECT so, li, item, qty, plant, date FROM plan WHERE week = ? AND key = ? ORDER BY COALESCE(date, '') LIMIT 1").bind(week, key).first<Row>();
@@ -2438,18 +2443,18 @@ async function handlePick(env: Env, req: Request, p: string) {
       // an SO line that is not in the plan (a cut roll balance tallied to another SO): saved too, as an extra line of the Pick
       const ln: Row = { key, so: ps[0].so, li: ps[0].li, item: ps[0].item, qty: r3(ps.reduce((t, x) => t + x.qty, 0)), rolls: ps.length, ok: true, why: plan ? null : 'not in this Pick\'s plan — saved as an extra line', extra: !plan, planQty: plan ? Number(plan.qty) : null, date: plan?.date ?? parseRound(week)?.day ?? null, items: [] as Row[] };
       lines.push(ln);
-      const senv = await envFor(env, weekPlantRid(week, plan?.plant ?? null));
+      const senv = await envFor(R, weekPlantRid(week, plan?.plant ?? null));
       const lineId = `${key}|${plan?.date ?? ''}`;
       for (const x of ps) {
         // the Pick's Korber (its own or the shared one); else the roll as last uploaded to any Pick (a new Pick has none of its own)
         const k = (await senv.DB.prepare('SELECT * FROM korber WHERE pallet = ?').bind(x.pallet).first<Row>())
-          ?? (await env.DB.prepare('SELECT * FROM korber WHERE pallet = ? ORDER BY rowid DESC LIMIT 1').bind(x.pallet).first<Row>());
-        const dup = await env.DB.prepare('SELECT id FROM picks WHERE pallet = ? AND line = ? AND week = ? AND cancelled_at IS NULL AND abs(qty - ?) < 0.0005 LIMIT 1').bind(x.pallet, lineId, week, x.qty).first<Row>();
-        const pp = await palletPicks(env, x.pallet);
+          ?? (await R.DB.prepare('SELECT * FROM korber WHERE pallet = ? ORDER BY rowid DESC LIMIT 1').bind(x.pallet).first<Row>());
+        const dup = await R.DB.prepare('SELECT id FROM picks WHERE pallet = ? AND line = ? AND week = ? AND cancelled_at IS NULL AND abs(qty - ?) < 0.0005 LIMIT 1').bind(x.pallet, lineId, week, x.qty).first<Row>();
+        const pp = await palletPicks(R, x.pallet);
         const base = pp.base ?? (k ? Number(k.qty) : null);
         // the roll picked in another Pick: it moves here (its picks there are taken off when this is saved) — the user's own
         // picks, or anyone's for Admin / Head
-        const others = dup ? [] : (await env.DB.prepare('SELECT p.id, p.req_id, p.week, p.so, p.li, p.qty, p.by_user, q.day req_day FROM picks p JOIN pick_req q ON q.id = p.req_id WHERE p.pallet = ? AND p.week <> ? AND p.cancelled_at IS NULL').bind(x.pallet, week).all<Row>()).results;
+        const others = dup ? [] : (await R.DB.prepare('SELECT p.id, p.req_id, p.week, p.so, p.li, p.qty, p.by_user, q.day req_day FROM picks p JOIN pick_req q ON q.id = p.req_id WHERE p.pallet = ? AND p.week <> ? AND p.cancelled_at IS NULL').bind(x.pallet, week).all<Row>()).results;
         const notMine = others.filter((o) => !isBoss(s) && o.by_user !== s.u);
         const moving = notMine.length ? [] : others;
         const used = r3(pp.before - moving.reduce((t, o) => t + Number(o.qty), 0) + (korberUse.get(x.pallet) ?? 0));
@@ -2465,9 +2470,9 @@ async function handlePick(env: Env, req: Request, p: string) {
       // more from a batch than ZINSR's Insp. Lot Quantity of it (a check: the file is what was sent)
       {
         let lotQ = await batchLotQty(senv, ln.so, ln.li, ln.item);
-        if (!lotQ.size) lotQ = await batchLotQty(env, ln.so, ln.li, ln.item);
+        if (!lotQ.size) lotQ = await batchLotQty(R, ln.so, ln.li, ln.item);
         if (lotQ.size) {
-          const taken = await batchTaken(env, ln.so, ln.li, ln.item);
+          const taken = await batchTaken(R, ln.so, ln.li, ln.item);
           const moved = new Map<string, number>();
           for (const x of ln.items as Row[]) for (const o of (x.move as Row[]) || []) if (normId(o.so) === normId(ln.so) && normId(o.li) === normId(ln.li)) moved.set(normId(x.batch), r3((moved.get(normId(x.batch)) ?? 0) + Number(o.qty)));
           const add = new Map<string, number>();
@@ -2646,7 +2651,7 @@ async function handlePick(env: Env, req: Request, p: string) {
     }
     const lrid = weekPlantRid(b.week, line.plant);
     const senv = await envFor(env, lrid); // this Pick's reports (a week plan line: its week + plant's)
-    const cand = await pickCandidates(senv, b.week, b.key, b.date ?? '', line, lrid);
+    const cand = await pickCandidates(await fastEnv(senv, normId(line.item)), b.week, b.key, b.date ?? '', line, lrid);
     const gate = await makeGate(senv);
     const byPallet = new Map(cand.rolls.map((r) => [r.pallet, r]));
     const lineId = `${b.key}|${b.date ?? ''}`;
@@ -3524,6 +3529,35 @@ async function batchLotQty(env: Env, so: unknown, li: unknown, item: unknown) {
   }
   return out;
 }
+/**
+ * The candidate rolls of a plan line, kept until anything changes: every change (a pick, an upload, a hold, a plan …)
+ * moves "rev", and the settings are part of the key — so the same line asked again (another user opening the Pick, the
+ * "Needs manual" check) is read back instead of worked out again. Kept 15 minutes at most.
+ */
+let candCacheReady = false;
+async function candCached<T>(env: Env, id: string, make: () => Promise<T>): Promise<T> {
+  let rev = '', st = '';
+  try {
+    if (!candCacheReady) { await env.DB.prepare('CREATE TABLE IF NOT EXISTS cand_cache (k TEXT PRIMARY KEY, rev TEXT NOT NULL, at TEXT NOT NULL, v TEXT NOT NULL)').run(); candCacheReady = true; }
+    const [r1, r2] = await env.DB.batch([
+      env.DB.prepare("SELECT k, v FROM config WHERE k IN ('rev', 'settings')"),
+      env.DB.prepare('SELECT rev, at, v FROM cand_cache WHERE k = ?').bind(id),
+    ]);
+    for (const x of r1.results as Row[]) { if (x.k === 'rev') rev = String(x.v ?? ''); else st = String(x.v ?? ''); }
+    const tag = `${API_VERSION}|${rev}|${st.length}:${hashStr(st)}`;
+    const hit = (r2.results as Row[])[0];
+    if (hit && hit.rev === tag && Date.now() - Date.parse(String(hit.at)) < 15 * 60e3) return JSON.parse(String(hit.v)) as T;
+    const v = await make();
+    try {
+      await env.DB.batch([
+        env.DB.prepare('DELETE FROM cand_cache WHERE rev <> ? OR at < ?').bind(tag, new Date(Date.now() - 15 * 60e3).toISOString()),
+        env.DB.prepare('INSERT OR REPLACE INTO cand_cache (k, rev, at, v) VALUES (?,?,?,?)').bind(id, tag, now(), JSON.stringify(v)),
+      ]);
+    } catch { /* only a cache */ }
+    return v;
+  } catch { return make(); }
+}
+function hashStr(t: string) { let h = 2166136261; for (let i = 0; i < t.length; i++) { h ^= t.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36); }
 async function palletPicks(env: Env, pallet: unknown) {
   const ph = (await env.DB.prepare(`SELECT p.day, p.by_user, p.qty, p.roll_qty, p.week, p.so, p.li, p.at, p.req_id, r.pick_no FROM picks p LEFT JOIN pick_req r ON r.id = p.req_id
     WHERE p.pallet = ? AND p.cancelled_at IS NULL ORDER BY p.id`).bind(String(pallet ?? '')).all<Row>()).results;
