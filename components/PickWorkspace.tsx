@@ -1580,7 +1580,7 @@ interface FoundPick { id: number; day: string; plan: string; so: string; li: str
  * as picks of this Pick. First a check — each SO line in the Pick's plan? each roll in Korber, already picked? — then Save.
  * A roll already saved for the same SO line with the same QTY is skipped, so the same file twice adds nothing.
  */
-interface ImportItem extends PLPiece { skip: string | null; warn: string[] }
+interface ImportItem extends PLPiece { skip: string | null; warn: string[]; move?: { plan: string; so: string; li: string; qty: number; by: string }[] }
 interface ImportLine { key: string; so: string; li: string; item: string; qty: number; rolls: number; ok: boolean; why: string | null; extra?: boolean; planQty: number | null; items: ImportItem[] }
 function ImportPLDialog({ week, label, toast, onClose }: { week: string; label: string; toast: (m: string) => void; onClose: (changed: boolean) => void }) {
   // where it goes: a new Pick of its own (default: the day and plant of the Pick on screen) or this Pick
@@ -1612,7 +1612,20 @@ function ImportPLDialog({ week, label, toast, onClose }: { week: string; label: 
     if (!parsed || !file) return;
     setBusy('Saving…'); setErr('');
     try {
-      const r = await api<{ picks: number; rolls: number; week: string; label: string }>('/api/pick/import', { method: 'POST', body: { ...target(), fileName: file.name, pieces: parsed.pieces } });
+      // a few SO lines per request (a big Packing List in one go can be too much for one server call); the first one makes
+      // the new Pick, the next ones go into it
+      const keyOf = (x: PLPiece) => `${x.so}|${x.li}|${x.item}`;
+      const keys = Array.from(new Set(parsed.pieces.map(keyOf)));
+      const CH = 8;
+      let tgt: Record<string, unknown> = target();
+      const r = { picks: 0, rolls: 0, week: '', label: '' };
+      for (let i = 0; i < keys.length; i += CH) {
+        const part = new Set(keys.slice(i, i + CH));
+        setBusy(`Saving… ${Math.min(i + CH, keys.length)} / ${keys.length} SO lines`);
+        const x = await api<{ picks: number; rolls: number; week: string; label: string }>('/api/pick/import', { method: 'POST', body: { ...tgt, fileName: file.name, pieces: parsed.pieces.filter((p) => part.has(keyOf(p))) } });
+        r.picks += x.picks; r.rolls += x.rolls; r.week = x.week; r.label = x.label;
+        tgt = mode === 'new' ? { week: x.week, addPlan: true } : { week: x.week };
+      }
       toast(`Packing List imported${mode === 'new' ? ` as a new Pick — ${r.label}` : ` into ${label}`}: ${r.picks} pick${r.picks === 1 ? '' : 's'}, ${r.rolls} roll${r.rolls === 1 ? '' : 's'}`);
       if (mode === 'new' && r.week) {
         // open the new Pick
@@ -1620,9 +1633,10 @@ function ImportPLDialog({ week, label, toast, onClose }: { week: string; label: 
         setTimeout(() => window.location.reload(), 900);
       }
       onClose(true);
-    } catch (e) { setErr(e instanceof Error ? e.message : 'Could not save.'); setBusy(''); }
+    } catch (e) { const m = e instanceof Error ? e.message : 'Could not save.'; setErr(m); toast(`Packing List not saved: ${m}`); setBusy(''); }
   };
   const lines = check || [];
+  const moveN = lines.reduce((t, l) => t + l.items.filter((x) => !x.skip && x.move?.length).length, 0);
   const bad = lines.filter((l) => !l.ok);
   const warnN = lines.reduce((t, l) => t + l.items.filter((x) => !x.skip && x.warn.length).length, 0);
   const skipN = lines.reduce((t, l) => t + l.items.filter((x) => x.skip).length, 0);
@@ -1658,7 +1672,8 @@ function ImportPLDialog({ week, label, toast, onClose }: { week: string; label: 
           <>
             <div className="chips" style={{ margin: '6px 0' }}>
               <span className="pill ok">{toSave.length} roll{toSave.length === 1 ? '' : 's'} to save · {fmtQty(r3(toSave.reduce((t, x) => t + x.qty, 0)))}</span>
-              {skipN > 0 && <span className="pill mute">{skipN} already in the system (skipped)</span>}
+              {skipN > 0 && <span className="pill mute">{skipN} skipped</span>}
+              {moveN > 0 && <span className="pill info" title="These rolls are picked in another Pick: on Save they are taken off there and saved here">{moveN} roll{moveN === 1 ? '' : 's'} move here from other Picks</span>}
               {warnN > 0 && <span className="pill warn">{warnN} with a check</span>}
               {bad.length > 0 && <span className="pill bad">{bad.length} SO line{bad.length === 1 ? '' : 's'} left out</span>}
               {lines.some((l) => l.extra) && <span className="pill warn" title="Not in this Pick's plan (e.g. a cut roll balance tallied to another SO) — saved as extra lines">{lines.filter((l) => l.extra).length} SO line{lines.filter((l) => l.extra).length === 1 ? '' : 's'} not in the plan (saved as extra)</span>}
@@ -1671,12 +1686,12 @@ function ImportPLDialog({ week, label, toast, onClose }: { week: string; label: 
                   return [
                     <tr key={l.key} className={l.ok ? '' : 'gone'} style={{ cursor: 'pointer' }} onClick={() => setOpen(open === l.key ? null : l.key)}>
                       <td><b>{l.so} / {l.li}</b> · {l.item}</td><td className="n">{l.rolls}</td><td className="n">{fmtQty(l.qty)}</td><td className="n">{l.planQty == null ? '–' : fmtQty(l.planQty)}</td>
-                      <td>{!l.ok ? <span className="pill bad">{l.why}</span> : <>{sk === l.items.length ? <span className="pill mute">all in the system</span> : <span className="pill ok">{l.items.length - sk} to save</span>}{sk > 0 && sk < l.items.length && <span className="pill mute" style={{ marginLeft: 4 }}>{sk} skipped</span>}{wn.length > 0 && <span className="pill warn" style={{ marginLeft: 4 }}>{wn.length} check</span>}{l.extra && <span className="pill warn" style={{ marginLeft: 4 }} title={l.why ?? ''}>not in the plan</span>}</>} <span className="muted small">{open === l.key ? '▾' : '▸'}</span></td>
+                      <td>{!l.ok ? <span className="pill bad">{l.why}</span> : <>{sk === l.items.length ? <span className="pill mute">all in the system</span> : <span className="pill ok">{l.items.length - sk} to save</span>}{sk > 0 && sk < l.items.length && <span className="pill mute" style={{ marginLeft: 4 }}>{sk} skipped</span>}{wn.length > 0 && <span className="pill warn" style={{ marginLeft: 4 }}>{wn.length} check</span>}{l.items.some((x) => !x.skip && x.move?.length) && <span className="pill info" style={{ marginLeft: 4 }}>{l.items.filter((x) => !x.skip && x.move?.length).length} move</span>}{l.extra && <span className="pill warn" style={{ marginLeft: 4 }} title={l.why ?? ''}>not in the plan</span>}</>} <span className="muted small">{open === l.key ? '▾' : '▸'}</span></td>
                     </tr>,
                     open === l.key && <tr key={l.key + '#'}><td colSpan={5}>
                       <table className="mini"><thead><tr><th>Pallet</th><th className="n">QTY</th><th>Batch</th><th>Shade</th><th /></tr></thead>
                         <tbody>{l.items.map((x, i) => <tr key={i}><td className="mono">{x.pallet}</td><td className="n">{fmtQty(x.qty)}</td><td>{x.batch}</td><td>{x.shade ?? ''}</td>
-                          <td className="small">{x.skip ? <span className="muted">{x.skip}</span> : x.warn.join(' · ')}</td></tr>)}</tbody></table>
+                          <td className="small">{x.skip ? <span className="muted">{x.skip}</span> : [...(x.move?.length ? [`moves here from ${Array.from(new Set(x.move.map((o) => `${o.plan} (${o.so} / ${o.li}, ${o.qty})`))).join(', ')}`] : []), ...x.warn].join(' · ')}</td></tr>)}</tbody></table>
                     </td></tr>,
                   ];
                 })}</tbody>
@@ -1687,7 +1702,7 @@ function ImportPLDialog({ week, label, toast, onClose }: { week: string; label: 
         {err && <div className="notice bad">{err}</div>}
         <div className="modal-foot"><span style={{ flex: 1 }} />
           <button className="btn" onClick={() => onClose(false)}>Close</button>
-          <button className="btn primary" disabled={!!busy || !toSave.length} aria-busy={busy === 'Saving…' || undefined} onClick={save}>{busy === 'Saving…' ? 'Saving…' : `Save ${toSave.length} roll${toSave.length === 1 ? '' : 's'} as picks`}</button>
+          <button className="btn primary" disabled={!!busy || !toSave.length} aria-busy={busy.startsWith('Saving') || undefined} onClick={save}>{busy.startsWith('Saving') ? busy : `Save ${toSave.length} roll${toSave.length === 1 ? '' : 's'} as picks${moveN ? ` (${moveN} moved)` : ''}`}</button>
         </div>
       </div>
     </div>

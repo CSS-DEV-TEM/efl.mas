@@ -560,7 +560,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 69; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 70; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -2395,7 +2395,7 @@ async function handlePick(env: Env, req: Request, p: string) {
   //   A roll already picked for the same SO line with the same QTY is skipped (the same file twice adds nothing).
   if (part === 'import' && req.method === 'POST') {
     const s = await requireUser(env, req, 'editor');
-    const b = (await req.json()) as { week?: string; newPick?: { day?: string; plant?: string }; fileName?: string; dry?: boolean; pieces?: { pallet?: string; so?: string; li?: string | number; item?: string | number; batch?: string | number; qty?: number; shade?: string; insp_lot?: string }[] };
+    const b = (await req.json()) as { addPlan?: boolean; week?: string; newPick?: { day?: string; plant?: string }; fileName?: string; dry?: boolean; pieces?: { pallet?: string; so?: string; li?: string | number; item?: string | number; batch?: string | number; qty?: number; shade?: string; insp_lot?: string }[] };
     let week = String(b.week || '');
     // newPick: the Packing List becomes a Pick of its own (the next Pick No of that plant on that day), its SO lines its plan
     const np0 = b.newPick ? { day: normDate(b.newPick.day), plant: cleanPlant(b.newPick.plant) } : null;
@@ -2415,8 +2415,16 @@ async function handlePick(env: Env, req: Request, p: string) {
     const korberUse = new Map<string, number>();
     const planQ = (ps: { qty: number }[]) => r3(ps.reduce((t, x) => t + x.qty, 0));
     for (const [key, ps] of byKey) {
-      const plan = np ? { so: ps[0].so, li: ps[0].li, item: ps[0].item, qty: planQ(ps), plant: np.plant, date: np.day } as Row
+      let plan = np ? { so: ps[0].so, li: ps[0].li, item: ps[0].item, qty: planQ(ps), plant: np.plant, date: np.day } as Row
         : await env.DB.prepare("SELECT so, li, item, qty, plant, date FROM plan WHERE week = ? AND key = ? ORDER BY COALESCE(date, '') LIMIT 1").bind(week, key).first<Row>();
+      // addPlan (the next part of a Pick made from this Packing List): its SO lines join that Pick's plan
+      const rr = parseRound(week);
+      if (!plan && b.addPlan && rr && !b.dry) {
+        const nRow = Number((await env.DB.prepare('SELECT COALESCE(MAX(row_no), 0) n FROM plan WHERE week = ?').bind(week).first<{ n: number }>())?.n ?? 0) + 1;
+        plan = { so: ps[0].so, li: ps[0].li, item: ps[0].item, qty: planQ(ps), plant: rr.plant, date: rr.day } as Row;
+        await env.DB.batch(jsonInsert(env, 'plan', ['key', 'so', 'li', 'item', 'date', 'week', 'qty', 'plant', 'remarks', 'row_no', 'src_user', 'src_at', 'owner', 'plan_type', 'plan_date'],
+          [{ key, so: plan.so, li: plan.li, item: plan.item, date: rr.day, week, qty: plan.qty, plant: rr.plant, remarks: `Imported from Packing List ${file}`, row_no: nRow, src_user: s.u, src_at: at, owner: s.u, plan_type: 'day', plan_date: null }]));
+      }
       // an SO line that is not in the plan (a cut roll balance tallied to another SO): saved too, as an extra line of the Pick
       const ln: Row = { key, so: ps[0].so, li: ps[0].li, item: ps[0].item, qty: r3(ps.reduce((t, x) => t + x.qty, 0)), rolls: ps.length, ok: true, why: plan ? null : 'not in this Pick\'s plan — saved as an extra line', extra: !plan, planQty: plan ? Number(plan.qty) : null, date: plan?.date ?? parseRound(week)?.day ?? null, items: [] as Row[] };
       lines.push(ln);
@@ -2429,18 +2437,43 @@ async function handlePick(env: Env, req: Request, p: string) {
         const dup = await env.DB.prepare('SELECT id FROM picks WHERE pallet = ? AND line = ? AND week = ? AND cancelled_at IS NULL AND abs(qty - ?) < 0.0005 LIMIT 1').bind(x.pallet, lineId, week, x.qty).first<Row>();
         const pp = await palletPicks(env, x.pallet);
         const base = pp.base ?? (k ? Number(k.qty) : null);
-        const used = r3(pp.before + (korberUse.get(x.pallet) ?? 0));
+        // the roll picked in another Pick: it moves here (its picks there are taken off when this is saved) — the user's own
+        // picks, or anyone's for Admin / Head
+        const others = dup ? [] : (await env.DB.prepare('SELECT p.id, p.req_id, p.week, p.so, p.li, p.qty, p.by_user, q.day req_day FROM picks p JOIN pick_req q ON q.id = p.req_id WHERE p.pallet = ? AND p.week <> ? AND p.cancelled_at IS NULL').bind(x.pallet, week).all<Row>()).results;
+        const notMine = others.filter((o) => !isBoss(s) && o.by_user !== s.u);
+        const moving = notMine.length ? [] : others;
+        const used = r3(pp.before - moving.reduce((t, o) => t + Number(o.qty), 0) + (korberUse.get(x.pallet) ?? 0));
         const warn: string[] = [];
         if (!k) warn.push('not in this Pick\'s Korber Inventory');
         else if (String(k.pick_id ?? '0') !== '0' && String(k.pick_id ?? '') !== '') warn.push(`Korber Pick Id ${k.pick_id}`);
         if (!dup && base !== null && used + x.qty > base + 0.0005) warn.push(`more than the roll: ${r3(used + x.qty)} of ${base} picked`);
         if (k && normId(k.item) && normId(k.item) !== x.item) warn.push(`Korber item ${normId(k.item)}`);
-        if (!dup) korberUse.set(x.pallet, r3((korberUse.get(x.pallet) ?? 0) + x.qty));
-        (ln.items as Row[]).push({ ...x, skip: dup ? 'already in the system' : null, warn, k, base });
+        const skip = dup ? 'already in the system' : notMine.length ? `picked in ${Array.from(new Set(notMine.map((o) => periodLabel(o.week)))).join(', ')} by ${Array.from(new Set(notMine.map((o) => o.by_user))).join(', ')} — only Admin / Head can move it here` : null;
+        if (!skip) korberUse.set(x.pallet, r3((korberUse.get(x.pallet) ?? 0) + x.qty));
+        (ln.items as Row[]).push({ ...x, skip, warn, k, base, move: moving.map((o) => ({ id: o.id, req_id: o.req_id, week: o.week, plan: periodLabel(o.week), so: o.so, li: o.li, qty: o.qty, by: o.by_user, day: o.req_day })) });
       }
     }
     const out = lines.map((l) => ({ ...l, items: (l.items as Row[]).map(({ k: _k, ...r }) => { void _k; return r; }) }));
     if (b.dry) return json({ dry: true, lines: out });
+    // the rolls that move here: their picks in the other Picks are taken off first (a pick left with no roll goes)
+    {
+      const mv = new Map<number, Row>();
+      for (const l of lines) for (const x of l.items as Row[]) if (!x.skip) for (const o of (x.move as Row[]) || []) mv.set(Number(o.id), o);
+      if (mv.size) {
+        const at0 = now();
+        const reqs = Array.from(new Set(Array.from(mv.values()).map((o) => Number(o.req_id))));
+        const who = Array.from(new Map(Array.from(mv.values()).map((o) => [`${o.day}|${o.by}`, o])).values());
+        const stmts: D1PreparedStatement[] = [env.DB.prepare('DELETE FROM picks WHERE id IN (SELECT value FROM json_each(?))').bind(JSON.stringify(Array.from(mv.keys())))];
+        for (const r of reqs) stmts.push(
+          env.DB.prepare('UPDATE pick_req SET qty = (SELECT COALESCE(SUM(qty), 0) FROM picks WHERE req_id = ?1), rolls = (SELECT COUNT(*) FROM picks WHERE req_id = ?1) WHERE id = ?1').bind(r),
+          env.DB.prepare('DELETE FROM pick_req WHERE id = ? AND NOT EXISTS (SELECT 1 FROM picks WHERE req_id = pick_req.id)').bind(r));
+        for (const w of who) stmts.push(env.DB.prepare(`UPDATE pick_req SET seq = (SELECT COUNT(*) FROM pick_req x WHERE x.day = pick_req.day AND x.by_user = pick_req.by_user AND x.id <= pick_req.id) WHERE day = ?1 AND by_user = ?2`).bind(w.day, w.by));
+        stmts.push(env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(at0, s.u, 'pick',
+          `Packing List ${file}: ${mv.size} roll pick(s) moved here from ${Array.from(new Set(Array.from(mv.values()).map((o) => o.plan))).join(', ')} (${Array.from(new Set(Array.from(mv.values()).map((o) => `${o.so} / ${o.li}`))).slice(0, 20).join(', ')})`));
+        await env.DB.batch(stmts);
+        for (const w of Array.from(new Set(Array.from(mv.values()).map((o) => String(o.week))))) await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: 0, weeks: [w] });
+      }
+    }
     if (np) {
       // the new Pick and its plan: one line per SO line of the file (QTY = what the file has for it)
       const max = Number((await env.DB.prepare(`SELECT MAX(n) m FROM (SELECT round n FROM pick_round WHERE day = ?1 AND upper(COALESCE(plant, '')) = ?2
@@ -2453,7 +2486,6 @@ async function handlePick(env: Env, req: Request, p: string) {
         ...jsonInsert(env, 'plan', ['key', 'so', 'li', 'item', 'date', 'week', 'qty', 'plant', 'remarks', 'row_no', 'src_user', 'src_at', 'owner', 'plan_type', 'plan_date'], planRows),
         env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(at, s.u, 'pick-round', `Created ${periodLabel(week)} from Packing List ${file}`),
       ]);
-      for (const l of lines) for (const x of l.items as Row[]) x.skip = null; // a new Pick: nothing of it is saved yet
     }
     // save: one pick per SO line (its new rolls), as a hand pick of this Pick
     let saved = 0, rollsSaved = 0;
@@ -2488,7 +2520,7 @@ async function handlePick(env: Env, req: Request, p: string) {
         const shade = x.shade ?? (k ? (await zcomentShade(senv, { pallet: k.pallet, item: k.item, lot: k.lot, supplier_hu: k.supplier_hu }, lots)) ?? (await zcomentShade(env, { pallet: k.pallet, item: k.item, lot: k.lot, supplier_hu: k.supplier_hu }, lots)) : null);
         const base = Number(x.base ?? 0) || Number(x.qty);
         rows.push({ day, week, line: lineId, so: x.so, li: x.li, item: x.item, pallet: x.pallet, qty: x.qty, roll_qty: base, partial: Number(x.qty) < base - 0.0005 ? 1 : 0, shade, lot: k?.lot ?? null, insp_lot: lots.join(',') || null, batch: x.batch || null,
-          note: [`Imported from Packing List ${file} by ${s.u}`, ...((x.warn as string[]).length ? [`Check: ${(x.warn as string[]).join('; ')}`] : [])].join(' · '), by_user: s.u, at, korber: k?.raw ?? null });
+          note: [`Imported from Packing List ${file} by ${s.u}`, ...(((x.move as Row[]) || []).length ? [`moved here from ${Array.from(new Set((x.move as Row[]).map((o) => `${o.plan} (${o.so} / ${o.li})`))).join(', ')}`] : []), ...((x.warn as string[]).length ? [`Check: ${(x.warn as string[]).join('; ')}`] : [])].join(' · '), by_user: s.u, at, korber: k?.raw ?? null });
       }
       const qty = r3(rows.reduce((t, x) => t + Number(x.qty), 0));
       const match = JSON.stringify({ zmmbe: zm, alloc: rows.map((x) => ({ pallet: x.pallet, batch: x.batch, qty: x.qty })), imported: { file, by: s.u, at } });
