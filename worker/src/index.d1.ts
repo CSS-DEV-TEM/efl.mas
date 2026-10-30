@@ -110,6 +110,19 @@ async function hashPassword(password: string, saltB64?: string) {
   const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: 100000 }, key, 256);
   return { hash: b64url(bits), salt: b64url(salt) };
 }
+/**
+ * v132: the special approval password for a roll not in ZROLLMGT (every other detail matches): set by the admin, kept hashed
+ * in the users database (both systems, never in a backup); a pick unlocks such a roll only with it.
+ */
+async function unlockPwRow(env: Env) {
+  try { const v = (await udb(env).prepare("SELECT v FROM config WHERE k = 'unlock_pw'").first<{ v: string }>())?.v; return v ? JSON.parse(v) as { hash: string; salt: string; by: string; at: string } : null; } catch { return null; }
+}
+async function unlockPwOk(env: Env, pw: unknown) {
+  const row = await unlockPwRow(env);
+  if (!row || typeof pw !== 'string' || !pw) return false;
+  const h = await hashPassword(pw, row.salt);
+  return safeEqual(h.hash, row.hash);
+}
 function safeEqual(a: string, b: string) {
   if (a.length !== b.length) return false;
   let r = 0;
@@ -562,7 +575,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 77; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 81; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1107,7 +1120,7 @@ async function cached<T>(env: Env, k: string, make: () => Promise<T>): Promise<T
  */
 // the original Excel files are not in a backup (they are big; the reports' data is)
 const BACKUP_SKIP = new Set(['users', 'presence', 'live_day', 'cand_cache', 'sqlite_sequence', '_cf_METADATA', '_cf_KV', 'upload_file', 'upload_file_part']);
-const CONFIG_SECRET = "k IN ('jwt_secret', 'database_url', 'schema_v', 'rev') OR k LIKE 'c\\_%' ESCAPE '\\'";
+const CONFIG_SECRET = "k IN ('jwt_secret', 'database_url', 'schema_v', 'rev', 'unlock_pw') OR k LIKE 'c\\_%' ESCAPE '\\'";
 async function backupTables(env: Env) {
   const t = (await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\' ORDER BY name").all<{ name: string }>()).results;
   return t.map((x) => x.name).filter((n) => !BACKUP_SKIP.has(n) && /^[a-z_][a-z0-9_]*$/i.test(n));
@@ -2115,7 +2128,7 @@ async function tallyInfo(env: Env, pallet: string, src: Row, used: Map<string, n
   const k = await kenv.DB.prepare('SELECT * FROM korber WHERE pallet = ?').bind(up(pallet)).first<Row>();
   const pp = await palletPicks(E, pallet);
   // what the roll really has: the Korber QTY, at most its ZROLLMGT Available
-  const zr = await kenv.DB.prepare('SELECT qty, batch, rid FROM zroll WHERE barcode = ?').bind(up(pallet)).first<Row>();
+  const zr = await kenv.DB.prepare('SELECT qty, batch, rid FROM zroll WHERE barcode = ? ORDER BY COALESCE(qty, 0) DESC').bind(up(pallet)).first<Row>();
   const base0 = pp.base ?? Number(k?.qty ?? 0);
   let balance = Math.max(0, r3(base0 - pp.before));
   // ZROLLMGT Available is as of its upload: only what was picked from the roll after that upload comes off it
@@ -2156,7 +2169,7 @@ async function tallyInfo(env: Env, pallet: string, src: Row, used: Map<string, n
       const after = r3(took.reduce((t, x) => t + Number(x.qty || 0), 0));
       const usedB = new Map<string, number>();
       for (const x of took) {
-        const zb = String(x.note ?? '').startsWith('Cut roll balance tallied') ? null : (await kenv.DB.prepare('SELECT batch FROM zroll WHERE barcode = ?').bind(up(x.pallet)).first<Row>())?.batch;
+        const zb = String(x.note ?? '').startsWith('Cut roll balance tallied') ? null : (await kenv.DB.prepare('SELECT batch FROM zroll WHERE barcode = ? ORDER BY COALESCE(qty, 0) DESC').bind(up(x.pallet)).first<Row>())?.batch;
         const b0 = normId(String(zb ?? String(x.batch ?? '').split(',')[0]));
         usedB.set(b0, r3((usedB.get(b0) ?? 0) + Number(x.qty || 0)));
       }
@@ -2312,6 +2325,7 @@ async function handlePick(env: Env, req: Request, p: string) {
       // one row per roll (Barcode Number). SAP lists a roll moved to another plant / batch twice: the old row has Available
       // Quantity 0 — the row with the most Available Quantity (then Status UR) is the live one
       const seen = new Map<string, Row>();
+      const seenBin = new Map<string, Row>();
       const better = (a: Row, c: Row) => (Number(c.qty ?? 0) > Number(a.qty ?? 0) + 1e-9) || (Math.abs(Number(c.qty ?? 0) - Number(a.qty ?? 0)) <= 1e-9 && up(c.status) === 'UR' && up(a.status) !== 'UR');
       for (const r of b.rows) {
         const barcode = up(g(r, 'barcode'));
@@ -2322,8 +2336,23 @@ async function handlePick(env: Env, req: Request, p: string) {
           raw: JSON.stringify(Object.fromEntries(b.header.map((h, i) => [String(h ?? ''), r[i] ?? null]).filter(([h, v]) => h && v !== null && v !== ''))) };
         if (prev) skipped++;
         if (!prev || better(prev, cand)) seen.set(barcode, cand);
+        // v130: the same roll in more than one StorageBin (a part in FIXED, the rest in another bin): each bin's row with an
+        // Available Quantity is kept too — the part in an allowed bin is what can be picked
+        if (cand.bin && Number(cand.qty ?? 0) > 1e-9) {
+          const kb = `${barcode}#${cand.bin}`;
+          const pb = seenBin.get(kb);
+          if (!pb || better(pb, cand)) seenBin.set(kb, cand);
+        }
       }
-      rows = Array.from(seen.values());
+      // the best row of each roll, plus its rows in other bins (with an Available Quantity)
+      const extra: Row[] = [];
+      for (const [kb, r0] of seenBin) {
+        const best = seen.get(kb.split('#')[0]);
+        if (!best || best === r0 || up(best.bin) === up(r0.bin)) continue;
+        if (Array.from(seenBin.entries()).filter(([k2]) => k2.split('#')[0] === r0.barcode).length < 2 && Number(best.qty ?? 0) > 1e-9) continue;
+        extra.push(r0); skipped = Math.max(0, skipped - 1);
+      }
+      rows = [...Array.from(seen.values()), ...extra];
     } else if (b.src === 'zcoment') {
       for (const r of b.rows) {
         // only the Shade Report rows: one per roll
@@ -2381,6 +2410,85 @@ async function handlePick(env: Env, req: Request, p: string) {
     // ?slow=1: without the read-ahead and the kept answer (to compare)
     if (url.searchParams.get('slow')) return json(await pickCandidates(senv0, week, key, date, line, lrid));
     return json(await candCached(env, `${week}|${key}|${date}|${lrid}`, async () => pickCandidates(await fastEnv(senv0, normId(line.item)), week, key, date, line, lrid)));
+  }
+
+  // v133: the SO line's batch is complete (its ZINSR Insp. Lot Quantity used up) — the other SO lines that can take the rolls
+  // of that batch: from ZMMBE the same Item and LI, SO Plant = the Pick plant's code (Settings → Plants & target times), UR in
+  // the roll's System Batch, a ZINSR lot with the roll's Vendor Batch (= Korber Lot Number) and room — with their rolls.
+  //   GET  /api/pick/alt?week&key&date → { complete: [batch…], lines: [{ so, li, item, so_plant, batch, ur_free, lot_room, rolls }] }
+  //   POST /api/pick/alt { week, key, date, pallet, so, li, item, qty } → picks that roll for that other SO line
+  if (part === 'alt') {
+    const s = await requireUser(env, req, 'editor');
+    const q0 = req.method === 'GET' ? Object.fromEntries(url.searchParams) as Record<string, string> : (await req.json()) as Record<string, string>;
+    const week = String(q0.week || ''), key = String(q0.key || ''), date = String(q0.date || '');
+    const line = await env.DB.prepare('SELECT so, li, item, qty, plant, date FROM plan WHERE week = ? AND key = ? AND COALESCE(date, \'\') = ?').bind(week, key, date).first<Row>();
+    if (!line) throw new HttpError(404, 'That plan line is not in this Pick.');
+    const lrid = weekPlantRid(week, line.plant);
+    const senv = await envFor(env, lrid);
+    const lineId = `${key}|${date}`;
+    const day = colomboDay();
+    const src: Row = { id: null, day, week, plant: line.plant, line: lineId, so: line.so, li: line.li, item: line.item, pick_no: null };
+    const lotQ = await batchLotQty(senv, line.so, line.li, line.item);
+    const taken = await batchTaken(env, line.so, line.li, line.item);
+    const complete = Array.from(lotQ.entries()).filter(([bt, q]) => q - (taken.get(bt) ?? 0) <= 0.0005).map(([bt, q]) => ({ batch: bt, lot_qty: q, taken: r3(taken.get(bt) ?? 0) }));
+    const doneB = new Set(complete.map((x) => x.batch));
+    const gate = await makeGate(senv);
+    if (req.method === 'GET') {
+      if (!doneB.size) return json({ complete, lines: [] });
+      const cand = await candCached(env, `${week}|${key}|${date}|${lrid}`, async () => pickCandidates(await fastEnv(senv, normId(line.item)), week, key, date, line, lrid));
+      // the rolls of the complete batches (by their ZROLLMGT System Batch, else their ZINSR batches) still on the shelf
+      const rolls: { r: Candidate; b: string }[] = [];
+      for (const r of cand.rolls as Candidate[]) {
+        if (!(Number(r.available) > 1e-9)) continue;
+        const zb = gate.loaded ? normId(await gate.batchOf(r.pallet)) : '';
+        const b = zb || (r.batches || []).map((x) => normId(x)).find((x) => doneB.has(x)) || '';
+        if (doneB.has(b)) rolls.push({ r, b });
+      }
+      const lines = new Map<string, Row>();
+      const room = new Map<string, number>();
+      for (const { r, b } of rolls) {
+        const info = await tallyInfo(env, r.pallet, { ...src, batch: b });
+        if (!info.k) continue;
+        let left = Math.min(Number(r.available), info.balance);
+        for (const t of info.targets) {
+          if (left <= 1e-9) break;
+          if (String(t.key) === key) continue;
+          const tk = String(t.key);
+          if (!room.has(tk)) room.set(tk, Number(t.can));
+          const q = r3(Math.min(left, room.get(tk)!));
+          if (!(q > 1e-9)) continue;
+          room.set(tk, r3(room.get(tk)! - q)); left = r3(left - q);
+          const [tso, tli, titem] = tk.split('|');
+          const e = lines.get(tk) ?? { key: tk, so: tso, li: tli, item: titem, so_plant: t.plant ?? null, batch: t.batch, ur_free: t.ur_free, lot_room: t.lot_room, can: t.can, lots: (t.lots as Row[]).map((l) => l.lot), rolls: [] as Row[] };
+          if (!lines.has(tk)) lines.set(tk, e);
+          (e.rolls as Row[]).push({ pallet: r.pallet, qty: q, available: r.available, lot: r.lot, location: r.location, shade: r.shade, fifo: r.fifo ?? null, cut: q < Number(r.available) - 1e-6 });
+        }
+      }
+      const out = Array.from(lines.values()).map((e) => ({ ...e, total: r3((e.rolls as Row[]).reduce((t, x) => t + Number(x.qty), 0)) }));
+      return json({ complete, lines: out, plant: (await tallyInfo(env, '', src)).plants });
+    }
+    if (req.method === 'POST') {
+      const pallet = up(q0.pallet), tkey = `${normId(q0.so)}|${normId(q0.li)}|${normId(q0.item)}`, qty = r3(Number(q0.qty) || 0);
+      if (!pallet || !(qty > 0)) throw new HttpError(400, 'Choose the roll and the QTY.');
+      if (tkey === key) throw new HttpError(400, 'That is this SO line — pick it in the pick window.');
+      const zb = gate.loaded ? normId(await gate.batchOf(pallet)) : '';
+      const info = await tallyInfo(env, pallet, { ...src, batch: zb });
+      if (!info.k) throw new HttpError(404, `Pallet ${pallet} is not in this Pick's Korber Inventory.`);
+      if (String(info.k.pick_id ?? '0') !== '0' && String(info.k.pick_id ?? '') !== '') throw new HttpError(409, `Pallet ${pallet} is on Korber Pick Id ${info.k.pick_id}.`);
+      { const why = await gate.check(pallet, null, false); if (why) throw new HttpError(409, `Pallet ${pallet} cannot be picked — ${why}.`); }
+      { const lw = gate.locWhy(info.k); if (lw) throw new HttpError(409, `Pallet ${pallet} cannot be picked — ${lw}.`); }
+      const rj = await env.DB.prepare('SELECT reason FROM pick_reject WHERE pallet = ? LIMIT 1').bind(pallet).first<Row>();
+      if (rj) throw new HttpError(409, `Pallet ${pallet} was rejected — it is not picked again.`);
+      const t = info.targets.find((x) => String(x.key) === tkey);
+      if (!t) throw new HttpError(409, `${q0.so} / ${q0.li} cannot take this roll: it needs SO Plant ${info.plants.join(', ') || '(no Plant code in Settings → Plants & target times)'}, UR in ZMMBE for the roll's batch and a ZINSR lot with Vendor Batch ${info.vb}.`);
+      if (qty > info.balance + 0.0005) throw new HttpError(409, `Pallet ${pallet} has only ${info.balance} left.`);
+      if (qty > Number(t.can) + 0.0005) throw new HttpError(409, `${q0.so} / ${q0.li} can take ${t.can} (UR free ${t.ur_free}, ZINSR lot room ${t.lot_room}).`);
+      const note = `Batch complete — ${line.so} / ${line.li} has used its ZINSR lot of batch ${t.batch}: roll ${pallet} ${qty} picked for ${normId(q0.so)} / ${normId(q0.li)} (same Item and LI, SO Plant ${t.plant ?? '–'}, ZINSR lot ${(t.lots as Row[]).map((l) => l.lot).join(', ')}, Vendor Batch ${info.vb}) by ${s.u}`;
+      const id = await saveTallyPick(env, s.u, src, pallet, t, qty, info, note);
+      await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: 1, weeks: [week] });
+      return json({ ok: true, id, pallet, so: normId(q0.so), li: normId(q0.li), qty });
+    }
+    throw new HttpError(405, 'Method not allowed.');
   }
 
   // Korber rolls to choose by hand: same item first; search by pallet, lot or supplier HU; with what is left of each
@@ -2684,7 +2792,7 @@ async function handlePick(env: Env, req: Request, p: string) {
   if (part === '' && req.method === 'POST') {
     const s = await requireUser(env, req, 'editor');
     const b = (await req.json()) as { week: string; key: string; date: string | null; pickNo?: string; kind?: string; auto?: boolean; overConfirmed?: boolean; closeShort?: boolean; rolls: { pallet: string; qty: number; confirmed?: boolean; manual?: ManualFor; nobarcode?: boolean; /** chosen by the smart suggestion in Pick all matched */ smart?: boolean }[];
-      /** manual pick: the user confirmed a roll whose Korber Lot Number is not one of the line's ZINSR lots */ lotConfirmed?: boolean };
+      /** manual pick: the user confirmed a roll whose Korber Lot Number is not one of the line's ZINSR lots */ lotConfirmed?: boolean ; approvalPw?: string };
     if (!b.week || !b.key || !Array.isArray(b.rolls) || !b.rolls.length) throw new HttpError(400, 'Choose at least one roll.');
     // one pallet once per pick (two entries would each pass the roll's balance and pick it over)
     { const seen = new Set<string>(); for (const x of b.rolls) { const k = up(x.pallet); if (seen.has(k)) throw new HttpError(400, `Pallet ${x.pallet} is twice in this pick — enter its QTY once.`); seen.add(k); } }
@@ -2708,6 +2816,7 @@ async function handlePick(env: Env, req: Request, p: string) {
     const lineId = `${b.key}|${b.date ?? ''}`;
     const day = colomboDay(), at = now();
     const picks: Row[] = [];
+    const unlockedBy = new Set<string>();
     // a roll chosen for a shade-report roll with no Barcode Number is one of its offered Korber rolls (not a manual pick)
     // the shade-report roll (or lot without Shade Report) it was chosen for: the same Korber roll can be offered for several
     const nbOption = (pallet: string, mf?: ManualFor) => {
@@ -2770,7 +2879,16 @@ async function handlePick(env: Env, req: Request, p: string) {
       const kp = await senv.DB.prepare('SELECT pick_id, location, wh FROM korber WHERE pallet = ?').bind(up(r.pallet)).first<Row>();
       if (kp && String(kp.pick_id ?? '0') !== '0' && String(kp.pick_id ?? '') !== '') throw new HttpError(409, `Pallet ${r.pallet} is on Korber Pick Id ${kp.pick_id} — only rolls with Pick Id 0 can be picked.`);
       { const lw = gate.locWhy(kp); if (lw) throw new HttpError(409, `Pallet ${r.pallet} cannot be picked — ${lw}.`); }
-      { const bc = (r as Candidate & { barcode?: string | null }).barcode ?? null; const why = await gate.check(r.pallet, bc, !!bc && !nb && !x.manual && !r.zroll); if (why) throw new HttpError(409, `Pallet ${r.pallet} cannot be picked — ${why}.`); }
+      { const bc = (r as Candidate & { barcode?: string | null }).barcode ?? null; const why = await gate.check(r.pallet, bc, !!bc && !nb && !x.manual && !r.zroll);
+        // v131: a roll not in ZROLLMGT whose other details all match, unlocked by the user ("I checked"); Pick all matched never
+        const unlocked = why === 'Not in ZROLLMGT' && r.zrollMissing && x.confirmed && !b.auto;
+        if (why && !unlocked) throw new HttpError(409, `Pallet ${r.pallet} cannot be picked — ${why}${why === 'Not in ZROLLMGT' && r.zrollMissing ? ' (tick “I checked” and give the approval password to unlock it)' : ''}.`);
+        // v132: the special approval: the unlock password (Settings → Special approval)
+        if (unlocked) {
+          if (!(await unlockPwRow(env))) throw new HttpError(403, `Pallet ${r.pallet} is not in ZROLLMGT — it needs the special approval password, and none is set yet (Admin: Settings → Pick rules → Special approval password).`);
+          if (!(await unlockPwOk(env, b.approvalPw))) throw new HttpError(403, `Pallet ${r.pallet} is not in ZROLLMGT — ${b.approvalPw ? 'the approval password is wrong' : 'enter the special approval password to unlock it'}.`);
+          unlockedBy.add(up(r.pallet));
+        } }
       const rj = await env.DB.prepare('SELECT reason, by_user, day FROM pick_reject WHERE pallet = ? ORDER BY id DESC LIMIT 1').bind(up(r.pallet)).first<Row>();
       if (rj) throw new HttpError(409, `Pallet ${r.pallet} was rejected (${rj.reason ?? '–'} · ${rj.day} · ${rj.by_user}) — it is not picked again.`);
       const q = r3(num(x.qty));
@@ -2785,6 +2903,7 @@ async function handlePick(env: Env, req: Request, p: string) {
         partial: q < left - 1e-6 || r.picked_before > 0 || inThis > 0 || r3(inThis + q) < Number(r.base_qty) - 1e-6 ? 1 : 0, shade: r.shade || (await zcomentShade(senv, { pallet: r.pallet, item: r.item, lot: r.lot, supplier_hu: r.supplier_hu }, r.insp_lots)), lot: r.lot, insp_lot: r.insp_lots.join(','), batch: r.batches.join(','),
         note: [x.smart ? `Smart suggestion (auto) — Pick all matched by ${s.u}` : '', nb ? '' : x.manual?.free ? (x.smart ? 'Item roll of the line\'s ZMMBE batch (no ZINSR lot)' : `Manual pallet for a shortage — added by ${s.u}`) : x.manual ? `Manual pick for roll ${x.manual.roll_no || '?'}${x.manual.barcode ? ' (barcode ' + x.manual.barcode + ')' : ''}` : '', r.warnings.length ? `${nb && !r.needsConfirm ? '' : 'Confirmed: '}${r.warnings.join('; ')}` : ''].filter(Boolean).join(' · ') || null,
         by_user: s.u, at, korber: r.raw });
+      if (unlockedBy.has(up(r.pallet))) { const pz = picks[picks.length - 1]; pz.note = [`Special approval: not in ZROLLMGT — unlocked with the approval password by ${s.u}`, pz.note].filter(Boolean).join(' · '); }
     }
     // rolls whose ZROLLMGT Available is shared by their batch: together never more than the batch's Available
     for (const r of cand.rolls) {
@@ -3760,6 +3879,8 @@ interface Candidate {
   zrollAvail?: number;
   /** its ZROLLMGT Available is shared with the other rolls of its batch (each has a little in SAP) */
   zpool?: { batch: string; avail: number; pallets: string[] };
+  /** v131: not in ZROLLMGT, every other detail matches — picked only when the user unlocks it ("I checked") */
+  zrollMissing?: boolean;
   /** the ZCOMENT barcode is not a Korber pallet: found by Supplier Hu = Vendor Roll No (+ Lot, Invoice, Po) */
   byHu?: boolean;
   /** this lot's ZCOMENT row had no barcode: taken from the same roll's row under another inspection lot */
@@ -3857,10 +3978,25 @@ async function makeGate(env: Env) {
   };
   /** the roll's ZROLLMGT System Batch (null: not there / no batch) */
   /** ZROLLMGT Available Quantity of each pallet (only where ZROLLMGT has a quantity): a roll with a Reserved part has less */
+  // v130: a roll in several StorageBins (a part in FIXED, the rest in an allowed bin): only the Available Quantity of its rows
+  // in the allowed bins can be picked — counted always (also when the Available Quantity check is off)
+  const splitNote = new Map<string, string>();
   const availOf = async (pallets: string[]) => {
     const out = new Map<string, number>();
-    if (!useAvail || !loaded || !pallets.length) return out;
-    const zs = (await env.DB.prepare('SELECT barcode, qty, rid FROM zroll WHERE barcode IN (SELECT value FROM json_each(?)) AND qty IS NOT NULL').bind(JSON.stringify(Array.from(new Set(pallets.map(up))))).all<Row>()).results;
+    if (!on || !loaded || !pallets.length) return out;
+    const all = (await env.DB.prepare('SELECT barcode, qty, rid, bin, status FROM zroll WHERE barcode IN (SELECT value FROM json_each(?)) AND qty IS NOT NULL').bind(JSON.stringify(Array.from(new Set(pallets.map(up))))).all<Row>()).results;
+    const byB = new Map<string, Row[]>();
+    for (const z of all) { const k = up(z.barcode); const a = byB.get(k); if (a) a.push(z); else byB.set(k, [z]); }
+    const okRow = (z: Row) => rule.ok(z.bin) && (!hasStatus || statusOk(z.status));
+    const zs: Row[] = [];
+    for (const [k, rs] of byB) {
+      const good = rs.filter(okRow), bad = rs.filter((z) => !rule.ok(z.bin) && Number(z.qty ?? 0) > 1e-9);
+      const split = good.length > 0 && bad.length > 0;
+      if (!useAvail && !split) continue;
+      const q = r3(good.reduce((t, z) => t + Number(z.qty ?? 0), 0));
+      if (split) splitNote.set(k, `ZROLLMGT: ${q} in ${Array.from(new Set(good.map((z) => z.bin || '–'))).join(', ')} can be picked — ${r3(bad.reduce((t, z) => t + Number(z.qty ?? 0), 0))} is in ${Array.from(new Set(bad.map((z) => z.bin || '–'))).join(', ')}`);
+      zs.push({ barcode: k, qty: q, rid: rs[0].rid });
+    }
     if (!zs.length) return out;
     // the Available Quantity is as of the ZROLLMGT upload: what was picked from the roll since then is taken off
     // (SAP does not show it yet), so a roll with a Reserved part is never picked over what SAP has available
@@ -3890,10 +4026,10 @@ async function makeGate(env: Env) {
     for (const e of out.values()) e.avail = Math.max(0, e.avail);
     return out;
   };
-  const batchOf = async (pallet: string) => loaded ? ((await rowsOf([up(pallet)])).map((z) => z.batch as string | null).find(Boolean) ?? null) : null;
+  const batchOf = async (pallet: string) => loaded ? ((await rowsOf([up(pallet)])).sort((a, c) => Number(c.qty ?? 0) - Number(a.qty ?? 0)).map((z) => z.batch as string | null).find(Boolean) ?? null) : null;
   const rowOk = (z: Row) => !on || !rowWhy(z);
   const locWhy = locBlocker(st);
-  return { on, bin, loaded, hasStatus, useAvail, check, atBin, rowOk, rowWhy, batchOf, availOf, poolOf, locWhy };
+  return { on, bin, loaded, hasStatus, useAvail, splitNote, check, atBin, rowOk, rowWhy, batchOf, availOf, poolOf, locWhy };
 }
 
 /**
@@ -4119,14 +4255,19 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
         if (k && usable(k)) {
           if (String(k.pick_id ?? '0') !== '0' && String(k.pick_id ?? '') !== '') { notPickable++; continue; }
           const why = await gate.check(String(k.pallet), sh.barcode as string);
-          if (why) { block(why, k); continue; }
-          // the roll's ZROLLMGT System Batch must be a ZMMBE batch of the line
-          const zb = await gate.batchOf(String(k.pallet));
-          if (zb && urBatches.size && !urBatches.has(normId(zb))) { block(`ZROLLMGT System Batch ${zb} is not this line's ZMMBE batch (${Array.from(urBatches).join(', ')})`, k); continue; }
           const itemOk = normId(k.item) === normId(lot.material);
-          addRoll(await korberBase(k, lot, { shade, barcode: sh.barcode as string, via: up(k.pallet) === up(sh.barcode) ? null : String(k.pallet),
-            checks: { item: itemOk, lot: up(k.lot) === up(sh.vendor_batch || lot.vendor_batch), hu: sh.roll_no ? up(k.supplier_hu) === up(sh.roll_no) : null, invoice: lot.invoice && k.invoice ? invRoot(k.invoice) === invRoot(lot.invoice) : null },
-            warnings: itemOk ? [] : [`Item ${k.item} ≠ ${lot.material}`], needsConfirm: !itemOk }), lot);
+          const checks = { item: itemOk, lot: up(k.lot) === up(sh.vendor_batch || lot.vendor_batch), hu: sh.roll_no ? up(k.supplier_hu) === up(sh.roll_no) : null, invoice: lot.invoice && k.invoice ? invRoot(k.invoice) === invRoot(lot.invoice) : null };
+          // v131: only "not in ZROLLMGT" and every other detail matches (Item, Lot Number = Vendor Batch, Supplier HU, Invoice,
+          // ZCOMENT barcode = Korber Pallet, Pick Id 0): the roll can be unlocked by hand ("I checked") — never by Pick all matched
+          const unlock = why === 'Not in ZROLLMGT' && checks.item && checks.lot && checks.hu !== false && checks.invoice !== false;
+          if (why && !unlock) { block(why, k); continue; }
+          // the roll's ZROLLMGT System Batch must be a ZMMBE batch of the line
+          const zb = unlock ? null : await gate.batchOf(String(k.pallet));
+          if (zb && urBatches.size && !urBatches.has(normId(zb))) { block(`ZROLLMGT System Batch ${zb} is not this line's ZMMBE batch (${Array.from(urBatches).join(', ')})`, k); continue; }
+          const kb = await korberBase(k, lot, { shade, barcode: sh.barcode as string, via: up(k.pallet) === up(sh.barcode) ? null : String(k.pallet), checks,
+            warnings: unlock ? ['Not in ZROLLMGT — every other detail matches: tick “I checked” to unlock it'] : itemOk ? [] : [`Item ${k.item} ≠ ${lot.material}`], needsConfirm: unlock || !itemOk });
+          if (unlock) (kb as Candidate).zrollMissing = true;
+          addRoll(kb, lot);
           continue;
         }
       }
@@ -4333,7 +4474,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
         const shared = Math.min(r.available, pool[1].avail);
         r.available = Math.max(0, r3(shared)); r.zrollAvail = r3(pool[1].avail); r.zpool = { batch: pool[0], avail: r3(pool[1].avail), pallets: pool[1].pallets };
         r.qtyNote = [r.qtyNote, `ZROLLMGT Available ${r3(a)} on this roll — the ${pool[1].pallets.length} rolls of batch ${pool[0]} have ${r3(pool[1].avail)} together: cut from one roll`].filter(Boolean).join(' · ');
-      } else { r.available = Math.max(0, r3(a)); r.zrollAvail = r3(a); r.qtyNote = [r.qtyNote, `ZROLLMGT Available Quantity ${r3(a)} (less than Korber ${r.actual_qty} — reserved in SAP)`].filter(Boolean).join(' · '); }
+      } else { r.available = Math.max(0, r3(a)); r.zrollAvail = r3(a); r.qtyNote = [r.qtyNote, gate.splitNote.get(up(r.pallet)) ?? `ZROLLMGT Available Quantity ${r3(a)} (less than Korber ${r.actual_qty} — reserved in SAP)`].filter(Boolean).join(' · '); }
     }
   }
   const list = Array.from(rolls.values()).sort((a, b) => Number(b.available > 0) - Number(a.available > 0) || Number(!!b.suggested) - Number(!!a.suggested) || String(a.lot).localeCompare(String(b.lot)) || String(a.supplier_hu).localeCompare(String(b.supplier_hu), undefined, { numeric: true }));
@@ -4873,6 +5014,25 @@ export default {
       else if (p.startsWith('/api/dispatch/assign')) res = await handleAssign(env, req, p.split('/')[4] || '');
       else if (p === '/api/release') res = await handleRelease(env, req);
       else if (p === '/api/plants') res = await handlePlants(env, req);
+      else if (p === '/api/unlock-pw') {
+        // v132: the special approval password — GET: is it set (any signed-in user); POST {password}: set / change (admin);
+        // POST {check}: is this password right (for the pick window, before saving)
+        const s = await requireUser(env, req);
+        if (req.method === 'GET') { const r0 = await unlockPwRow(env); res = json({ set: !!r0, by: r0?.by ?? null, at: r0?.at ?? null }); }
+        else if (req.method === 'POST') {
+          const b = (await req.json().catch(() => ({}))) as { password?: string; check?: string };
+          if (b.check !== undefined) res = json({ ok: await unlockPwOk(env, b.check) });
+          else {
+            if (s.role !== 'admin') throw new HttpError(403, 'Only the admin can set the special approval password.');
+            const pw = String(b.password ?? '');
+            if (pw.length < 4) throw new HttpError(400, 'The password needs at least 4 characters.');
+            const h = await hashPassword(pw);
+            await udb(env).prepare("INSERT INTO config (k, v) VALUES ('unlock_pw', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(JSON.stringify({ ...h, by: s.u, at: now() })).run();
+            await udb(env).prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'settings', 'Special approval password set').run().catch(() => {});
+            res = json({ ok: true, set: true });
+          }
+        } else throw new HttpError(405, 'Method not allowed.');
+      }
       else if (p === '/api/settings') {
         // system settings: everyone signed in reads them, only the admin changes them
         if (req.method === 'GET') { await requireUser(env, req); res = json({ settings: await getSettings(env) }); }

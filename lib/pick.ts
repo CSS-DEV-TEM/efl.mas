@@ -26,6 +26,8 @@ export interface Candidate {
   actual_qty: number; base_qty: number; picked_before: number; available: number; roll_qty: number; shade: string | null;
   /** its ZROLLMGT Available is shared with the other rolls of its batch (each has a little in SAP): together at most `avail` */
   zpool?: { batch: string; avail: number; pallets: string[] };
+  /** v131: not in ZROLLMGT, every other detail matches — picked only when unlocked ("I checked") */
+  zrollMissing?: boolean;
   insp_lots: string[]; batches: string[]; checks: Record<string, boolean | null>; warnings: string[]; needsConfirm: boolean;
   picks: PalletPick[];
   /** in ZROLLMGT under the line's ZMMBE batch (System Batch) at the bin: Barcode Number = Korber Pallet */

@@ -724,6 +724,62 @@ export function HoldDialog({ line, onClose, onSave }: { line: LineP; onClose: ()
   );
 }
 
+/**
+ * v133: this SO line's batch is complete (its ZINSR Insp. Lot Quantity used up): the other SO lines from ZMMBE that can take
+ * that batch's rolls — same Item and LI, SO Plant = the Pick plant's code (Settings → Plants & target times), UR in the batch,
+ * a ZINSR lot with the roll's Vendor Batch and room — each with its suggested rolls, picked for that SO line from here.
+ */
+type AltRoll = { pallet: string; qty: number; available: number; lot: string | null; location: string | null; shade: string | null; cut: boolean };
+type AltLine = { key: string; so: string; li: string; item: string; so_plant: string | null; batch: string; ur_free: number; lot_room: number; total: number; lots: string[]; rolls: AltRoll[] };
+function BatchCompletePanel({ week, line }: { week: string; line: LineP }) {
+  const [d, setD] = useState<{ complete: { batch: string; lot_qty: number; taken: number }[]; lines: AltLine[]; plant?: string[] } | null>(null);
+  const [busy, setBusy] = useState(''); const [msg, setMsg] = useState(''); const [err, setErr] = useState('');
+  const [ver, setVer] = useState(0);
+  useEffect(() => {
+    let stop = false;
+    api<typeof d>(`/api/pick/alt?week=${encodeURIComponent(week)}&key=${encodeURIComponent(line.key)}&date=${encodeURIComponent(line.date ?? '')}`).then((r) => { if (!stop) setD(r); }).catch(() => { if (!stop) setD(null); });
+    return () => { stop = true; };
+  }, [week, line.key, line.date, ver]);
+  if (!d || !d.complete.length) return null;
+  const pick = async (l: AltLine, rs: AltRoll[]) => {
+    setBusy(l.key); setErr(''); setMsg('');
+    let n = 0, q = 0;
+    try {
+      for (const r of rs) {
+        await api('/api/pick/alt', { method: 'POST', body: { week, key: line.key, date: line.date ?? '', pallet: r.pallet, so: l.so, li: l.li, item: l.item, qty: r.qty } });
+        n++; q += r.qty;
+      }
+      setMsg(`${n} roll${n === 1 ? '' : 's'} · ${fmtQty(Math.round(q * 1000) / 1000)} picked for ${l.so} / ${l.li}`);
+    } catch (e) { setErr(`${n ? `${n} picked, then: ` : ''}${e instanceof Error ? e.message : 'Could not pick.'}`); }
+    finally { setBusy(''); setVer((v) => v + 1); }
+  };
+  return (
+    <div className="notice" role="region" aria-label="Batch complete — other SO lines" style={{ display: 'grid', gap: 8, margin: '8px 0' }}>
+      <div><b>Batch complete</b> — {d.complete.map((x) => `batch ${x.batch}: ZINSR ${fmtQty(x.lot_qty)}, ${fmtQty(x.taken)} picked`).join(' · ')}. {line.so} / {line.li} cannot take more from {d.complete.length === 1 ? 'it' : 'them'}.
+        <span className="muted small"> Other SO lines from ZMMBE with the same Item and LI, SO Plant {d.plant?.join(', ') || '(no Plant code in Settings → Plants & target times)'}, UR in the batch and a ZINSR lot with the roll&apos;s Vendor Batch:</span></div>
+      {!d.lines.length && <div className="muted small">No other SO line can take these rolls now.</div>}
+      {d.lines.map((l) => (
+        <div key={l.key} className="card" style={{ padding: 8, margin: 0 }}>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <b>{l.so} / {l.li}</b><span className="muted small">Item {l.item} · SO Plant {l.so_plant || '–'} · batch {l.batch} · UR free {fmtQty(l.ur_free)} · ZINSR lot room {fmtQty(l.lot_room)} (lot {l.lots.join(', ')})</span>
+            <span style={{ flex: 1 }} />
+            <button type="button" className="btn sm primary" disabled={!!busy} onClick={() => { if (window.confirm(`Pick ${l.rolls.length} roll${l.rolls.length === 1 ? '' : 's'} (${fmtQty(l.total)}) for ${l.so} / ${l.li}?`)) void pick(l, l.rolls); }}>{busy === l.key ? 'Picking…' : `Pick all for ${l.so} / ${l.li} (${fmtQty(l.total)})`}</button>
+          </div>
+          <table className="mini" data-nofilter style={{ marginTop: 6 }}>
+            <thead><tr><th>Pallet</th><th>Lot</th><th>Shade</th><th>Location</th><th className="n">On shelf</th><th className="n">Suggested</th><th /></tr></thead>
+            <tbody>{l.rolls.map((r) => (
+              <tr key={r.pallet}><td className="mono">{r.pallet}</td><td>{r.lot || '–'}</td><td>{r.shade || '–'}</td><td>{r.location || '–'}</td><td className="n">{fmtQty(r.available)}</td><td className="n">{fmtQty(r.qty)}{r.cut ? ' ✂' : ''}</td>
+                <td><button type="button" className="btn sm" disabled={!!busy} onClick={() => void pick(l, [r])}>Pick</button></td></tr>
+            ))}</tbody>
+          </table>
+        </div>
+      ))}
+      {msg && <div className="notice ok">{msg}</div>}
+      {err && <div className="notice bad">{err}</div>}
+    </div>
+  );
+}
+
 export function PickModal({ week, line, onClose, onDone }: { week: string; line: LineP; onClose: () => void; onDone: (m: string) => void }) {
   const [c, setC] = useState<Candidates | null>(null);
   const [err, setErr] = useState('');
@@ -743,6 +799,8 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
     }).catch(() => {});
   }, []);
   const [checkedOk, setCheckedOk] = useState(false);
+  // v132: rolls not in ZROLLMGT (every other detail matches) need the special approval password
+  const [approvalPw, setApprovalPw] = useState('');
   const [overOk, setOverOk] = useState(false);
   const [choosing, setChoosing] = useState<ManualRoll | null>(null);
   const [pickNo, setPickNo] = useState('');
@@ -875,7 +933,8 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
   const offsiteOver = kind === 'offsite' && diff > 0.0005;
   const needOverOk = kind === 'normal' && diff > 0.0005 && remaining > 0 && !overByFullRoll;
   const isShort = diff < -0.0005 && nSel > 0;
-  const blocked = !nSel || offsiteOver || (flagged.length > 0 && !checkedOk) || (needOverOk && !overOk) || Object.values(sel).some((x) => !(Number(x.qty) > 0));
+  const unlockSel = c ? c.rolls.filter((r) => sel[r.pallet] && r.zrollMissing) : [];
+  const blocked = !nSel || offsiteOver || (flagged.length > 0 && !checkedOk) || (unlockSel.length > 0 && !approvalPw) || (needOverOk && !overOk) || Object.values(sel).some((x) => !(Number(x.qty) > 0));
 
   // a roll whose Korber Lot Number is not one of this SO line's ZINSR lots: a warning — picked once the user confirms
   const [lotWarn, setLotWarn] = useState('');
@@ -889,6 +948,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
         week, key: line.key, date: line.date, pickNo: pickNo.trim() || null, kind,
         overConfirmed: kind === 'normal' && diff > 0.0005 ? (overByFullRoll || overOk) : false,
         closeShort: kind === 'normal' && isShort && closeShort,
+        ...(unlockSel.length ? { approvalPw } : {}),
         rolls: Object.entries(sel).map(([pallet, x]) => ({ pallet, qty: Number(x.qty), confirmed: checkedOk, ...(x.manual ? { manual: { ...x.manual, options: undefined, suggest: undefined } } : {}), ...(x.nb ? { nobarcode: true } : {}) })),
         ...(lotOk ? { lotConfirmed: true } : {}),
       } });
@@ -975,6 +1035,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
                 <button type="button" className="btn sm" disabled={short <= 1e-9} onClick={() => setFreeOpen(true)} title={short <= 1e-9 ? 'No shortage: the selected rolls cover the QTY to pick' : `Add a Korber pallet by hand for the shortage of ${fmtQty(short)}`}>+ Manual pallet{short > 1e-9 ? ` (${fmtQty(short)} short)` : ''}</button>
               </div>
               {smart?.best && open.length > 1 && <SmartPanel smart={smart} rolls={c.rolls} sel={sel} lotCaps={lotCaps} onUse={useSmart} />}
+              <BatchCompletePanel week={week} line={line} />
               {!c.rolls.length ? <p className="muted">No Korber roll matched on Barcode for this line.{c.nobarcode?.some((m) => m.invChoice) ? ' Choose rolls under “Invoice + Item match” below.' : c.nobarcode?.length ? ' Rolls without a barcode: choose them under “No Barcode” below.' : c.manual?.length ? ' See “Not matched” below.' : ' Check that ZINR, ZCOMENT VIEW and Korber are uploaded and current.'}</p> : (
                 <div className="table-wrap" style={{ maxHeight: 360 }}>
                   <table className="mini pk-table">
@@ -1187,6 +1248,12 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
                     <span><b>I checked {flagged.length === 1 ? 'this roll' : `these ${flagged.length} rolls`}</b>{flagged.map((f) => <small key={f.pallet}><span className="mono">{f.pallet}</span> — {f.why}</small>)}</span>
                   </label>
                 )}
+                {unlockSel.length > 0 && (
+                  <label className="pk-approval" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <span>🔐 <b>Special approval</b><small>{unlockSel.length === 1 ? `${unlockSel[0].pallet} is` : `${unlockSel.length} rolls are`} not in ZROLLMGT (every other detail matches) — enter the approval password to unlock {unlockSel.length === 1 ? 'it' : 'them'}.</small></span>
+                    <input type="password" autoComplete="off" value={approvalPw} onChange={(e) => setApprovalPw(e.target.value)} placeholder="Approval password" style={{ width: 170 }} aria-label="Special approval password" />
+                  </label>
+                )}
                 {needOverOk && (
                   <label><input type="checkbox" checked={overOk} onChange={(e) => setOverOk(e.target.checked)} />
                     <span><b>Send {fmt(diff, 2)} over the plan balance</b><small>The selected QTY is more than the {fmtQty(remaining)} still to pick.</small></span>
@@ -1211,7 +1278,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
           <span style={{ flex: 1 }} />
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
           <button type="button" className="btn primary" aria-busy={!!busy || undefined} disabled={busy || blocked} onClick={save}
-            title={blocked && nSel ? (flagged.length && !checkedOk ? 'Tick “I checked” first' : needOverOk && !overOk ? 'Confirm the over-plan QTY first' : '') : undefined}>
+            title={blocked && nSel ? (flagged.length && !checkedOk ? 'Tick “I checked” first' : unlockSel.length && !approvalPw ? 'Enter the special approval password first' : needOverOk && !overOk ? 'Confirm the over-plan QTY first' : '') : undefined}>
             {busy ? 'Saving…' : `${kind === 'offsite' ? 'Offsite' : 'Normal'} pick · ${nSel} roll${nSel === 1 ? '' : 's'} · ${fmt(total, 2)}`}
           </button>
         </div>
