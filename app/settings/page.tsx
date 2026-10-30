@@ -11,7 +11,7 @@ export default function Page() {
   return <Shell admin><Settings /></Shell>;
 }
 
-export interface SystemSettings { pickBinMode?: 'only' | 'except'; pickBinExcept?: string; fullRollPct: number; defaultPickKind: 'normal' | 'offsite'; allowOffsite: boolean; allowNormalShort: boolean; allowNormalFull: boolean; deriveFromZmmbe: boolean; pfcSlocs: string[]; plantSlocs: string[]; soliPerHour: number; lateGraceMin: number; defaultTarget: string; zmmbePlants?: PlantPair[]; rollGate?: boolean; pickBin?: string; zrollNeedsZinsr?: boolean; blockLocs?: BlockLoc[] }
+export interface SystemSettings { pickBinMode?: 'only' | 'except'; pickBinExcept?: string; fullRollPct: number; defaultPickKind: 'normal' | 'offsite'; allowOffsite: boolean; allowNormalShort: boolean; allowNormalFull: boolean; deriveFromZmmbe: boolean; pfcSlocs: string[]; plantSlocs: string[]; soliPerHour: number; lateGraceMin: number; defaultTarget: string; zmmbePlants?: PlantPair[]; rollGate?: boolean; zrollAvail?: boolean; pickBin?: string; zrollNeedsZinsr?: boolean; blockLocs?: BlockLoc[] }
 export interface BlockLoc { wh: string; loc: string; note?: string }
 export interface PlantPair { plant: string; soPlant: string; link: string }
 
@@ -92,6 +92,10 @@ function PickRules({ toast }: { toast: (m: string) => void }) {
         <label className="set-row">
           <span><b>ZROLLMGT check</b><small>Pick only rolls whose Barcode Number is in ZROLLMGT at the StorageBin below, is a ZCOMENT VIEW Barcode Number and is the Korber Pallet. Off = the older matching (invoice / lot / supplier HU) is offered too.</small></span>
           <input type="checkbox" checked={s.rollGate !== false} onChange={(e) => set('rollGate', e.target.checked)} />
+        </label>
+        <label className="set-row">
+          <span><b>ZROLLMGT Available Quantity check</b><small>On = a roll is picked only up to its ZROLLMGT Available Quantity (Available 0 = not pickable). Off (default) = Korber is the physical stock: a roll that matches is picked by its Korber QTY even when ZROLLMGT Available is 0 — Barcode, StorageBin, Status and System Batch are still checked.</small></span>
+          <input type="checkbox" checked={s.zrollAvail === true} onChange={(e) => set('zrollAvail', e.target.checked)} />
         </label>
         <div className="set-row">
           <span><b>ZROLLMGT StorageBin to pick from</b><small>{(s.pickBinMode ?? 'only') === 'except' ? 'Rolls in any StorageBin can be picked, except the bins listed (comma between them).' : 'Only rolls in this StorageBin can be picked; rolls in any other bin cannot.'}</small></span>

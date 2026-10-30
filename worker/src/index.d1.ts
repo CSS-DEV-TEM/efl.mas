@@ -562,7 +562,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 74; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 76; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -980,14 +980,14 @@ interface Settings {
   /** ZMMBE Plant + SO Plant pairs that count (each linked to a plant of Settings → Plants); none = every row counts */
   zmmbePlants: { plant: string; soPlant: string; link: string }[];
   /** ZROLLMGT check: only rolls whose Barcode Number is in ZROLLMGT at this StorageBin, a ZCOMENT VIEW Barcode Number and the Korber Pallet */
-  rollGate: boolean; pickBin: string; /** only: rolls in pickBin only · except: any bin but those in pickBinExcept */ pickBinMode?: 'only' | 'except'; pickBinExcept?: string;
+  rollGate: boolean; pickBin: string; /** v128: use ZROLLMGT Available Quantity (off: Korber's physical QTY counts; the other ZROLLMGT checks stay) */ zrollAvail?: boolean; /** only: rolls in pickBin only · except: any bin but those in pickBinExcept */ pickBinMode?: 'only' | 'except'; pickBinExcept?: string;
   /** ZMMBE batch → ZROLLMGT System Batch rolls only when ZINSR has the SO + LI + Material + Batch too */
   zrollNeedsZinsr: boolean;
   /** Korber Wh Id + Location Id no Pick may take a roll from (wh '' = any Wh Id; a location ending in * = every location starting so) */
   blockLocs: { wh: string; loc: string; note?: string }[];
 }
 const DEFAULT_SETTINGS: Settings = { fullRollPct: 10, defaultPickKind: 'normal', allowOffsite: true, allowNormalShort: true, allowNormalFull: true,
-  deriveFromZmmbe: true, pfcSlocs: ['41', 'COMF'], plantSlocs: ['40', '70', '75'], soliPerHour: 12, lateGraceMin: 0, defaultTarget: '', zmmbePlants: [], rollGate: true, pickBin: 'EXPO-FIX', pickBinMode: 'only', pickBinExcept: 'FIXED', zrollNeedsZinsr: true, blockLocs: [] };
+  deriveFromZmmbe: true, pfcSlocs: ['41', 'COMF'], plantSlocs: ['40', '70', '75'], soliPerHour: 12, lateGraceMin: 0, defaultTarget: '', zmmbePlants: [], rollGate: true, zrollAvail: false, pickBin: 'EXPO-FIX', pickBinMode: 'only', pickBinExcept: 'FIXED', zrollNeedsZinsr: true, blockLocs: [] };
 const slocList = (v: unknown, def: string[]) => Array.isArray(v) || typeof v === 'string'
   ? Array.from(new Set((Array.isArray(v) ? v : String(v).split(/[,\s]+/)).map((x) => normId(String(x).trim()).toUpperCase()).filter(Boolean))).slice(0, 30) : def;
 /** ZMMBE Plant + SO Plant pairs: upper case, no blanks, each pair once ("*" = any SO Plant) */
@@ -2275,7 +2275,7 @@ async function handlePick(env: Env, req: Request, p: string) {
       const base0 = pp.base ?? Number(k?.qty ?? 0);
       let balance = Math.max(0, r3(base0 - pp.before));
       // ZROLLMGT Available is as of its upload: only what was picked from the roll after that upload comes off it
-      if (zr && zr.qty !== null && Number.isFinite(Number(zr.qty))) {
+      if (zr && zr.qty !== null && Number.isFinite(Number(zr.qty)) && (await getSettings(E)).zrollAvail === true) {
         const zAt = (await E.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zroll' AND rid = ?").bind(String(zr.rid ?? '')).first<{ at: string | null }>())?.at ?? '';
         const afterZ = Number((await E.DB.prepare('SELECT COALESCE(SUM(qty), 0) q FROM picks WHERE upper(pallet) = ? AND cancelled_at IS NULL AND at > ?').bind(up(pallet), zAt).first<{ q: number }>())?.q ?? 0);
         balance = Math.max(0, Math.min(balance, r3(Number(zr.qty) - afterZ)));
@@ -2845,6 +2845,13 @@ async function handlePick(env: Env, req: Request, p: string) {
     const need = new Map((cand.batchNeed || []).map((x) => [String(x.batch), Number(x.need)]));
     const alloc: { pallet: string; batch: string; qty: number }[] = [];
     const lineBatches = new Set((cand.stock || []).filter((z) => Number(z.ur) > 0).map((z) => normId(z.batch)));
+    // v127: each SAP batch gives this SO line at most its ZINSR Insp. Lot Quantity — what a roll has over its own batch's lot
+    // room is taken from another batch of the line that still has lot room and UR (most room first), never over a lot
+    const lotB0 = await batchLotQty(senv, line.so, line.li, line.item);
+    const taken0 = lotB0.size ? await batchTaken(env, line.so, line.li, line.item) : new Map<string, number>();
+    const allocB = new Map<string, number>();
+    const roomB = (bt: string) => { const c = lotB0.get(normId(bt)); return c === undefined ? Infinity : Math.max(0, r3(c - (taken0.get(normId(bt)) ?? 0) - (allocB.get(normId(bt)) ?? 0))); };
+    const spill: { pallet: string; from: string; to: string; qty: number }[] = [];
     for (const x of picks) {
       const r = byPallet.get(String(x.pallet));
       const parts = (r?.parts?.length ? r.parts : String(x.batch || '').split(',').filter(Boolean).map((bt) => ({ batch: bt, lot: '', qty: Infinity })))
@@ -2854,22 +2861,45 @@ async function handlePick(env: Env, req: Request, p: string) {
       const sysB = gate.loaded ? normId(await gate.batchOf(String(x.pallet))) : '';
       if (sysB && lineBatches.has(sysB)) {
         const pt = parts.find((p0) => normId(p0.batch) === sysB) ?? { batch: sysB, lot: '', qty: Infinity, left: Infinity };
-        const t = Math.min(q, pt.left);
+        const t = Math.min(q, pt.left, roomB(pt.batch));
         if (t > 1e-9) {
           const had = alloc.find((y) => y.pallet === x.pallet && normId(y.batch) === sysB);
           if (had) had.qty = r3(had.qty + t); else alloc.push({ pallet: String(x.pallet), batch: pt.batch, qty: r3(t) });
           pt.left -= t; q = r3(q - t); need.set(pt.batch, r3((need.get(pt.batch) ?? 0) - t));
+          allocB.set(normId(pt.batch), r3((allocB.get(normId(pt.batch)) ?? 0) + t));
         }
       }
-      const give = (pt: { batch: string; left: number }, t: number) => {
+      const give = (pt: { batch: string; left: number }, t0: number) => {
+        const t = Math.min(t0, roomB(pt.batch));
         if (t <= 1e-9) return;
         const had = alloc.find((y) => y.pallet === x.pallet && y.batch === pt.batch);
         if (had) had.qty = r3(had.qty + t); else alloc.push({ pallet: String(x.pallet), batch: pt.batch, qty: r3(t) });
         pt.left -= t; q = r3(q - t); need.set(pt.batch, r3((need.get(pt.batch) ?? 0) - t));
+        allocB.set(normId(pt.batch), r3((allocB.get(normId(pt.batch)) ?? 0) + t));
       };
       for (const pt of parts) give(pt, Math.min(q, pt.left, Math.max(0, need.get(pt.batch) ?? 0)));
       for (const pt of parts) give(pt, Math.min(q, pt.left));
-      if (q > 1e-9 && parts.length) give({ ...parts[0], left: Infinity }, q);
+      // over the roll's own batch lot room: another batch of the SO line with lot room and UR takes the rest
+      if (q > 1e-9 && lotB0.size) {
+        const own = sysB || normId(parts[0]?.batch ?? '');
+        // the other batch's UR in ZMMBE (less what this pick already put on it) limits it too
+        const urOf = (bt: string) => Math.max(0, r3((cand.stock || []).filter((z) => normId(z.batch) === bt).reduce((t, z) => t + Math.max(0, Number(z.ur) || 0), 0) - (allocB.get(bt) ?? 0)));
+        const others = Array.from(lotB0.keys()).filter((bt) => bt !== own && lineBatches.has(bt) && Math.min(roomB(bt), urOf(bt)) > 1e-9).sort((a1, a2) => Math.min(roomB(a2), urOf(a2)) - Math.min(roomB(a1), urOf(a1)));
+        for (const bt of others) {
+          if (q <= 1e-9) break;
+          const t = Math.min(q, roomB(bt), urOf(bt));
+          give({ batch: bt, left: Infinity }, t);
+          spill.push({ pallet: String(x.pallet), from: own, to: bt, qty: r3(t) });
+        }
+      }
+      if (q > 1e-9 && parts.length) { const pt = { ...parts[0], left: Infinity }; const had = alloc.find((y) => y.pallet === x.pallet && y.batch === pt.batch); if (had) had.qty = r3(had.qty + q); else alloc.push({ pallet: String(x.pallet), batch: pt.batch, qty: r3(q) }); q = 0; }
+    }
+    for (const sp of spill) {
+      const p = picks.find((y) => String(y.pallet) === sp.pallet);
+      if (!p) continue;
+      p.note = [p.note, `${sp.qty} taken from batch ${sp.to} (batch ${sp.from || '–'} ZINSR lot QTY full)`].filter(Boolean).join(' · ');
+      const bs = String(p.batch ?? '').split(',').map((t) => t.trim()).filter(Boolean);
+      if (!bs.map(normId).includes(normId(sp.to))) p.batch = [...bs, sp.to].join(',');
     }
     // ZINSR per SAP batch: the SO line never takes more from a batch than its Insp. Lot Quantity (SAP would take the
     // transfer from UR outside the lot)
@@ -3690,6 +3720,8 @@ async function makeGate(env: Env) {
   const rule = binRule(st);
   const bin = rule.label;
   const on = st.rollGate !== false;
+  // v128: ZROLLMGT Available Quantity is not checked (Korber is the physical stock) unless Settings turns it on
+  const useAvail = on && st.zrollAvail === true;
   const loaded = on ? !!(await env.DB.prepare('SELECT 1 FROM zroll LIMIT 1').first()) : true;
   // ZROLLMGT Status: when the report has it, a roll is picked only at Status UR (unrestricted)
   const hasStatus = on && loaded ? !!(await env.DB.prepare("SELECT 1 FROM zroll WHERE COALESCE(status, '') <> '' LIMIT 1").first()) : false;
@@ -3698,7 +3730,7 @@ async function makeGate(env: Env) {
   const rowWhy = (z: Row): string | null => {
     if (!rule.ok(z.bin)) return rule.why(z.bin);
     if (hasStatus && !statusOk(z.status)) return `ZROLLMGT Status ${z.status || '–'} — must be UR`;
-    if (z.qty !== null && z.qty !== undefined && Number(z.qty) <= 1e-9) return 'ZROLLMGT Available Quantity 0';
+    if (useAvail && z.qty !== null && z.qty !== undefined && Number(z.qty) <= 1e-9) return 'ZROLLMGT Available Quantity 0';
     return null;
   };
   /** the ZROLLMGT rows of a roll: its Barcode Number, else the same roll number (CP… / COMPCP…) */
@@ -3741,7 +3773,7 @@ async function makeGate(env: Env) {
   /** ZROLLMGT Available Quantity of each pallet (only where ZROLLMGT has a quantity): a roll with a Reserved part has less */
   const availOf = async (pallets: string[]) => {
     const out = new Map<string, number>();
-    if (!loaded || !pallets.length) return out;
+    if (!useAvail || !loaded || !pallets.length) return out;
     const zs = (await env.DB.prepare('SELECT barcode, qty, rid FROM zroll WHERE barcode IN (SELECT value FROM json_each(?)) AND qty IS NOT NULL').bind(JSON.stringify(Array.from(new Set(pallets.map(up))))).all<Row>()).results;
     if (!zs.length) return out;
     // the Available Quantity is as of the ZROLLMGT upload: what was picked from the roll since then is taken off
@@ -3755,7 +3787,7 @@ async function makeGate(env: Env) {
   /** ZROLLMGT Available Quantity per System Batch over the given pallets, less what was picked from them since the upload */
   const poolOf = async (pallets: string[]) => {
     const out = new Map<string, { avail: number; pallets: string[] }>();
-    if (!loaded || !pallets.length) return out;
+    if (!useAvail || !loaded || !pallets.length) return out;
     // a roll with a Reserved Quantity in SAP keeps its own Available (the reserved part is not picked): not shared
     const reserved = (raw: unknown) => { try { const o = JSON.parse(String(raw ?? '{}')) as Record<string, unknown>; const k = Object.keys(o).find((x) => /^reserved\s*(quantity|qty)?$/i.test(x.trim())); return k ? Number(o[k]) || 0 : 0; } catch { return 0; } };
     const zs = (await env.DB.prepare('SELECT barcode, qty, batch, rid, raw FROM zroll WHERE barcode IN (SELECT value FROM json_each(?)) AND qty IS NOT NULL').bind(JSON.stringify(Array.from(new Set(pallets.map(up))))).all<Row>()).results
@@ -3775,7 +3807,7 @@ async function makeGate(env: Env) {
   const batchOf = async (pallet: string) => loaded ? ((await rowsOf([up(pallet)])).map((z) => z.batch as string | null).find(Boolean) ?? null) : null;
   const rowOk = (z: Row) => !on || !rowWhy(z);
   const locWhy = locBlocker(st);
-  return { on, bin, loaded, hasStatus, check, atBin, rowOk, rowWhy, batchOf, availOf, poolOf, locWhy };
+  return { on, bin, loaded, hasStatus, useAvail, check, atBin, rowOk, rowWhy, batchOf, availOf, poolOf, locWhy };
 }
 
 /**
@@ -4776,6 +4808,7 @@ export default {
             defaultTarget: b.defaultTarget === undefined ? cur.defaultTarget : String(b.defaultTarget).trim().slice(0, 20),
             zmmbePlants: b.zmmbePlants === undefined ? cur.zmmbePlants : plantPairs(b.zmmbePlants),
             rollGate: b.rollGate === undefined ? cur.rollGate : !!b.rollGate,
+            zrollAvail: b.zrollAvail === undefined ? cur.zrollAvail : !!b.zrollAvail,
             pickBin: b.pickBin === undefined ? cur.pickBin : (String(b.pickBin).trim().toUpperCase().slice(0, 30) || 'EXPO-FIX'),
             pickBinMode: b.pickBinMode === undefined ? (cur.pickBinMode ?? 'only') : (b.pickBinMode === 'except' ? 'except' : 'only'),
             pickBinExcept: b.pickBinExcept === undefined ? (cur.pickBinExcept ?? 'FIXED') : String(b.pickBinExcept).toUpperCase().split(/[,;\s]+/).map((x) => x.trim()).filter(Boolean).slice(0, 20).join(', '),
