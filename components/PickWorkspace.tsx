@@ -109,9 +109,21 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
       try {
         const wk = (l as LineP & { week?: string }).week || week;
         const c = await api<Candidates>(`/api/pick/candidates?week=${encodeURIComponent(wk)}&key=${encodeURIComponent(l.key)}&date=${encodeURIComponent(l.date ?? '')}`);
+        out[l.id] = scanOf(c);
+      } catch { /* the line is not in a Pick */ }
+    };
+    void (async () => {
+      for (let i = 0; i < ls.length && !stop; i += 6) await Promise.all(ls.slice(i, i + 6).map(one));
+      if (!stop) { setScan(fromCache()); setScanning(false); }
+    })();
+    return () => { stop = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scanKey, week, runActive]);
+  /** what Pick all matched would pick of a line now, and why the rest is left for manual (the State) */
+  function scanOf(c: Candidates): ScanR {
         const left = r3(c.need - c.picked);
         // nothing left to pick (the UR is used up): kept too, so the State says so
-        if (left <= 1e-9) { out[l.id] = { auto: 0, left: 0, why: '' }; return; }
+        if (left <= 1e-9) return { auto: 0, left: 0, why: '' };
         const plan = autoPlan(autoRolls(c));
         const auto = r3(Object.values(plan.sel).reduce((t, x) => t + (Number(x.qty) || 0), 0));
         const short = r3(left - auto);
@@ -124,16 +136,8 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
           : 'No matched roll — add a Manual pallet';
         // the Korber rolls this line can take now (matched to it, what is left of each)
         const usable = c.rolls.filter((x) => x.available > 1e-9 && (!x.pool || x.suggested));
-        out[l.id] = { auto, left, why: auto > 1e-9 && short > 1e-9 ? `${fmtQty(auto)} matched, ${fmtQty(short)} short · ${why}` : why, kq: r3(usable.reduce((t, x) => t + x.available, 0)), kn: usable.length };
-      } catch { /* the line is not in a Pick */ }
-    };
-    void (async () => {
-      for (let i = 0; i < ls.length && !stop; i += 6) await Promise.all(ls.slice(i, i + 6).map(one));
-      if (!stop) { setScan(fromCache()); setScanning(false); }
-    })();
-    return () => { stop = true; };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scanKey, week, runActive]);
+        return { auto, left, why: auto > 1e-9 && short > 1e-9 ? `${fmtQty(auto)} matched, ${fmtQty(short)} short · ${why}` : why, kq: r3(usable.reduce((t, x) => t + x.available, 0)), kn: usable.length };
+  }
   const needsManual = useCallback((l: LineP) => !l.hold && todo(l) > 1e-9 && !!scan[l.id]?.why, [scan, todo]);
   // Auto match: the matched rolls cover all or part of the QTY (a part also shows under Needs manual for the rest)
   const autoReady = useCallback((l: LineP) => !l.hold && todo(l) > 1e-9 && (scan[l.id]?.auto ?? 0) > 1e-9, [scan, todo]);
@@ -164,7 +168,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
     return <span className="pill warn" title={sc.why}>{part}Needs manual {fmtQty(lt)}</span>;
   };
   /** v134: the State as text (the same as the State column), for the Plan → Pick report */
-  const stateText = (l: LineP): string => {
+  const stateText = (l: LineP, scOver?: ScanR | null): string => {
     const pk = l.picked ?? 0, done = isDispatched(l), autoP = Number(l.auto_picked) > 0, cs = Number((l as LineP & { closed_short?: number }).closed_short) || 0;
     if (l.hold && !isDone(l)) return `On hold · ${l.hold}`;
     if (isDone(l) && !done) return 'Completed ✓';
@@ -173,7 +177,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
     const part = pk > 1e-9 ? `${autoP ? 'Auto picked' : 'Picked'} ${fmtQty(pk)} · ` : '';
     const t = todo(l);
     if (t <= 1e-9) return pk > 1e-9 ? `${part}no UR for the rest` : pendingWhy(l);
-    const sc = scan[l.id];
+    const sc = scOver ?? scan[l.id];
     if (!sc) return `${part}To pick ${fmtQty(t)}`;
     const lt = r3(Math.min(t, sc.left));
     if (lt <= 1e-9) return `${part}no UR for the rest`;
@@ -204,11 +208,12 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
       const pickOf = (l: LineP) => { const w = (l as LineP & { week?: string }).week || week; const m = /^(\d{4}-\d{2}-\d{2})~([^~]*)~(\d+)$/.exec(w); return m ? `${m[1].slice(8, 10)}-${m[1].slice(5, 7)} · ${m[2]} · Pick ${m[3]}` : (label || w); };
       for (const l of ls) {
         const c = cands.get(l.id) ?? null;
-        const st = stateText(l);
+        const sc0 = c ? scanOf(c) : null;
+        const st = stateText(l, sc0);
         const base = { pick: pickOf(l), so: l.so, li: String(l.li), item: l.item, date: l.date ?? '', state: st };
         const usable = c ? c.rolls.filter((x) => x.available > 1e-9 && (!x.pool || x.suggested)) : [];
         outL.push({ ...base, plant: l.plant ?? '', qty: Number(l.qty) || 0, picked: l.picked ?? 0, balance: r3(bal(l)), ur: r3(Math.max(0, avail(l))),
-          korber: c ? r3(usable.reduce((t, x) => t + x.available, 0)) : null, korberRolls: c ? usable.length : null, why: scan[l.id]?.why || (todo(l) <= 1e-9 && !isDone(l) && bal(l) > 1e-9 ? pendingWhy(l) : '') });
+          korber: c ? r3(usable.reduce((t, x) => t + x.available, 0)) : null, korberRolls: c ? usable.length : null, why: sc0?.why || scan[l.id]?.why || (todo(l) <= 1e-9 && !isDone(l) && bal(l) > 1e-9 ? pendingWhy(l) : '') });
         if (!c) continue;
         const left = r3(c.need - c.picked);
         const plan = left > 1e-9 ? autoPlan(autoRolls(c)) : { sel: {} as Record<string, { qty: string }> };

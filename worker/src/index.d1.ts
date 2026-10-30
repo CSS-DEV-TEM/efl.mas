@@ -562,7 +562,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 82; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 83; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -2109,7 +2109,8 @@ const colomboDay = () => new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().
  * target times), a ZINSR lot with the roll's Vendor Batch (= Korber Lot Number) and room in it.
  */
 async function tallyInfo(env: Env, pallet: string, src: Row, used: Map<string, number> = new Map(), E: Env = env) {
-  const plantLocs = new Set(((await getSettings(env)).plantSlocs || []).map((x) => up(normId(x))));
+  const st0 = await getSettings(E);
+  const plantLocs = new Set((st0.plantSlocs || []).map((x) => up(normId(x))));
   const lrid = weekPlantRid(String(src.week), src.plant);
   const kenv = await envFor(E, lrid);
   const k = await kenv.DB.prepare('SELECT * FROM korber WHERE pallet = ?').bind(up(pallet)).first<Row>();
@@ -2119,7 +2120,7 @@ async function tallyInfo(env: Env, pallet: string, src: Row, used: Map<string, n
   const base0 = pp.base ?? Number(k?.qty ?? 0);
   let balance = Math.max(0, r3(base0 - pp.before));
   // ZROLLMGT Available is as of its upload: only what was picked from the roll after that upload comes off it
-  if (zr && zr.qty !== null && Number.isFinite(Number(zr.qty)) && (await getSettings(E)).zrollAvail === true) {
+  if (zr && zr.qty !== null && Number.isFinite(Number(zr.qty)) && st0.zrollAvail === true) {
     const zAt = (await E.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zroll' AND rid = ?").bind(String(zr.rid ?? '')).first<{ at: string | null }>())?.at ?? '';
     const afterZ = Number((await E.DB.prepare('SELECT COALESCE(SUM(qty), 0) q FROM picks WHERE upper(pallet) = ? AND cancelled_at IS NULL AND at > ?').bind(up(pallet), zAt).first<{ q: number }>())?.q ?? 0);
     balance = Math.max(0, Math.min(balance, r3(Number(zr.qty) - afterZ)));
@@ -2433,8 +2434,11 @@ async function handlePick(env: Env, req: Request, p: string) {
       }
       const lines = new Map<string, Row>();
       const room = new Map<string, number>();
+      const memo = await fastEnv(env, ''); // the same reads once (as the tally does)
+      let plants: string[] = [];
       for (const { r, b } of rolls) {
-        const info = await tallyInfo(env, r.pallet, { ...src, batch: b });
+        const info = await tallyInfo(env, r.pallet, { ...src, batch: b }, new Map(), memo);
+        plants = info.plants;
         if (!info.k) continue;
         let left = Math.min(Number(r.available), info.balance);
         for (const t of info.targets) {
@@ -2452,7 +2456,8 @@ async function handlePick(env: Env, req: Request, p: string) {
         }
       }
       const out = Array.from(lines.values()).map((e) => ({ ...e, total: r3((e.rolls as Row[]).reduce((t, x) => t + Number(x.qty), 0)) }));
-      return json({ complete, lines: out, plant: (await tallyInfo(env, '', src)).plants });
+      if (!plants.length) plants = (await tallyInfo(env, '', src)).plants;
+      return json({ complete, lines: out, plant: plants });
     }
     if (req.method === 'POST') {
       const pallet = up(q0.pallet), tkey = `${normId(q0.so)}|${normId(q0.li)}|${normId(q0.item)}`, qty = r3(Number(q0.qty) || 0);
@@ -2893,10 +2898,13 @@ async function handlePick(env: Env, req: Request, p: string) {
     // plant's code, a ZINSR lot with the roll's Vendor Batch (= Korber Lot Number) and room in it — saved as a pick of that
     // SO line (its own SAP line). What no other SO line can take is checked as before (another batch of this line, else stop).
     const moves: { pallet: string; t: Row; qty: number; info: Awaited<ReturnType<typeof tallyInfo>> }[] = [];
+    // ZINSR Insp. Lot Quantity per batch of this SO line and what it already took: read once for the checks below
+    const lotQ0 = await batchLotQty(senv, line.so, line.li, line.item);
+    const tk0 = lotQ0.size ? await batchTaken(env, line.so, line.li, line.item) : new Map<string, number>();
     if (kind === 'normal') {
-      const lotQ = await batchLotQty(senv, line.so, line.li, line.item);
+      const lotQ = lotQ0;
       if (lotQ.size) {
-        const tk = await batchTaken(env, line.so, line.li, line.item);
+        const tk = tk0;
         const usedQ = new Map<string, number>();
         const roomOf = (bt: string) => { const c = lotQ.get(bt); return c === undefined ? Infinity : Math.max(0, r3(c - (tk.get(bt) ?? 0) - (usedQ.get(bt) ?? 0))); };
         const lineBs = new Set((cand.stock || []).filter((z) => Number(z.ur) > 0).map((z) => normId(z.batch)));
@@ -3023,8 +3031,8 @@ async function handlePick(env: Env, req: Request, p: string) {
     const lineBatches = new Set((cand.stock || []).filter((z) => Number(z.ur) > 0).map((z) => normId(z.batch)));
     // v127: each SAP batch gives this SO line at most its ZINSR Insp. Lot Quantity — what a roll has over its own batch's lot
     // room is taken from another batch of the line that still has lot room and UR (most room first), never over a lot
-    const lotB0 = await batchLotQty(senv, line.so, line.li, line.item);
-    const taken0 = lotB0.size ? await batchTaken(env, line.so, line.li, line.item) : new Map<string, number>();
+    const lotB0 = lotQ0;
+    const taken0 = tk0;
     const allocB = new Map<string, number>();
     const roomB = (bt: string) => { const c = lotB0.get(normId(bt)); return c === undefined ? Infinity : Math.max(0, r3(c - (taken0.get(normId(bt)) ?? 0) - (allocB.get(normId(bt)) ?? 0))); };
     const spill: { pallet: string; from: string; to: string; qty: number }[] = [];
@@ -3080,9 +3088,9 @@ async function handlePick(env: Env, req: Request, p: string) {
     // ZINSR per SAP batch: the SO line never takes more from a batch than its Insp. Lot Quantity (SAP would take the
     // transfer from UR outside the lot)
     {
-      const lotB = await batchLotQty(senv, line.so, line.li, line.item);
+      const lotB = lotQ0;
       if (lotB.size) {
-        const taken = await batchTaken(env, line.so, line.li, line.item);
+        const taken = tk0;
         const thisB = new Map<string, number>();
         for (const a of alloc) thisB.set(normId(a.batch), r3((thisB.get(normId(a.batch)) ?? 0) + Number(a.qty)));
         for (const [bt, q] of thisB) {

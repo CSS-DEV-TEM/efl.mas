@@ -46,6 +46,18 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
   const [pickedWeek, setPickedWeek] = useState<string | null>(null);
   // day plan: one round (Pick No of a plant) or the whole day (null)
   const [round, setRound] = useState<string | null>(null);
+  // v136: the day cards — a date range (From / To), kept in this browser
+  const [range, setRange0] = useState<{ from: string; to: string }>(() => { try { const v = JSON.parse(localStorage.getItem('mas-day-range') || '{}'); return { from: String(v.from || ''), to: String(v.to || '') }; } catch { return { from: '', to: '' }; } });
+  const setRange = (r: { from: string; to: string }) => { setRange0(r); try { localStorage.setItem('mas-day-range', JSON.stringify(r)); } catch { /* private mode */ } };
+  // the chosen card scrolled into view in its row
+  const chipRow = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = chipRow.current?.querySelector('.week-chip.on') as HTMLElement | null;
+    const row = el?.closest('.scroll') as HTMLElement | null;
+    if (el && row) row.scrollTo({ left: Math.max(0, el.offsetLeft - row.offsetLeft - 40), behavior: 'smooth' });
+  // only when the chosen day or the dates change (not on every refresh — the user's scroll stays)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data?.day, range.from, range.to]);
   const roundRef = useRef(round); roundRef.current = round;
   useEffect(() => { setRound(null); }, [pickedWeek]);
   const weekRef = useRef<string | null>(null);
@@ -293,19 +305,33 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
             </button>
           );
         };
-        const days = data.days || [];
+        const all = data.days || [];
+        // the date range (From / To): with none, the latest 30 days with a plan
+        const days = all.filter((d) => (!range.from || d.day >= range.from) && (!range.to || d.day <= range.to)).slice(0, range.from || range.to ? 400 : 30);
         const ongoing = days.filter((d) => d.done < d.lines), complete = days.filter((d) => d.lines && d.done >= d.lines);
+        const quick = (n: number) => { const t = new Date(Date.parse(today + 'T00:00:00Z') - n * 86400000).toISOString().slice(0, 10); setRange({ from: t, to: '' }); };
         return (
-          <div className="plan-groups">
-            <nav className="weeks" aria-label="Ongoing day plans"><span className="weeks-label">Ongoing</span>{ongoing.length ? ongoing.slice(0, 14).map(chip) : <span className="muted small">none</span>}</nav>
-            {complete.length > 0 && <nav className="weeks done-group" aria-label="Completed day plans"><span className="weeks-label">Completed</span>{complete.slice(0, 14).map(chip)}</nav>}
+          <div className="plan-groups" ref={chipRow}>
+            <div className="day-range" role="group" aria-label="Date range of the day plans">
+              <span className="weeks-label">Dates</span>
+              <label>From <input type="date" value={range.from} max={range.to || undefined} onChange={(e) => setRange({ ...range, from: e.target.value })} /></label>
+              <label>To <input type="date" value={range.to} min={range.from || undefined} onChange={(e) => setRange({ ...range, to: e.target.value })} /></label>
+              <button type="button" className="btn sm" onClick={() => quick(6)}>Last 7 days</button>
+              <button type="button" className="btn sm" onClick={() => quick(29)}>Last 30 days</button>
+              {(range.from || range.to) && <button type="button" className="btn sm" onClick={() => setRange({ from: '', to: '' })}>Clear</button>}
+              <span className="muted small">{fmt(days.length)} of {fmt(all.length)} day{all.length === 1 ? '' : 's'}{!range.from && !range.to && all.length > 30 ? ' (latest 30)' : ''}</span>
+            </div>
+            <div className="chip-row"><span className="weeks-label">Ongoing</span>
+              <nav className="weeks scroll" aria-label="Ongoing day plans">{ongoing.length ? ongoing.map(chip) : <span className="muted small">none in these dates</span>}</nav></div>
+            {complete.length > 0 && <div className="chip-row"><span className="weeks-label">Completed</span>
+              <nav className="weeks scroll done-group" aria-label="Completed day plans">{complete.map(chip)}</nav></div>}
           </div>
         );
       })()}
 
       {isDay && data && (data.rounds || []).length > 0 && (
-        <nav className="days rounds" aria-label="Picks of the day">
-          <span className="weeks-label">Pick</span>
+        <div className="chip-row rounds-row"><span className="weeks-label">Pick</span>
+        <nav className="days rounds scroll" aria-label="Picks of the day">
           <button type="button" className={`day-chip ${!round ? 'on' : ''}`} aria-pressed={!round} onClick={() => { setRound(null); setView({ kind: 'all' }); }}>
             <b>All picks</b><span>{fmt((data.rounds || []).reduce((t, r) => t + r.lines, 0))} lines</span></button>
           {(data.rounds || []).map((r) => (
@@ -316,7 +342,7 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
           {(round ? (data.rounds || []).filter((r) => r.id === round) : (data.rounds || [])).map((r) => (
             <button key={'rep' + r.id} type="button" className="btn sm" onClick={() => setReportRid(r.id)} title="The plan report of this Pick — on screen and as Excel">📋 {(plantLabel(r.plant) || '').replace(/\s+/g, '').toUpperCase()}-{(data.day || '').slice(8, 10)}{(data.rounds || []).length > 1 ? ` · Pick ${r.round}` : ''}</button>
           ))}
-        </nav>
+        </nav></div>
       )}
 
       {!isDay && data && dates.length > 1 && (
