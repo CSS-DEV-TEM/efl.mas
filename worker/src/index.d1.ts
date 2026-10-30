@@ -520,6 +520,8 @@ function corsHeaders(env: Env, req: Request): Record<string, string> {
     'Access-Control-Allow-Methods': 'GET,POST,PATCH,DELETE,OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type,Authorization,X-Div',
     'Access-Control-Max-Age': '86400',
+    // v126: the website reads the data meter of each answer (rows read / written, queries) for the live data counter
+    'Access-Control-Expose-Headers': 'x-d1-rows-read,x-d1-rows-written,x-d1-queries',
     Vary: 'Origin',
   };
 }
@@ -560,7 +562,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 72; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 74; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1104,7 +1106,7 @@ async function cached<T>(env: Env, k: string, make: () => Promise<T>): Promise<T
  * Never in a backup: the users and their passwords, the login key and the database link (config).
  */
 // the original Excel files are not in a backup (they are big; the reports' data is)
-const BACKUP_SKIP = new Set(['users', 'cand_cache', 'sqlite_sequence', '_cf_METADATA', '_cf_KV', 'upload_file', 'upload_file_part']);
+const BACKUP_SKIP = new Set(['users', 'presence', 'live_day', 'cand_cache', 'sqlite_sequence', '_cf_METADATA', '_cf_KV', 'upload_file', 'upload_file_part']);
 const CONFIG_SECRET = "k IN ('jwt_secret', 'database_url', 'schema_v', 'rev') OR k LIKE 'c\\_%' ESCAPE '\\'";
 async function backupTables(env: Env) {
   const t = (await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\' ORDER BY name").all<{ name: string }>()).results;
@@ -4655,12 +4657,48 @@ function meterDb(db: D1Database, m: Meter): D1Database {
   });
 }
 
+// ---------------------------------------------------------------- live data of the day
+/**
+ * v126: the rows the whole system processed today (every user, both systems): D1 rows read + written and requests, counted
+ * per Sri Lanka day (UTC+5:30) — a new day starts at 12:00 midnight, so the count resets then. Each Worker isolate adds up
+ * its requests and writes them to the users database at most every 10 s (one small write, not one per request).
+ */
+const lkDay = (ms = Date.now()) => new Date(ms + 330 * 60000).toISOString().slice(0, 10);
+const liveAcc = { day: '', read: 0, written: 0, reqs: 0, last: 0, made: false };
+async function liveFlush(db: D1Database) {
+  if (!liveAcc.reqs && !liveAcc.read && !liveAcc.written) return;
+  const d = liveAcc.day, r = liveAcc.read, w = liveAcc.written, q = liveAcc.reqs;
+  liveAcc.read = 0; liveAcc.written = 0; liveAcc.reqs = 0; liveAcc.last = Date.now();
+  try {
+    if (!liveAcc.made) { await db.prepare('CREATE TABLE IF NOT EXISTS live_day (day TEXT PRIMARY KEY, rows_read INTEGER NOT NULL DEFAULT 0, rows_written INTEGER NOT NULL DEFAULT 0, reqs INTEGER NOT NULL DEFAULT 0, at INTEGER)').run(); liveAcc.made = true; }
+    await db.prepare('INSERT INTO live_day (day, rows_read, rows_written, reqs, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(day) DO UPDATE SET rows_read = rows_read + excluded.rows_read, rows_written = rows_written + excluded.rows_written, reqs = reqs + excluded.reqs, at = excluded.at').bind(d, r, w, q, Date.now()).run();
+    if (Math.random() < 0.02) await db.prepare('DELETE FROM live_day WHERE day < ?').bind(lkDay(Date.now() - 40 * 86400000)).run();
+  } catch { liveAcc.read += r; liveAcc.written += w; liveAcc.reqs += q; } // tried again with the next requests
+}
+function liveAdd(db: D1Database | undefined, m: Meter, ctx?: ExecutionContext) {
+  if (!db) return;
+  const d = lkDay();
+  // a new day: what is left of yesterday goes to yesterday, today starts from 0
+  if (liveAcc.day && liveAcc.day !== d) { const p = liveFlush(db); if (ctx) ctx.waitUntil(p); }
+  liveAcc.day = d; liveAcc.read += m.read; liveAcc.written += m.written; liveAcc.reqs++;
+  if (Date.now() - liveAcc.last > 10000) { const p = liveFlush(db); if (ctx) ctx.waitUntil(p); }
+}
+async function liveToday(db: D1Database) {
+  const d = lkDay();
+  let row: Row | null = null;
+  try { row = await db.prepare('SELECT rows_read, rows_written, reqs FROM live_day WHERE day = ?').bind(d).first<Row>(); } catch { /* no table yet */ }
+  const mine = liveAcc.day === d ? liveAcc : { read: 0, written: 0, reqs: 0 };
+  const read = Number(row?.rows_read ?? 0) + mine.read, written = Number(row?.rows_written ?? 0) + mine.written;
+  return { day: d, read, written, rows: read + written, reqs: Number(row?.reqs ?? 0) + mine.reqs, resets: 'at 12:00 midnight (Sri Lanka time)' };
+}
+
 // ---------------------------------------------------------------- router
 
 export default {
-  async fetch(req: Request, env: Env): Promise<Response> {
+  async fetch(req: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
     const meter: Meter = { read: 0, written: 0, queries: 0 };
+    const rawDb = env.DB; // the users database, not metered: the day's live data is kept there
     if (env.DB) env = { ...env, DB: meterDb(env.DB, meter) };
     const cors = corsHeaders(env, req);
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
@@ -4816,13 +4854,25 @@ export default {
       } else if (p.startsWith('/api/users')) res = await handleUsers(env, req, p);
       else if (p.startsWith('/api/data/') && req.method === 'DELETE') res = await handleClear(env, req, p.split('/').pop() || '');
       else if (p === '/api/online') {
-        await requireUser(env, req);
-        res = env.HUB ? await env.HUB.get(env.HUB.idFromName(hubName(env))).fetch('https://hub/online') : json({ online: [] });
+        // v126: who is signed in now — each open tab says "I am here" every minute (POST); a tab not heard from for 2.5
+        // minutes is not counted; signing out removes the tab (DELETE). Kept in the users database (both systems).
+        const s = await requireUser(env, req);
+        const U = udb(env);
+        await U.prepare('CREATE TABLE IF NOT EXISTS presence (tab TEXT PRIMARY KEY, username TEXT NOT NULL, div TEXT, at INTEGER NOT NULL)').run();
+        const b = req.method === 'GET' ? {} : ((await req.json().catch(() => ({}))) as { tab?: string });
+        const tab = String(b.tab ?? '').replace(/[^\w-]/g, '').slice(0, 40);
+        const nowMs = Date.now();
+        if (req.method === 'POST' && tab) await U.prepare('INSERT INTO presence (tab, username, div, at) VALUES (?, ?, ?, ?) ON CONFLICT(tab) DO UPDATE SET username = excluded.username, div = excluded.div, at = excluded.at').bind(tab, s.u, String(env.DIV ?? 'active'), nowMs).run();
+        if (req.method === 'DELETE' && tab) await U.prepare('DELETE FROM presence WHERE tab = ?').bind(tab).run();
+        if (Math.random() < 0.05) await U.prepare('DELETE FROM presence WHERE at < ?').bind(nowMs - 86400000).run();
+        const rows = (await U.prepare('SELECT username, COUNT(*) tabs, MAX(at) at FROM presence WHERE at >= ? GROUP BY username ORDER BY username').bind(nowMs - 150000).all<Row>()).results;
+        res = json({ online: rows.map((r) => String(r.username)), users: rows.map((r) => ({ username: r.username, tabs: Number(r.tabs), at: new Date(Number(r.at)).toISOString() })), n: rows.length, today: rawDb ? await liveToday(rawDb) : null });
       } else throw new HttpError(404, 'Not found.');
 
       const h = new Headers(res.headers);
       Object.entries(cors).forEach(([k, v]) => h.set(k, v));
       h.set('x-d1-rows-read', String(meter.read)); h.set('x-d1-rows-written', String(meter.written)); h.set('x-d1-queries', String(meter.queries));
+      liveAdd(rawDb, meter, ctx);
       return new Response(res.body, { status: res.status, headers: h });
     } catch (e) {
       const status = e instanceof HttpError ? e.status : 500;

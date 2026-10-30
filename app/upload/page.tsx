@@ -1,4 +1,5 @@
 'use client';
+import { startTask } from '@/lib/progress';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Loader } from '@/components/Loader';
 import Link from 'next/link';
@@ -282,13 +283,19 @@ function Uploads() {
     const order = [...jobs].filter((j) => (j.src || j.pickSrc) && j.state !== 'done').sort((a, b) => rank(a) - rank(b));
     // several files of the same stock report: the first replaces it, the rest are added to it
     const seen = new Set<string>();
+    // v126: the progress bar at the top — sheet by sheet
+    const task = startTask('Uploading reports', '', order.length);
+    let k = 0;
+    try {
     for (const j of order) {
+      task.set(k++, undefined, j.sheet || j.file);
       if (j.pickSrc) { await send(j); continue; }
       const extra = j.src !== 'plan' && seen.has(j.src);
       seen.add(j.src);
       if (extra && j.stockMode !== 'add') setJob(j.id, { stockMode: 'add' });
       await send(extra ? { ...j, stockMode: 'add' } : j);
     }
+    } finally { task.end(); }
   }
 
   // a Pick with its whole pick history (picks, packing lists, rejected rolls, balances) — Admin / Head

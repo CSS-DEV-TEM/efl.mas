@@ -3,9 +3,9 @@
 export const API_URL = (process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8787').replace(/\/+$/, '');
 
 /** The Worker version this website needs (see API_VERSION in worker/src/index.ts). */
-export const NEEDS_API = 72;
+export const NEEDS_API = 74;
 /** This website's release (shown in the header and footer; the Worker's API version is shown next to it). */
-export const APP_VERSION = 'v124';
+export const APP_VERSION = 'v126';
 
 export type Role = 'admin' | 'head' | 'editor' | 'viewer';
 /** How each role is called on screen (the "editor" role is a planner's user account). */
@@ -52,9 +52,25 @@ const busyListeners = new Set<(n: number) => void>();
 const setInflight = (d: number) => { inflight = Math.max(0, inflight + d); busyListeners.forEach((f) => f(inflight)); };
 export function onApiBusy(f: (n: number) => void) { busyListeners.add(f); return () => { busyListeners.delete(f); }; }
 
+/**
+ * v126: the live data meter — what this browser has asked of the server since the page opened: requests, D1 rows read and
+ * written, queries (the Worker's x-d1-* answer headers) and the data received. Shown at the top of every page.
+ */
+export interface ApiMeter { requests: number; read: number; written: number; queries: number; bytes: number; since: number }
+const meter: ApiMeter = { requests: 0, read: 0, written: 0, queries: 0, bytes: 0, since: Date.now() };
+const meterListeners = new Set<(m: ApiMeter) => void>();
+let meterTimer: ReturnType<typeof setTimeout> | null = null;
+const meterEmit = () => { if (meterTimer) return; meterTimer = setTimeout(() => { meterTimer = null; const m = { ...meter }; meterListeners.forEach((f) => f(m)); }, 250); };
+export function onApiMeter(f: (m: ApiMeter) => void) { meterListeners.add(f); f({ ...meter }); return () => { meterListeners.delete(f); }; }
+function countMeter(res: Response, bytes: number) {
+  const n = (h: string) => Number(res.headers.get(h) || 0) || 0;
+  meter.requests++; meter.read += n('x-d1-rows-read'); meter.written += n('x-d1-rows-written'); meter.queries += n('x-d1-queries'); meter.bytes += bytes;
+  meterEmit();
+}
+
 export async function api<T = unknown>(path: string, opts: { method?: string; body?: unknown } = {}): Promise<T> {
   // the cheap "anything changed?" check runs quietly
-  const quiet = path.startsWith('/api/changes');
+  const quiet = path.startsWith('/api/changes') || path.startsWith('/api/online');
   if (!quiet) setInflight(1);
   try { return await apiCall<T>(path, opts); } finally { if (!quiet) setInflight(-1); }
 }
@@ -78,7 +94,10 @@ async function apiCall<T>(path: string, opts: { method?: string; body?: unknown 
       throw new ApiError(0, 'Cannot reach the server. Check your connection, or that NEXT_PUBLIC_API_URL points at the Worker.');
     }
   }
-  const data = await res.json().catch(() => ({}));
+  const text = await res.text().catch(() => '');
+  countMeter(res, text.length);
+  let data: unknown = {};
+  try { data = text ? JSON.parse(text) : {}; } catch { data = {}; }
   if (res.status === 401 && path !== '/api/auth/login') {
     clearSession();
     if (typeof window !== 'undefined' && !location.pathname.startsWith('/login')) location.href = '/login/';

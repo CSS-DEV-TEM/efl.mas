@@ -8,6 +8,7 @@ import { ago, avail, fmt, fmtDate, fmtQty, isDispatched, isDone, need, periodOf,
 import { action } from '@/lib/smart';
 import { downloadLatest } from '@/lib/files';
 import { smartBest, smartSuggest, type Suggestion } from '@/lib/rollSuggest';
+import { startTask } from '@/lib/progress';
 import {
   PICK_SRCS, type PLIssue, type NotPicked, notPickedWhy, korberWorkbook, ordinal, packingListWorkbook, saveWorkbook, uploadPickFile,
   pickNote, parsePackingListFile, type PLPiece, type Candidate, type Candidates, type KorberRow, type SapFit, type ManualRoll, type NbOption, type NoBarcodeRoll, type PickHistory, type PickSrc,
@@ -204,13 +205,10 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
   const [run, setRun] = useState<{ total: number; done: number; cur: string; res: RunRes[]; finished: boolean; offline?: boolean } | null>(null);
   const [runWhy, setRunWhy] = useState<Record<number, string>>({});
   const stopRef = useRef(false);
-  // v123: "Pick all matched" also takes the Smart suggestion's rolls — only rolls whose SAP details all match (can be turned off)
-  const [autoSmart, setAutoSmart0] = useState(() => { try { return localStorage.getItem('pk_auto_smart') !== '0'; } catch { return true; } });
-  const setAutoSmart = (v: boolean) => { setAutoSmart0(v); try { localStorage.setItem('pk_auto_smart', v ? '1' : '0'); } catch { /* */ } };
   const runAll = async () => {
     const targets = rows.filter((l) => !isDone(l) && todo(l) > 1e-9 && !l.hold);
     if (!targets.length) { toast('No open line with UR to pick in this Pick.'); return; }
-    if (!window.confirm(`Pick every All-match roll for ${targets.length} open line${targets.length === 1 ? '' : 's'} of ${label || week}?\n\nOnly rolls where everything matches are picked (as the system selects them, the last roll cut to the QTY) — also a roll SAP lists in the lots of several SO lines, up to each line's ZINSR lot QTY (a cut roll's balance first). ${autoSmart ? 'What is still open is then taken from the Smart suggestion — only rolls whose SAP details all match (Item, Batch, ZINSR lot / Vendor Batch, Invoice, Po, HU, SO / LI, bin; no check needed). ' : ''}Lines that need a check or a manual roll are left for you under “Needs manual”.\n\nKeep this tab open while it runs. If the network drops it waits and goes on by itself.`)) return;
+    if (!window.confirm(`Pick every All-match roll for ${targets.length} open line${targets.length === 1 ? '' : 's'} of ${label || week}?\n\nOnly rolls where everything matches are picked (as the system selects them, the last roll cut to the QTY) — also a roll SAP lists in the lots of several SO lines, up to each line's ZINSR lot QTY (a cut roll's balance first). Lines that need a check or a manual roll are left for you under “Needs manual” — the Smart suggestion shows there, you choose.\n\nKeep this tab open while it runs. If the network drops it waits and goes on by itself.`)) return;
     stopRef.current = false;
     setRunActive(true);
     // closing / reloading the tab while it runs: the browser asks first (the lines already picked stay picked)
@@ -227,6 +225,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
     };
     const res: RunRes[] = []; const why: Record<number, string> = {};
     setRun({ total: targets.length, done: 0, cur: '', res: [], finished: false });
+    const task = startTask('Pick all matched', '', targets.length);
     try {
       for (let i = 0; i < targets.length; i++) {
         if (stopRef.current) break;
@@ -249,34 +248,17 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
             // only the All-match rolls (as the system selects them); the Smart suggestion is never taken by itself
             const plan = autoPlan(autoRolls(c));
             const rolls = Object.entries(plan.sel).map(([pallet, x]) => ({ pallet, qty: r3(Number(x.qty)) })).filter((x) => x.qty > 1e-9);
-            if (left <= 1e-9) { res.push({ ...base, ok: 'skip', text: 'nothing left to pick (UR / balance)' }); why[l.id] = 'Nothing to pick — UR or balance is 0'; break; }
-            let tot = 0;
-            if (rolls.length) {
-              tot = r3(rolls.reduce((t, x) => t + x.qty, 0));
-              sent = tot;
-              await api('/api/pick', { method: 'POST', body: { week: wk, key: l.key, date: l.date, kind: 'normal', auto: true, rolls } });
-            }
-            // then the Smart suggestion for what is still open: read the line again (its picks, lot and batch room are
-            // the server's now) and take only rolls whose SAP details all match — the server checks every roll again
-            let sm: { pallet: string; qty: number; smart: true }[] = [];
-            let smTot = 0;
-            if (autoSmart && r3(left - tot) > 1e-9 && !stopRef.current) {
-              const c2 = rolls.length ? await api<Candidates>(`/api/pick/candidates?week=${encodeURIComponent(wk)}&key=${encodeURIComponent(l.key)}&date=${encodeURIComponent(l.date ?? '')}`) : c;
-              sm = smartAutoRolls(c2);
-              if (sm.length) {
-                smTot = r3(sm.reduce((t, x) => t + x.qty, 0));
-                sent = r3(sent + smTot);
-                await api('/api/pick', { method: 'POST', body: { week: wk, key: l.key, date: l.date, kind: 'normal', auto: true, rolls: sm } });
-              }
-            }
-            const all = r3(tot + smTot);
-            if (all <= 1e-9) {
-              const t = c.rolls.some((x) => x.available > 1e-9 && x.needsConfirm) ? 'rolls need a check (“Confirmed”)' : c.rolls.some((x) => x.available > 1e-9 && x.pool) ? 'shared-lot rolls — tick them' : c.nobarcode?.length ? 'no-barcode / Invoice + Item rolls — choose them' : autoSmart && c.rolls.some((x) => x.available > 1e-9) ? 'no roll with every SAP detail matching — see the Smart suggestion' : 'no matched roll';
+            if (left <= 1e-9) { res.push({ ...base, ok: 'skip', text: 'nothing left to pick (UR / balance)' }); why[l.id] = 'Nothing to pick — UR or balance is 0'; }
+            else if (!rolls.length) {
+              const t = c.rolls.some((x) => x.available > 1e-9 && x.needsConfirm) ? 'rolls need a check (“Confirmed”)' : c.rolls.some((x) => x.available > 1e-9 && x.pool) ? 'shared-lot rolls — tick them' : c.nobarcode?.length ? 'no-barcode / Invoice + Item rolls — choose them' : 'no matched roll';
               res.push({ ...base, ok: 'skip', text: t }); why[l.id] = t;
             } else {
-              const short = r3(left - all);
-              res.push({ ...base, ok: 'picked', text: `${rolls.length + sm.length} roll${rolls.length + sm.length === 1 ? '' : 's'} · ${fmtQty(all)}${sm.length ? ` (${sm.length} by Smart suggestion · ${fmtQty(smTot)})` : ''}${short > 1e-9 ? ` · ${fmtQty(short)} still short` : ''}` });
-              if (short > 1e-9) why[l.id] = `${fmtQty(short)} still short — no more rolls with every SAP detail matching (see the Smart suggestion in the pick window)`;
+              const tot = r3(rolls.reduce((t, x) => t + x.qty, 0));
+              sent = tot;
+              await api('/api/pick', { method: 'POST', body: { week: wk, key: l.key, date: l.date, kind: 'normal', auto: true, rolls } });
+              const short = r3(left - tot);
+              res.push({ ...base, ok: 'picked', text: `${rolls.length} roll${rolls.length === 1 ? '' : 's'} · ${fmtQty(tot)}${short > 1e-9 ? ` · ${fmtQty(short)} still short` : ''}` });
+              if (short > 1e-9) why[l.id] = `${fmtQty(short)} still short — no more All-match rolls (see the Smart suggestion in the pick window)`;
             }
             break;
           } catch (e) {
@@ -287,9 +269,11 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
           }
         }
         setRun((r) => r && { ...r, done: i + 1, res: [...res] });
+        task.set(i + 1, undefined, `${l.so} / ${l.li}`);
       }
     } finally {
       window.removeEventListener('beforeunload', onLeave);
+      task.end();
     }
     setRun((r) => r && { ...r, cur: '', finished: true, offline: false });
     setRunActive(false);
@@ -349,8 +333,6 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
             {repRid && <button className="btn" onClick={() => setShowReport(true)} title="The plan report of this Pick — on screen and as Excel">📋 {report?.name || 'Plan report'}</button>}
             {showReport && repRid && <PlanReport rid={repRid} onClose={() => setShowReport(false)} />}
             {canEdit && <button className="btn primary run-all" disabled={!!run && !run.finished} onClick={runAll} title="Pick every roll where everything matches, line by line">⚡ Pick all matched</button>}
-            {canEdit && <label className="small" style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }} title="After the All-match rolls, what is still open is taken from the Smart suggestion — only rolls whose SAP details all match: Item, Batch, ZINSR lot / Vendor Batch, Invoice, Po, HU, SO / LI and bin; no roll that needs a check, and of a shared lot only this line's share. The server checks the ZINSR lot QTY, batch QTY and ZROLLMGT again.">
-              <input type="checkbox" checked={autoSmart} onChange={(e) => setAutoSmart(e.target.checked)} disabled={!!run && !run.finished} /> + Smart suggestion (SAP match)</label>}
             {canEdit && <button className="btn" onClick={() => setImportOpen(true)} title="A Packing List file (this system's format) into this Pick: its rolls are saved as picks of the Pick's SO lines">⬆ Import Packing List</button>}
             {importOpen && <ImportPLDialog week={week} label={label || week} toast={toast} onClose={(changed) => { setImportOpen(false); if (changed) { reload(); setHistKey((k) => k + 1); } }} />}
           </div>
@@ -620,44 +602,6 @@ function exactSubset(items: { id: string; q: number }[], target: number): Set<st
  * (SAP lists the same roll in the inspection lots of several SO lines) is in this line's own lot too, so it is taken like
  * any matched roll — within this line's ZINSR lot QTY, a cut roll's balance first (the next SO line takes the rest of it).
  */
-/**
- * v123: the Smart suggestion's rolls "Pick all matched" may take by itself — only rolls whose SAP details all match the SO line:
- * Item and Batch match, the ZINSR lot or Vendor Batch matches, and no SAP field differs (Invoice, Po, HU, SO / LI, bin); no
- * roll that needs a check, none sharing its batch's ZROLLMGT Available, and of a shared lot only the rolls suggested for this
- * line. The suggestion keeps every ZINSR lot's QTY and batch need; what it can give is taken, the rest stays manual.
- */
-export function smartAutoRolls(c: Candidates): { pallet: string; qty: number; smart: true }[] {
-  const left = r3(c.need - c.picked);
-  if (!(left > 1e-9)) return [];
-  const sapOk = (r: Candidate) => {
-    const f = r.sap;
-    if (!f || f.miss.length) return false;
-    const hit = (re: RegExp) => f.hits.some((h) => re.test(h));
-    return hit(/^Item\b/) && hit(/^Batch\b/) && (hit(/^ZINSR lot\b/) || hit(/^Vendor Batch\b/));
-  };
-  const ok = c.rolls.filter((r) => r.available > 1e-9 && !r.needsConfirm && !r.zpool && (!r.warnings || !r.warnings.length) && (!r.pool || r.suggested) && sapOk(r));
-  if (!ok.length) return [];
-  const lotCaps = new Map((c.lots || []).filter((l) => (l.cap ?? l.need) != null).map((l) => [String(l.lot), Number(l.cap ?? l.need)]));
-  const s = smartSuggest(ok, { need: left, lotCaps, batchNeed: c.batchNeed?.length ? new Map(c.batchNeed.map((b) => [b.batch, b.need])) : undefined });
-  const b = s.best;
-  if (!b) return [];
-  // v124: what the suggestion can give is taken, the rest stays under Needs manual:
-  //  · short (the SAP-matched rolls do not cover the QTY): its rolls are taken, the rest is manual
-  //  · mixed shades: only the rolls of one shade (the one giving the most), the rest is manual
-  //  · a cut leaving a tiny stub on the shelf: that roll is not cut by itself — it is left for manual
-  let picks = b.picks.filter((p) => p.qty > 1e-9);
-  const byP = new Map(ok.map((r) => [r.pallet, r]));
-  const sh = (pl: string) => String(byP.get(pl)?.shade ?? '').trim().toUpperCase();
-  const shades = Array.from(new Set(picks.map((p) => sh(p.pallet)).filter(Boolean)));
-  if (shades.length > 1) {
-    const tot = (x: string) => picks.filter((p) => sh(p.pallet) === x).reduce((t, p) => t + p.qty, 0);
-    const keep = shades.sort((a, z) => tot(z) - tot(a))[0];
-    picks = picks.filter((p) => sh(p.pallet) === keep);
-  }
-  picks = picks.filter((p) => { const r = byP.get(p.pallet); return !(p.cut && r && p.left < Math.max(1, 0.05 * r.available)); });
-  return picks.map((p) => ({ pallet: p.pallet, qty: r3(p.qty), smart: true as const }));
-}
-
 export function autoRolls(c: Candidates): Candidates {
   return { ...c, rolls: c.rolls.filter((x) => !x.needsConfirm).map((x) => (x.pool ? { ...x, pool: undefined, suggested: undefined } : x)) };
 }
@@ -1378,6 +1322,8 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
   const [plBusy, setPlBusy] = useState(false);
   const downloadPL = async () => {
     setPlBusy(true);
+    // v126: the progress bar at the top (steps and lines checked)
+    const task = startTask('Packing List download', 'starting');
     try {
       // cut roll balances first: each one goes to another SO line it can go to (same Material and LI, UR in ZMMBE, a ZINSR
       // lot with the roll's Vendor Batch) as a pick of that line — then the Packing List is made with them
@@ -1385,11 +1331,16 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
       const tallyFail: string[] = [];
       if (canEdit && autoTally && target.length) {
         setPlProg('tallying cut rolls');
+        task.step('tallying cut roll balances');
         try {
           const t = await api<{ rolls: { pallet: string; from: number; targets: { so: string; li: string; item: string; take: number }[] }[] }>('/api/pick/tally?ids=' + target.map((r) => r.id).join(','));
           const newIds: number[] = [];
+          const tTot = t.rolls.reduce((n, x) => n + x.targets.filter((y) => y.take > 0).length, 0);
+          let tDone = 0;
+          task.step('tallying cut roll balances', tTot);
           for (const x of t.rolls) for (const y of x.targets) {
             if (!(y.take > 0)) continue;
+            task.set(tDone++);
             try { const r = await api<{ id: number }>('/api/pick/tally', { method: 'POST', body: { pallet: x.pallet, so: y.so, li: y.li, item: y.item, qty: y.take, from: x.from } }); newIds.push(r.id); tallied++; tallyQty = r3(tallyQty + y.take); }
             catch (e) { tallyFail.push(`${x.pallet} → ${y.so} / ${y.li}: ${e instanceof Error ? e.message : 'failed'}`); }
           }
@@ -1404,6 +1355,7 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
         setPlProg('');
       }
       // the plan (dashboard table) of the Picks in the download
+      task.step('reading the plan');
       const weeks = Array.from(new Set(target.map((r) => r.week).filter(Boolean)));
       const days = Array.from(new Set(weeks.map((w) => /^(\d{4}-\d{2}-\d{2})~/.exec(w)?.[1]).filter(Boolean))) as string[];
       let plan: LineP[] = [];
@@ -1456,7 +1408,8 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
       };
       // a few lines at a time
       const queue = [...open];
-      await Promise.all(Array.from({ length: Math.min(PL_PAR, queue.length) }, async () => { for (let l = queue.shift(); l; l = queue.shift()) { await one(l); done++; setPlProg(`${done} / ${open.length}`); } }));
+      task.step('checking the lines not picked', open.length);
+      await Promise.all(Array.from({ length: Math.min(PL_PAR, queue.length) }, async () => { for (let l = queue.shift(); l; l = queue.shift()) { await one(l); done++; setPlProg(`${done} / ${open.length}`); task.set(done); } }));
       setPlProg('');
       // short picks: lines picked with less than their plan QTY (a pick closed short included) that are not listed yet
       for (const l of scope) {
@@ -1478,6 +1431,7 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
       }
       notPicked.sort((a, b) => a.pick.localeCompare(b.pick) || a.reason.localeCompare(b.reason) || a.so.localeCompare(b.so) || Number(a.li) - Number(b.li) || String(a.item).localeCompare(String(b.item)) || String(a.date ?? '').localeCompare(String(b.date ?? '')));
       // the SAP and Korber data of every roll is checked first: problems are shown before the file is saved
+      task.step('checking SAP / Korber and building the file', 0);
       const issues: PLIssue[] = [];
       const wb = packingListWorkbook(hh, { ids: new Set(target.map((r) => r.id)), combined: oneSheet, pfcSlocs, plan, planTitle: `Plan · ${weeks.map(pickName).join(', ')}`, issues, notPicked, plantNames });
       const file = `Packing_List_${day}${ptag}${tag}.xlsx`;
@@ -1485,7 +1439,7 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
       if (tallyFail.length) toast(`Cut roll tally: ${tallyFail.length} not saved — ${tallyFail[0]}`);
       if (issues.length) { setPlCheck({ wb, file, issues }); if (tallied) toast(`${tallied} cut roll balance${tallied === 1 ? '' : 's'} tallied (${fmtQty(tallyQty)}) — on this Packing List`); }
       else { saveWorkbook(wb, file); toast(`Packing List checked ✓${tallyMsg} — ${target.length} pick${target.length === 1 ? '' : 's'}: SAP lines and Korber rows are right${notPicked.length ? ` · ${notPicked.length} line${notPicked.length === 1 ? '' : 's'} not picked (sheet “Not Picked”)` : ''}`); }
-    } finally { setPlBusy(false); setPlProg(''); }
+    } finally { setPlBusy(false); setPlProg(''); task.end(); }
   };
   const [plProg, setPlProg] = useState('');
   const [tallyOpen, setTallyOpen] = useState(false);
@@ -1714,13 +1668,17 @@ function ImportPLDialog({ week, label, toast, onClose }: { week: string; label: 
       const CH = 8;
       let tgt: Record<string, unknown> = target();
       const r = { picks: 0, rolls: 0, week: '', label: '' };
+      const task = startTask('Import Packing List', 'saving SO lines', keys.length);
+      try {
       for (let i = 0; i < keys.length; i += CH) {
         const part = new Set(keys.slice(i, i + CH));
         setBusy(`Saving… ${Math.min(i + CH, keys.length)} / ${keys.length} SO lines`);
+        task.set(i);
         const x = await api<{ picks: number; rolls: number; week: string; label: string }>('/api/pick/import', { method: 'POST', body: { ...tgt, fileName: file.name, pieces: parsed.pieces.filter((p) => part.has(keyOf(p))) } });
         r.picks += x.picks; r.rolls += x.rolls; r.week = x.week; r.label = x.label;
         tgt = mode === 'new' ? { week: x.week, addPlan: true } : { week: x.week };
       }
+      } finally { task.end(); }
       toast(`Packing List imported${mode === 'new' ? ` as a new Pick — ${r.label}` : ` into ${label}`}: ${r.picks} pick${r.picks === 1 ? '' : 's'}, ${r.rolls} roll${r.rolls === 1 ? '' : 's'}`);
       if (mode === 'new' && r.week) {
         // open the new Pick
@@ -1833,10 +1791,14 @@ function TallyDialog({ ids, toast, onClose }: { ids: number[]; toast: (m: string
   const save = async () => {
     setBusy(true); setErr('');
     let n = 0; const fails: string[] = [];
+    const task = startTask('Cut roll tally', 'saving balances', chosen.length);
+    let k = 0;
     for (const { x, t, q } of chosen) {
+      task.set(k++, undefined, x.pallet);
       try { await api('/api/pick/tally', { method: 'POST', body: { pallet: x.pallet, so: t.so, li: t.li, item: t.item, qty: q, from: x.from } }); n++; }
       catch (e) { fails.push(`${x.pallet} → ${t.so} / ${t.li}: ${e instanceof Error ? e.message : 'failed'}`); }
     }
+    task.end();
     setBusy(false); setSaved((v) => v + n);
     if (n) toast(`${n} cut roll balance${n === 1 ? '' : 's'} tallied — on the Packing List with their SAP details`);
     if (fails.length) setErr(fails.join(' · ')); else onClose(true);

@@ -2,7 +2,8 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { APP_VERSION, ApiError, DIV_NAME, NEEDS_API, ROLE_NAME, api, clearSession, getDiv, getSession, getViewUser, onApiBusy, saveSession, setDiv, setViewUser, userDivs, type Div, type User } from '@/lib/api';
+import { APP_VERSION, ApiError, DIV_NAME, NEEDS_API, ROLE_NAME, api, clearSession, getDiv, getSession, getViewUser, onApiBusy, onApiMeter, saveSession, setDiv, setViewUser, userDivs, type ApiMeter, type Div, type User } from '@/lib/api';
+import { onTasks, type Task } from '@/lib/progress';
 import { useLive, type LiveMessage, type LiveState } from '@/lib/live';
 import { Credit, Logo } from '@/components/Brand';
 import TableFilters from '@/components/TableFilters';
@@ -109,6 +110,37 @@ export default function Shell({ children, admin, allowGuest }: { children: React
     return () => { off(); clearTimeout(t); };
   }, []);
 
+  // v126: the live data meter (what this page asked of the server: requests running, rows read / written, data received)
+  const [inflight, setInflight] = useState(0);
+  const [meter, setMeter] = useState<ApiMeter | null>(null);
+  useEffect(() => { const a = onApiBusy(setInflight); const b = onApiMeter(setMeter); return () => { a(); b(); }; }, []);
+  // the long jobs running now (Packing List, uploads, imports …): a progress bar each
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [, setTick] = useState(0);
+  useEffect(() => onTasks(setTasks), []);
+  useEffect(() => { if (!tasks.length) return; const t = setInterval(() => setTick((x) => x + 1), 1000); return () => clearInterval(t); }, [tasks.length]);
+  // v126: who is signed in now — this tab says "I am here" every minute; the answer is everyone heard from lately
+  const [present, setPresent] = useState<{ username: string; tabs: number }[] | null>(null);
+  // the whole system's live data today (every user): rows processed, reset at 12:00 midnight (Sri Lanka time)
+  type Today = { day: string; read: number; written: number; rows: number; reqs: number };
+  const [today, setToday] = useState<Today | null>(null);
+  const tabId = useRef('');
+  useEffect(() => {
+    if (!user || guest) return;
+    try { tabId.current = sessionStorage.getItem('mas-tab') || ''; if (!tabId.current) { tabId.current = Math.random().toString(36).slice(2, 12); sessionStorage.setItem('mas-tab', tabId.current); } } catch { tabId.current = Math.random().toString(36).slice(2, 12); }
+    let stop = false;
+    const beat = () => { if (stop || document.visibilityState === 'hidden') return; api<{ users: { username: string; tabs: number }[]; today?: Today | null }>('/api/online', { method: 'POST', body: { tab: tabId.current } }).then((r) => { if (!stop) { setPresent(r.users || []); if (r.today) setToday(r.today); } }).catch(() => {}); };
+    beat();
+    const t = setInterval(beat, 30000);
+    const vis = () => { if (document.visibilityState === 'visible') beat(); };
+    document.addEventListener('visibilitychange', vis);
+    return () => { stop = true; clearInterval(t); document.removeEventListener('visibilitychange', vis); };
+  }, [user, guest]);
+  const signOut = async () => {
+    try { if (tabId.current) await api('/api/online', { method: 'DELETE', body: { tab: tabId.current } }); } catch { /* signed out anyway */ }
+    clearSession(); router.replace('/login/');
+  };
+
   const toast = useCallback((text: string) => {
     const id = Date.now() + Math.random();
     setToasts((t) => [...t.slice(-3), { id, text }]);
@@ -167,7 +199,7 @@ export default function Shell({ children, admin, allowGuest }: { children: React
           <div className="bar-right">
             <Credit compact />
             <span className={`live ${state === 'live' ? 'on' : state === 'offline' ? 'off' : ''}`} title={online.length ? 'Online: ' + online.join(', ') : ''}>
-              <i />{liveText}{state === 'live' && online.length > 0 ? ` · ${online.length} online` : ''}
+              <i />{liveText}
             </span>
             {guest ? (
               <Link className="btn sm primary" href="/login/">Sign in to upload / edit</Link>
@@ -183,11 +215,37 @@ export default function Shell({ children, admin, allowGuest }: { children: React
                   </label>
                 )}
                 <span className="who">{user.username}<span className="role">{ROLE_NAME[user.role] || user.role}</span></span>
-                <button className="btn sm" onClick={() => { clearSession(); router.replace('/login/'); }}>Sign out</button>
+                <button className="btn sm" onClick={() => { void signOut(); }}>Sign out</button>
               </>
             )}
           </div>
         </div>
+        {/* v126: live data and who is signed in — at the top of every page */}
+        <div className="top-status" role="status" aria-live="off">
+          <span className={`ts-live ${inflight > 0 ? 'on' : ''}`} title={`${today ? `Whole system today (${today.day}, every user — resets at 12:00 midnight): ${today.rows.toLocaleString()} rows processed = ${today.read.toLocaleString()} read + ${today.written.toLocaleString()} written · ${today.reqs.toLocaleString()} requests\n` : ''}${meter ? `This tab since it opened (${new Date(meter.since).toLocaleTimeString()}): ${meter.requests.toLocaleString()} requests · ${meter.queries.toLocaleString()} database queries · ${meter.read.toLocaleString()} rows read · ${meter.written.toLocaleString()} rows written · ${fmtBytes(meter.bytes)} received` : ''}`}>
+            <i />Live data: {inflight > 0 ? <b>{inflight} running</b> : 'idle'}
+            {today ? <> · Today <b>{fmtN(today.rows)}</b> rows processed <span className="muted">({fmtN(today.read)} read · {fmtN(today.written)} written · {fmtN(today.reqs)} requests · resets 12:00 AM)</span></>
+              : meter && <> · {fmtN(meter.read)} rows read · {fmtN(meter.written)} written · {fmtN(meter.requests)} requests · {fmtBytes(meter.bytes)}</>}
+          </span>
+          <span className="ts-online" title={(present ?? []).length ? 'Signed in now: ' + (present ?? []).map((u) => `${u.username}${u.tabs > 1 ? ` (${u.tabs} tabs)` : ''}`).join(', ') : online.length ? 'Online: ' + online.join(', ') : ''}>
+            👥 {present ? present.length : online.length} user{(present ? present.length : online.length) === 1 ? '' : 's'} signed in{present && present.length ? `: ${present.slice(0, 4).map((u) => u.username).join(', ')}${present.length > 4 ? ` +${present.length - 4}` : ''}` : ''}
+          </span>
+        </div>
+        {tasks.length > 0 && (
+          <div className="task-strip">
+            {tasks.map((t) => {
+              const pct = t.total > 0 ? Math.min(100, Math.round((t.done / t.total) * 100)) : null;
+              const sec = Math.round((Date.now() - t.started) / 1000);
+              return (
+                <div key={t.id} className="task-row" role="progressbar" aria-label={t.label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct ?? undefined}>
+                  <span className="task-label"><b>{t.label}</b>{t.step ? ` · ${t.step}` : ''}{t.total > 0 ? ` · ${t.done.toLocaleString()} / ${t.total.toLocaleString()}` : ''}</span>
+                  <span className={`task-bar ${pct === null ? 'ind' : ''}`}><i style={pct === null ? undefined : { width: `${pct}%` }} /></span>
+                  <span className="task-pct">{pct === null ? '…' : `${pct}%`} · {sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m ${sec % 60}s`}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </header>
       {oldApi !== null && (
         <div className="notice bad api-old" role="alert">
@@ -203,3 +261,6 @@ export default function Shell({ children, admin, allowGuest }: { children: React
     </ShellCtx.Provider>
   );
 }
+
+const fmtN = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e4 ? `${Math.round(n / 1e3)}k` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n));
+const fmtBytes = (b: number) => (b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB` : b >= 1024 ? `${Math.round(b / 1024)} KB` : `${b} B`);
