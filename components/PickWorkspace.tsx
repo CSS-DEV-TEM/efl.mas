@@ -11,7 +11,7 @@ import { smartBest, smartSuggest, type Suggestion } from '@/lib/rollSuggest';
 import { startTask } from '@/lib/progress';
 import {
   PICK_SRCS, type PLIssue, type NotPicked, notPickedWhy, korberWorkbook, ordinal, packingListWorkbook, saveWorkbook, uploadPickFile,
-  pickNote, parsePackingListFile, type PLPiece, type Candidate, type Candidates, type KorberRow, type SapFit, type ManualRoll, type NbOption, type NoBarcodeRoll, type PickHistory, type PickSrc,
+  pickNote, parsePackingListFile, planPickWorkbook, type PPLine, type PPRoll, type PLPiece, type Candidate, type Candidates, type KorberRow, type SapFit, type ManualRoll, type NbOption, type NoBarcodeRoll, type PickHistory, type PickSrc,
 } from '@/lib/pick';
 
 type LineP = Line & { picked?: number; picked_rolls?: number };
@@ -162,6 +162,84 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
     if (!sc.why || sc.auto >= lt - 1e-6) return <span className="pill ok" title="The matched rolls cover the QTY — Pick all matched picks them">{part}Auto match {fmtQty(sc.auto)}</span>;
     if (sc.auto > 1e-9) return <span className="pill accent" title={sc.why}>{part}Auto {fmtQty(sc.auto)} · manual {fmtQty(r3(lt - sc.auto))}</span>;
     return <span className="pill warn" title={sc.why}>{part}Needs manual {fmtQty(lt)}</span>;
+  };
+  /** v134: the State as text (the same as the State column), for the Plan → Pick report */
+  const stateText = (l: LineP): string => {
+    const pk = l.picked ?? 0, done = isDispatched(l), autoP = Number(l.auto_picked) > 0, cs = Number((l as LineP & { closed_short?: number }).closed_short) || 0;
+    if (l.hold && !isDone(l)) return `On hold · ${l.hold}`;
+    if (isDone(l) && !done) return 'Completed ✓';
+    if (done) return cs > 0 ? `Picked ✓ · ${fmtQty(cs)} short` : autoP ? 'Auto Picked ✓' : 'Picked ✓ · Dispatched';
+    if (pk && sentOf(l) && bal(l) <= 1e-9) return 'Picked ✓ · rest sent';
+    const part = pk > 1e-9 ? `${autoP ? 'Auto picked' : 'Picked'} ${fmtQty(pk)} · ` : '';
+    const t = todo(l);
+    if (t <= 1e-9) return pk > 1e-9 ? `${part}no UR for the rest` : pendingWhy(l);
+    const sc = scan[l.id];
+    if (!sc) return `${part}To pick ${fmtQty(t)}`;
+    const lt = r3(Math.min(t, sc.left));
+    if (lt <= 1e-9) return `${part}no UR for the rest`;
+    if (!sc.why || sc.auto >= lt - 1e-6) return `${part}Auto match ${fmtQty(sc.auto)}`;
+    if (sc.auto > 1e-9) return `${part}Auto ${fmtQty(sc.auto)} · manual ${fmtQty(r3(lt - sc.auto))}`;
+    return `${part}Needs manual ${fmtQty(lt)}`;
+  };
+  // v134: Plan → Pick report — the lines on screen with their State, and each line's rolls: can it be picked, and why not
+  const [repBusy, setRepBusy] = useState(false);
+  const downloadReport = async () => {
+    const ls = list.slice();
+    if (!ls.length) { toast('No lines on screen for the report.'); return; }
+    setRepBusy(true);
+    const task = startTask('Plan → Pick report', 'checking the rolls of each line', ls.length);
+    try {
+      const outL: PPLine[] = [], outR: PPRoll[] = [];
+      const cands = new Map<number, Candidates | null>();
+      const queue = ls.filter((l) => !isDone(l) && bal(l) > 1e-9);
+      let done = 0;
+      await Promise.all(Array.from({ length: Math.min(PL_PAR, queue.length) }, async () => {
+        for (let l = queue.shift(); l; l = queue.shift()) {
+          const wk = (l as LineP & { week?: string }).week || week;
+          try { cands.set(l.id, await api<Candidates>(`/api/pick/candidates?week=${encodeURIComponent(wk)}&key=${encodeURIComponent(l.key)}&date=${encodeURIComponent(l.date ?? '')}`)); } catch { cands.set(l.id, null); }
+          task.set(++done, undefined, `${l.so} / ${l.li}`);
+        }
+      }));
+      task.step('building the file', 0);
+      const pickOf = (l: LineP) => { const w = (l as LineP & { week?: string }).week || week; const m = /^(\d{4}-\d{2}-\d{2})~([^~]*)~(\d+)$/.exec(w); return m ? `${m[1].slice(8, 10)}-${m[1].slice(5, 7)} · ${m[2]} · Pick ${m[3]}` : (label || w); };
+      for (const l of ls) {
+        const c = cands.get(l.id) ?? null;
+        const st = stateText(l);
+        const base = { pick: pickOf(l), so: l.so, li: String(l.li), item: l.item, date: l.date ?? '', state: st };
+        const usable = c ? c.rolls.filter((x) => x.available > 1e-9 && (!x.pool || x.suggested)) : [];
+        outL.push({ ...base, plant: l.plant ?? '', qty: Number(l.qty) || 0, picked: l.picked ?? 0, balance: r3(bal(l)), ur: r3(Math.max(0, avail(l))),
+          korber: c ? r3(usable.reduce((t, x) => t + x.available, 0)) : null, korberRolls: c ? usable.length : null, why: scan[l.id]?.why || (todo(l) <= 1e-9 && !isDone(l) && bal(l) > 1e-9 ? pendingWhy(l) : '') });
+        if (!c) continue;
+        const left = r3(c.need - c.picked);
+        const plan = left > 1e-9 ? autoPlan(autoRolls(c)) : { sel: {} as Record<string, { qty: string }> };
+        const lotLeft = new Map((c.lots || []).map((x) => [String(x.lot), Number(x.cap ?? x.need ?? 0)]));
+        for (const r of c.rolls) {
+          const lotsR = Array.from(new Set((r.parts?.length ? r.parts.map((p) => p.lot) : r.insp_lots).map(String)));
+          const sel = (plan.sel as Record<string, { qty: string }>)[r.pallet];
+          let can = 'No', why = '';
+          if (r.available <= 1e-9) why = `Picked in full already${r.picks?.length ? ` — ${r.picks.map(pickNote).join('; ')}` : ''}`;
+          else if (sel) { can = 'Yes (auto)'; why = `All match — Pick all matched picks ${fmtQty(Number(sel.qty))}${Number(sel.qty) < r.available - 1e-6 ? ' (cut)' : ''}`; }
+          else if (r.needsConfirm) { can = 'Manual'; why = `Needs a check (“I checked”): ${r.warnings.join('; ')}`; }
+          else if (r.pool && !r.suggested) why = 'Shared lot — this roll is suggested for another SO line of the lot';
+          else if (r.pool) { can = 'Manual'; why = 'Shared lot — suggested for this line: tick it by hand'; }
+          else if (lotsR.length && lotsR.every((x) => lotLeft.has(x) && (lotLeft.get(x) ?? 0) <= 1e-9)) why = `ZINSR lot QTY of this SO line used up (lot ${lotsR.join(', ')})`;
+          else if (left <= 1e-9) why = 'Nothing left to pick on this line (UR / balance)';
+          else { can = 'Manual'; why = 'Matched — not needed by Pick all matched (other rolls cover the QTY); can be ticked by hand'; }
+          outR.push({ ...base, pallet: r.pallet, roll: (r as Candidate & { barcode?: string | null }).barcode ?? r.supplier_hu ?? '', lot: r.lot ?? '', batch: (r.batches || []).join(', '), shade: r.shade ?? '', location: r.location ?? '',
+            korberQty: Number(r.actual_qty) || null, available: r3(r.available), pickable: can, reason: why, note: r.qtyNote ?? '' });
+        }
+        for (const b of c.blocked || []) outR.push({ ...base, pallet: b.pallet ?? '', roll: b.barcode ?? b.roll_no ?? '', lot: b.lot ?? '', batch: b.batch ?? '', shade: b.shade ?? '', location: '', korberQty: b.qty, available: null, pickable: 'No', reason: b.why, note: '' });
+        for (const m of c.manual || []) outR.push({ ...base, pallet: '', roll: m.barcode ?? m.roll_no ?? '', lot: m.vendor_batch ?? m.lot ?? '', batch: m.batch ?? '', shade: m.shade ?? '', location: '', korberQty: m.roll_qty ?? null, available: null, pickable: 'Manual', reason: `Not matched to a Korber pallet — ${m.reason}`, note: m.suggest?.length ? `${m.suggest.length} Korber roll(s) offered` : '' });
+        for (const m of c.nobarcode || []) outR.push({ ...base, pallet: '', roll: m.roll_no ?? '', lot: m.vendor_batch ?? m.lot ?? '', batch: m.batch ?? '', shade: m.shade ?? '', location: '', korberQty: m.roll_qty ?? null, available: null, pickable: m.done ? 'No' : 'Manual',
+          reason: m.done ? 'Its Korber roll was picked in full already' : m.invChoice ? 'Lot has no ZCOMENT rolls — choose by Invoice + Item' : m.noShade ? 'Inspection lot has no Shade Report — choose the Korber roll' : 'No Barcode Number in ZCOMENT — choose the Korber roll', note: `${m.options.length} Korber roll(s) offered` });
+        if (!c.rolls.length && !(c.blocked || []).length && !(c.manual || []).length && !(c.nobarcode || []).length && left > 1e-9)
+          outR.push({ ...base, pallet: '', roll: '', lot: '', batch: '', shade: '', location: '', korberQty: null, available: null, pickable: 'No', reason: 'No roll found for this line', note: (c.steps || []).slice(-2).join(' · ') });
+      }
+      const title = `${label || week}${scope ? ` · ${scope}` : ''}`;
+      saveWorkbook(planPickWorkbook(outL, outR, title), `Plan_Pick_Report_${(label || week).replace(/[^\w]+/g, '_')}.xlsx`);
+      toast(`Plan → Pick report: ${outL.length} lines, ${outR.length} rolls`);
+    } catch (e) { toast(e instanceof Error ? e.message : 'Could not make the report.'); }
+    finally { task.end(); setRepBusy(false); }
   };
   /** Korber qty: the rolls this line can take now when checked (matched to it), else the rolls of its lots on the shelf */
   const korberOf = (l: LineP) => {
@@ -337,6 +415,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
             {repRid && <button className="btn" onClick={() => setShowReport(true)} title="The plan report of this Pick — on screen and as Excel">📋 {report?.name || 'Plan report'}</button>}
             {showReport && repRid && <PlanReport rid={repRid} onClose={() => setShowReport(false)} />}
             {canEdit && <button className="btn primary run-all" disabled={!!run && !run.finished} onClick={runAll} title="Pick every roll where everything matches, line by line">⚡ Pick all matched</button>}
+            <button className="btn" disabled={repBusy} aria-busy={repBusy || undefined} onClick={() => void downloadReport()} title="Excel: the lines on screen with their State, and every roll of each line — can it be picked, and why not">{repBusy ? 'Preparing…' : '📄 Plan → Pick report'}</button>
             {canEdit && <button className="btn" onClick={() => setImportOpen(true)} title="A Packing List file (this system's format) into this Pick: its rolls are saved as picks of the Pick's SO lines">⬆ Import Packing List</button>}
             {importOpen && <ImportPLDialog week={week} label={label || week} toast={toast} onClose={(changed) => { setImportOpen(false); if (changed) { reload(); setHistKey((k) => k + 1); } }} />}
           </div>
@@ -799,8 +878,6 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
     }).catch(() => {});
   }, []);
   const [checkedOk, setCheckedOk] = useState(false);
-  // v132: rolls not in ZROLLMGT (every other detail matches) need the special approval password
-  const [approvalPw, setApprovalPw] = useState('');
   const [overOk, setOverOk] = useState(false);
   const [choosing, setChoosing] = useState<ManualRoll | null>(null);
   const [pickNo, setPickNo] = useState('');
@@ -933,8 +1010,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
   const offsiteOver = kind === 'offsite' && diff > 0.0005;
   const needOverOk = kind === 'normal' && diff > 0.0005 && remaining > 0 && !overByFullRoll;
   const isShort = diff < -0.0005 && nSel > 0;
-  const unlockSel = c ? c.rolls.filter((r) => sel[r.pallet] && r.zrollMissing) : [];
-  const blocked = !nSel || offsiteOver || (flagged.length > 0 && !checkedOk) || (unlockSel.length > 0 && !approvalPw) || (needOverOk && !overOk) || Object.values(sel).some((x) => !(Number(x.qty) > 0));
+  const blocked = !nSel || offsiteOver || (flagged.length > 0 && !checkedOk) || (needOverOk && !overOk) || Object.values(sel).some((x) => !(Number(x.qty) > 0));
 
   // a roll whose Korber Lot Number is not one of this SO line's ZINSR lots: a warning — picked once the user confirms
   const [lotWarn, setLotWarn] = useState('');
@@ -948,7 +1024,6 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
         week, key: line.key, date: line.date, pickNo: pickNo.trim() || null, kind,
         overConfirmed: kind === 'normal' && diff > 0.0005 ? (overByFullRoll || overOk) : false,
         closeShort: kind === 'normal' && isShort && closeShort,
-        ...(unlockSel.length ? { approvalPw } : {}),
         rolls: Object.entries(sel).map(([pallet, x]) => ({ pallet, qty: Number(x.qty), confirmed: checkedOk, ...(x.manual ? { manual: { ...x.manual, options: undefined, suggest: undefined } } : {}), ...(x.nb ? { nobarcode: true } : {}) })),
         ...(lotOk ? { lotConfirmed: true } : {}),
       } });
@@ -1248,12 +1323,6 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
                     <span><b>I checked {flagged.length === 1 ? 'this roll' : `these ${flagged.length} rolls`}</b>{flagged.map((f) => <small key={f.pallet}><span className="mono">{f.pallet}</span> — {f.why}</small>)}</span>
                   </label>
                 )}
-                {unlockSel.length > 0 && (
-                  <label className="pk-approval" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                    <span>🔐 <b>Special approval</b><small>{unlockSel.length === 1 ? `${unlockSel[0].pallet} is` : `${unlockSel.length} rolls are`} not in ZROLLMGT (every other detail matches) — enter the approval password to unlock {unlockSel.length === 1 ? 'it' : 'them'}.</small></span>
-                    <input type="password" autoComplete="off" value={approvalPw} onChange={(e) => setApprovalPw(e.target.value)} placeholder="Approval password" style={{ width: 170 }} aria-label="Special approval password" />
-                  </label>
-                )}
                 {needOverOk && (
                   <label><input type="checkbox" checked={overOk} onChange={(e) => setOverOk(e.target.checked)} />
                     <span><b>Send {fmt(diff, 2)} over the plan balance</b><small>The selected QTY is more than the {fmtQty(remaining)} still to pick.</small></span>
@@ -1278,7 +1347,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
           <span style={{ flex: 1 }} />
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
           <button type="button" className="btn primary" aria-busy={!!busy || undefined} disabled={busy || blocked} onClick={save}
-            title={blocked && nSel ? (flagged.length && !checkedOk ? 'Tick “I checked” first' : unlockSel.length && !approvalPw ? 'Enter the special approval password first' : needOverOk && !overOk ? 'Confirm the over-plan QTY first' : '') : undefined}>
+            title={blocked && nSel ? (flagged.length && !checkedOk ? 'Tick “I checked” first' : needOverOk && !overOk ? 'Confirm the over-plan QTY first' : '') : undefined}>
             {busy ? 'Saving…' : `${kind === 'offsite' ? 'Offsite' : 'Normal'} pick · ${nSel} roll${nSel === 1 ? '' : 's'} · ${fmt(total, 2)}`}
           </button>
         </div>

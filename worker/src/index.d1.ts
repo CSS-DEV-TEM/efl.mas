@@ -110,19 +110,6 @@ async function hashPassword(password: string, saltB64?: string) {
   const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: 100000 }, key, 256);
   return { hash: b64url(bits), salt: b64url(salt) };
 }
-/**
- * v132: the special approval password for a roll not in ZROLLMGT (every other detail matches): set by the admin, kept hashed
- * in the users database (both systems, never in a backup); a pick unlocks such a roll only with it.
- */
-async function unlockPwRow(env: Env) {
-  try { const v = (await udb(env).prepare("SELECT v FROM config WHERE k = 'unlock_pw'").first<{ v: string }>())?.v; return v ? JSON.parse(v) as { hash: string; salt: string; by: string; at: string } : null; } catch { return null; }
-}
-async function unlockPwOk(env: Env, pw: unknown) {
-  const row = await unlockPwRow(env);
-  if (!row || typeof pw !== 'string' || !pw) return false;
-  const h = await hashPassword(pw, row.salt);
-  return safeEqual(h.hash, row.hash);
-}
 function safeEqual(a: string, b: string) {
   if (a.length !== b.length) return false;
   let r = 0;
@@ -575,7 +562,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 81; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 82; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -2792,7 +2779,7 @@ async function handlePick(env: Env, req: Request, p: string) {
   if (part === '' && req.method === 'POST') {
     const s = await requireUser(env, req, 'editor');
     const b = (await req.json()) as { week: string; key: string; date: string | null; pickNo?: string; kind?: string; auto?: boolean; overConfirmed?: boolean; closeShort?: boolean; rolls: { pallet: string; qty: number; confirmed?: boolean; manual?: ManualFor; nobarcode?: boolean; /** chosen by the smart suggestion in Pick all matched */ smart?: boolean }[];
-      /** manual pick: the user confirmed a roll whose Korber Lot Number is not one of the line's ZINSR lots */ lotConfirmed?: boolean ; approvalPw?: string };
+      /** manual pick: the user confirmed a roll whose Korber Lot Number is not one of the line's ZINSR lots */ lotConfirmed?: boolean };
     if (!b.week || !b.key || !Array.isArray(b.rolls) || !b.rolls.length) throw new HttpError(400, 'Choose at least one roll.');
     // one pallet once per pick (two entries would each pass the roll's balance and pick it over)
     { const seen = new Set<string>(); for (const x of b.rolls) { const k = up(x.pallet); if (seen.has(k)) throw new HttpError(400, `Pallet ${x.pallet} is twice in this pick — enter its QTY once.`); seen.add(k); } }
@@ -2816,7 +2803,6 @@ async function handlePick(env: Env, req: Request, p: string) {
     const lineId = `${b.key}|${b.date ?? ''}`;
     const day = colomboDay(), at = now();
     const picks: Row[] = [];
-    const unlockedBy = new Set<string>();
     // a roll chosen for a shade-report roll with no Barcode Number is one of its offered Korber rolls (not a manual pick)
     // the shade-report roll (or lot without Shade Report) it was chosen for: the same Korber roll can be offered for several
     const nbOption = (pallet: string, mf?: ManualFor) => {
@@ -2880,15 +2866,7 @@ async function handlePick(env: Env, req: Request, p: string) {
       if (kp && String(kp.pick_id ?? '0') !== '0' && String(kp.pick_id ?? '') !== '') throw new HttpError(409, `Pallet ${r.pallet} is on Korber Pick Id ${kp.pick_id} — only rolls with Pick Id 0 can be picked.`);
       { const lw = gate.locWhy(kp); if (lw) throw new HttpError(409, `Pallet ${r.pallet} cannot be picked — ${lw}.`); }
       { const bc = (r as Candidate & { barcode?: string | null }).barcode ?? null; const why = await gate.check(r.pallet, bc, !!bc && !nb && !x.manual && !r.zroll);
-        // v131: a roll not in ZROLLMGT whose other details all match, unlocked by the user ("I checked"); Pick all matched never
-        const unlocked = why === 'Not in ZROLLMGT' && r.zrollMissing && x.confirmed && !b.auto;
-        if (why && !unlocked) throw new HttpError(409, `Pallet ${r.pallet} cannot be picked — ${why}${why === 'Not in ZROLLMGT' && r.zrollMissing ? ' (tick “I checked” and give the approval password to unlock it)' : ''}.`);
-        // v132: the special approval: the unlock password (Settings → Special approval)
-        if (unlocked) {
-          if (!(await unlockPwRow(env))) throw new HttpError(403, `Pallet ${r.pallet} is not in ZROLLMGT — it needs the special approval password, and none is set yet (Admin: Settings → Pick rules → Special approval password).`);
-          if (!(await unlockPwOk(env, b.approvalPw))) throw new HttpError(403, `Pallet ${r.pallet} is not in ZROLLMGT — ${b.approvalPw ? 'the approval password is wrong' : 'enter the special approval password to unlock it'}.`);
-          unlockedBy.add(up(r.pallet));
-        } }
+        if (why) throw new HttpError(409, `Pallet ${r.pallet} cannot be picked — ${why}.`); }
       const rj = await env.DB.prepare('SELECT reason, by_user, day FROM pick_reject WHERE pallet = ? ORDER BY id DESC LIMIT 1').bind(up(r.pallet)).first<Row>();
       if (rj) throw new HttpError(409, `Pallet ${r.pallet} was rejected (${rj.reason ?? '–'} · ${rj.day} · ${rj.by_user}) — it is not picked again.`);
       const q = r3(num(x.qty));
@@ -2903,7 +2881,6 @@ async function handlePick(env: Env, req: Request, p: string) {
         partial: q < left - 1e-6 || r.picked_before > 0 || inThis > 0 || r3(inThis + q) < Number(r.base_qty) - 1e-6 ? 1 : 0, shade: r.shade || (await zcomentShade(senv, { pallet: r.pallet, item: r.item, lot: r.lot, supplier_hu: r.supplier_hu }, r.insp_lots)), lot: r.lot, insp_lot: r.insp_lots.join(','), batch: r.batches.join(','),
         note: [x.smart ? `Smart suggestion (auto) — Pick all matched by ${s.u}` : '', nb ? '' : x.manual?.free ? (x.smart ? 'Item roll of the line\'s ZMMBE batch (no ZINSR lot)' : `Manual pallet for a shortage — added by ${s.u}`) : x.manual ? `Manual pick for roll ${x.manual.roll_no || '?'}${x.manual.barcode ? ' (barcode ' + x.manual.barcode + ')' : ''}` : '', r.warnings.length ? `${nb && !r.needsConfirm ? '' : 'Confirmed: '}${r.warnings.join('; ')}` : ''].filter(Boolean).join(' · ') || null,
         by_user: s.u, at, korber: r.raw });
-      if (unlockedBy.has(up(r.pallet))) { const pz = picks[picks.length - 1]; pz.note = [`Special approval: not in ZROLLMGT — unlocked with the approval password by ${s.u}`, pz.note].filter(Boolean).join(' · '); }
     }
     // rolls whose ZROLLMGT Available is shared by their batch: together never more than the batch's Available
     for (const r of cand.rolls) {
@@ -3879,8 +3856,6 @@ interface Candidate {
   zrollAvail?: number;
   /** its ZROLLMGT Available is shared with the other rolls of its batch (each has a little in SAP) */
   zpool?: { batch: string; avail: number; pallets: string[] };
-  /** v131: not in ZROLLMGT, every other detail matches — picked only when the user unlocks it ("I checked") */
-  zrollMissing?: boolean;
   /** the ZCOMENT barcode is not a Korber pallet: found by Supplier Hu = Vendor Roll No (+ Lot, Invoice, Po) */
   byHu?: boolean;
   /** this lot's ZCOMENT row had no barcode: taken from the same roll's row under another inspection lot */
@@ -4257,16 +4232,12 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
           const why = await gate.check(String(k.pallet), sh.barcode as string);
           const itemOk = normId(k.item) === normId(lot.material);
           const checks = { item: itemOk, lot: up(k.lot) === up(sh.vendor_batch || lot.vendor_batch), hu: sh.roll_no ? up(k.supplier_hu) === up(sh.roll_no) : null, invoice: lot.invoice && k.invoice ? invRoot(k.invoice) === invRoot(lot.invoice) : null };
-          // v131: only "not in ZROLLMGT" and every other detail matches (Item, Lot Number = Vendor Batch, Supplier HU, Invoice,
-          // ZCOMENT barcode = Korber Pallet, Pick Id 0): the roll can be unlocked by hand ("I checked") — never by Pick all matched
-          const unlock = why === 'Not in ZROLLMGT' && checks.item && checks.lot && checks.hu !== false && checks.invoice !== false;
-          if (why && !unlock) { block(why, k); continue; }
+          if (why) { block(why, k); continue; }
           // the roll's ZROLLMGT System Batch must be a ZMMBE batch of the line
-          const zb = unlock ? null : await gate.batchOf(String(k.pallet));
+          const zb = await gate.batchOf(String(k.pallet));
           if (zb && urBatches.size && !urBatches.has(normId(zb))) { block(`ZROLLMGT System Batch ${zb} is not this line's ZMMBE batch (${Array.from(urBatches).join(', ')})`, k); continue; }
           const kb = await korberBase(k, lot, { shade, barcode: sh.barcode as string, via: up(k.pallet) === up(sh.barcode) ? null : String(k.pallet), checks,
-            warnings: unlock ? ['Not in ZROLLMGT — every other detail matches: tick “I checked” to unlock it'] : itemOk ? [] : [`Item ${k.item} ≠ ${lot.material}`], needsConfirm: unlock || !itemOk });
-          if (unlock) (kb as Candidate).zrollMissing = true;
+            warnings: itemOk ? [] : [`Item ${k.item} ≠ ${lot.material}`], needsConfirm: !itemOk });
           addRoll(kb, lot);
           continue;
         }
@@ -5014,25 +4985,6 @@ export default {
       else if (p.startsWith('/api/dispatch/assign')) res = await handleAssign(env, req, p.split('/')[4] || '');
       else if (p === '/api/release') res = await handleRelease(env, req);
       else if (p === '/api/plants') res = await handlePlants(env, req);
-      else if (p === '/api/unlock-pw') {
-        // v132: the special approval password — GET: is it set (any signed-in user); POST {password}: set / change (admin);
-        // POST {check}: is this password right (for the pick window, before saving)
-        const s = await requireUser(env, req);
-        if (req.method === 'GET') { const r0 = await unlockPwRow(env); res = json({ set: !!r0, by: r0?.by ?? null, at: r0?.at ?? null }); }
-        else if (req.method === 'POST') {
-          const b = (await req.json().catch(() => ({}))) as { password?: string; check?: string };
-          if (b.check !== undefined) res = json({ ok: await unlockPwOk(env, b.check) });
-          else {
-            if (s.role !== 'admin') throw new HttpError(403, 'Only the admin can set the special approval password.');
-            const pw = String(b.password ?? '');
-            if (pw.length < 4) throw new HttpError(400, 'The password needs at least 4 characters.');
-            const h = await hashPassword(pw);
-            await udb(env).prepare("INSERT INTO config (k, v) VALUES ('unlock_pw', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(JSON.stringify({ ...h, by: s.u, at: now() })).run();
-            await udb(env).prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'settings', 'Special approval password set').run().catch(() => {});
-            res = json({ ok: true, set: true });
-          }
-        } else throw new HttpError(405, 'Method not allowed.');
-      }
       else if (p === '/api/settings') {
         // system settings: everyone signed in reads them, only the admin changes them
         if (req.method === 'GET') { await requireUser(env, req); res = json({ settings: await getSettings(env) }); }

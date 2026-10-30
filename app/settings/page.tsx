@@ -4,7 +4,7 @@ import { Loader } from '@/components/Loader';
 import Shell, { useShell } from '@/components/Shell';
 import { ClearDatabase, UsersAdmin } from '@/components/AdminUsers';
 import BackupRestore from '@/components/BackupRestore';
-import { api, getSession } from '@/lib/api';
+import { api } from '@/lib/api';
 import type { PlantInfo } from '@/lib/summary';
 
 export default function Page() {
@@ -45,39 +45,6 @@ function Settings() {
       {tab === 'backup' && <BackupRestore toast={toast} />}
       {tab === 'database' && <ClearDatabase toast={toast} />}
     </main>
-  );
-}
-
-/**
- * v132: the special approval password — a roll not in ZROLLMGT whose other details all match is picked only with it.
- * Set by the admin; kept hashed in the users database (both systems), never in a backup and never shown again.
- */
-function UnlockPassword({ toast }: { toast: (m: string) => void }) {
-  const [st, setSt] = useState<{ set: boolean; by: string | null; at: string | null } | null>(null);
-  const [pw, setPw] = useState(''); const [pw2, setPw2] = useState(''); const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
-  const isAdmin = getSession()?.user.role === 'admin';
-  const load = () => api<{ set: boolean; by: string | null; at: string | null }>('/api/unlock-pw').then(setSt).catch(() => setSt(null));
-  useEffect(() => { void load(); }, []);
-  const save = async () => {
-    setErr('');
-    if (pw.length < 4) { setErr('At least 4 characters.'); return; }
-    if (pw !== pw2) { setErr('The two passwords are not the same.'); return; }
-    setBusy(true);
-    try { await api('/api/unlock-pw', { method: 'POST', body: { password: pw } }); setPw(''); setPw2(''); toast('Special approval password saved'); void load(); }
-    catch (e) { setErr(e instanceof Error ? e.message : 'Could not save.'); } finally { setBusy(false); }
-  };
-  return (
-    <div className="set-row" style={{ alignItems: 'flex-start' }}>
-      <span><b>Special approval password</b><small>A roll that is <b>not in ZROLLMGT</b> but matches every other detail (Barcode = Korber Pallet, Item, Lot Number = Vendor Batch, Supplier HU, Invoice, Pick Id 0) can be picked by hand only with this password — Pick all matched never picks it. {st ? (st.set ? `Set${st.by ? ` by ${st.by}` : ''}${st.at ? ` · ${new Date(st.at).toLocaleString()}` : ''}.` : 'Not set yet — such rolls cannot be picked.') : ''}</small>
-        {err && <small className="bad-t">{err}</small>}</span>
-      {isAdmin ? (
-        <span style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-          <input type="password" autoComplete="new-password" value={pw} onChange={(e) => setPw(e.target.value)} placeholder={st?.set ? 'New password' : 'Password'} style={{ width: 150 }} aria-label="Special approval password" />
-          <input type="password" autoComplete="new-password" value={pw2} onChange={(e) => setPw2(e.target.value)} placeholder="Again" style={{ width: 120 }} aria-label="Special approval password again" />
-          <button type="button" className="btn sm primary" disabled={busy || !pw} onClick={save}>{busy ? 'Saving…' : st?.set ? 'Change' : 'Set'}</button>
-        </span>
-      ) : <span className="muted small">Only the admin can set it.</span>}
-    </div>
   );
 }
 
@@ -148,7 +115,6 @@ function PickRules({ toast }: { toast: (m: string) => void }) {
         </label>
       </div>
       <BlockedLocations list={s.blockLocs || []} ver={ver} onChange={(l) => set('blockLocs', l)} />
-      <UnlockPassword toast={toast} />
       {err && <div className="notice bad">{err}</div>}
       <div style={{ marginTop: 12 }}><button className="btn primary" aria-busy={!!busy || undefined} disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save pick rules'}</button></div>
     </section>

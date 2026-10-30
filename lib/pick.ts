@@ -26,8 +26,6 @@ export interface Candidate {
   actual_qty: number; base_qty: number; picked_before: number; available: number; roll_qty: number; shade: string | null;
   /** its ZROLLMGT Available is shared with the other rolls of its batch (each has a little in SAP): together at most `avail` */
   zpool?: { batch: string; avail: number; pallets: string[] };
-  /** v131: not in ZROLLMGT, every other detail matches — picked only when unlocked ("I checked") */
-  zrollMissing?: boolean;
   insp_lots: string[]; batches: string[]; checks: Record<string, boolean | null>; warnings: string[]; needsConfirm: boolean;
   picks: PalletPick[];
   /** in ZROLLMGT under the line's ZMMBE batch (System Batch) at the bin: Barcode Number = Korber Pallet */
@@ -656,6 +654,37 @@ function cutSheet(rows: { v: (c: string) => unknown; full: number; cut: number; 
 }
 
 /** Writes a workbook with its cell styles (fills, borders) kept. */
+/**
+ * v134: the Plan → Pick report — each plan line with its State, and every roll the system found for it with whether it can be
+ * picked and why not (ZROLLMGT, shared lot, a check, lot QTY used up, picked already, not matched, no barcode …).
+ */
+export interface PPLine { pick: string; so: string; li: string; item: string; date: string; plant: string; qty: number; picked: number; balance: number; ur: number; korber: number | null; korberRolls: number | null; state: string; why: string }
+export interface PPRoll { pick: string; so: string; li: string; item: string; date: string; state: string; pallet: string; roll: string; lot: string; batch: string; shade: string; location: string; korberQty: number | null; available: number | null; pickable: string; reason: string; note: string }
+export function planPickWorkbook(lines: PPLine[], rolls: PPRoll[], title: string) {
+  const wb = XLSXS.utils.book_new();
+  const head = { font: { bold: true, color: { rgb: 'FFFFFF' } }, fill: { fgColor: { rgb: '1F3864' } }, alignment: { vertical: 'center', wrapText: true } };
+  const tone = (v: string) => (/^yes/i.test(v) ? 'E2EFDA' : /^manual/i.test(v) ? 'FFF2CC' : /^no/i.test(v) ? 'FCE4D6' : '');
+  const sheet = (aoa: (string | number | null)[][], widths: number[], toneCol = -1) => {
+    const ws = XLSXS.utils.aoa_to_sheet(aoa);
+    ws['!cols'] = widths.map((w) => ({ wch: w }));
+    ws['!autofilter'] = { ref: XLSXS.utils.encode_range({ s: { r: 2, c: 0 }, e: { r: Math.max(2, aoa.length - 1), c: widths.length - 1 } }) };
+    ws['!freeze'] = { xSplit: 0, ySplit: 3 };
+    for (let c = 0; c < widths.length; c++) { const a = XLSXS.utils.encode_cell({ r: 2, c }); if (ws[a]) ws[a].s = head; }
+    const t0 = XLSXS.utils.encode_cell({ r: 0, c: 0 }); if (ws[t0]) ws[t0].s = { font: { bold: true, sz: 13 } };
+    if (toneCol >= 0) for (let r = 3; r < aoa.length; r++) { const a = XLSXS.utils.encode_cell({ r, c: toneCol }); const t = tone(String(aoa[r][toneCol] ?? '')); if (ws[a] && t) ws[a].s = { fill: { fgColor: { rgb: t } } }; }
+    return ws;
+  };
+  const L: (string | number | null)[][] = [[`PLAN → PICK — ${title}`, null, `${lines.length} lines`], [],
+    ['Pick', 'SO', 'LI', 'Item', 'Date', 'Plant', 'QTY', 'Picked', 'Balance', 'UR left', 'Korber qty (matched)', 'Korber rolls', 'State', 'Why not picked / what to do']];
+  for (const x of lines) L.push([x.pick, x.so, x.li, x.item, x.date, x.plant, x.qty, x.picked, x.balance, x.ur, x.korber, x.korberRolls, x.state, x.why]);
+  XLSXS.utils.book_append_sheet(wb, sheet(L, [22, 13, 5, 13, 11, 12, 10, 10, 10, 10, 12, 8, 34, 70]), 'Lines');
+  const R: (string | number | null)[][] = [[`ROLLS OF EACH LINE — ${title}`, null, `${rolls.length} rolls`], [],
+    ['Pick', 'SO', 'LI', 'Item', 'Date', 'Line State', 'Pallet', 'Barcode / Roll No', 'Lot Number', 'Batch', 'Shade', 'Location', 'Korber Qty', 'Available', 'Can pick', 'Reason', 'Note']];
+  for (const x of rolls) R.push([x.pick, x.so, x.li, x.item, x.date, x.state, x.pallet, x.roll, x.lot, x.batch, x.shade, x.location, x.korberQty, x.available, x.pickable, x.reason, x.note]);
+  XLSXS.utils.book_append_sheet(wb, sheet(R, [22, 13, 5, 13, 11, 28, 18, 18, 14, 12, 7, 14, 10, 10, 12, 70, 50], 14), 'Rolls');
+  return wb;
+}
+
 export function saveWorkbook(wb: XLSX.WorkBook, file: string) {
   XLSXS.writeFile(wb, file, { cellStyles: true });
 }
