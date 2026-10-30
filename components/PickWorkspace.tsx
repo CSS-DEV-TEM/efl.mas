@@ -255,9 +255,13 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
             } else {
               const tot = r3(rolls.reduce((t, x) => t + x.qty, 0));
               sent = tot;
-              await api('/api/pick', { method: 'POST', body: { week: wk, key: l.key, date: l.date, kind: 'normal', auto: true, rolls } });
-              const short = r3(left - tot);
-              res.push({ ...base, ok: 'picked', text: `${rolls.length} roll${rolls.length === 1 ? '' : 's'} · ${fmtQty(tot)}${short > 1e-9 ? ` · ${fmtQty(short)} still short` : ''}` });
+              const pr = await api<{ qty: number; moved?: { pallet: string; so: string; li: string; qty: number }[]; movedErr?: string }>('/api/pick', { method: 'POST', body: { week: wk, key: l.key, date: l.date, kind: 'normal', auto: true, rolls } });
+              // v129: a roll over this SO line's batch lot: that part went to another SO line (same Material, LI, SO Plant)
+              const mv = pr.moved || [];
+              const mvQ = r3(mv.reduce((t, x) => t + x.qty, 0));
+              const got = r3(tot - mvQ);
+              const short = r3(left - got);
+              res.push({ ...base, ok: 'picked', text: `${rolls.length} roll${rolls.length === 1 ? '' : 's'} · ${fmtQty(got)}${mv.length ? ` · ${fmtQty(mvQ)} to ${Array.from(new Set(mv.map((x) => `${x.so} / ${x.li}`))).join(', ')} (batch lot full)` : ''}${pr.movedErr ? ` · not moved: ${pr.movedErr}` : ''}${short > 1e-9 ? ` · ${fmtQty(short)} still short` : ''}` });
               if (short > 1e-9) why[l.id] = `${fmtQty(short)} still short — no more All-match rolls (see the Smart suggestion in the pick window)`;
             }
             break;
@@ -881,14 +885,17 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
     if (!c) return;
     setBusy(true); setErr('');
     try {
-      const r = await api<{ label: string; qty: number; rolls: number; day: string }>('/api/pick', { method: 'POST', body: {
+      const r = await api<{ label: string; qty: number; rolls: number; day: string; moved?: { pallet: string; so: string; li: string; qty: number }[]; movedErr?: string }>('/api/pick', { method: 'POST', body: {
         week, key: line.key, date: line.date, pickNo: pickNo.trim() || null, kind,
         overConfirmed: kind === 'normal' && diff > 0.0005 ? (overByFullRoll || overOk) : false,
         closeShort: kind === 'normal' && isShort && closeShort,
         rolls: Object.entries(sel).map(([pallet, x]) => ({ pallet, qty: Number(x.qty), confirmed: checkedOk, ...(x.manual ? { manual: { ...x.manual, options: undefined, suggest: undefined } } : {}), ...(x.nb ? { nobarcode: true } : {}) })),
         ...(lotOk ? { lotConfirmed: true } : {}),
       } });
-      onDone(`${kind === 'offsite' ? 'Offsite' : 'Normal'} ${r.label} pick of ${r.day}: ${r.rolls} roll${r.rolls === 1 ? '' : 's'}, ${fmt(r.qty, 2)} — ${line.so} / ${line.li}`);
+      const mv = r.moved || [];
+      const mvT = mv.length ? ` · batch lot of ${line.so} / ${line.li} full: ${mv.map((x) => `${fmt(x.qty, 2)} of ${x.pallet} picked for ${x.so} / ${x.li}`).join('; ')}` : '';
+      onDone(r.rolls ? `${kind === 'offsite' ? 'Offsite' : 'Normal'} ${r.label} pick of ${r.day}: ${r.rolls} roll${r.rolls === 1 ? '' : 's'}, ${fmt(r.qty, 2)} — ${line.so} / ${line.li}${mvT}${r.movedErr ? ` · not moved: ${r.movedErr}` : ''}`
+        : `Batch lot of ${line.so} / ${line.li} is full — ${mv.map((x) => `${fmt(x.qty, 2)} of ${x.pallet} picked for ${x.so} / ${x.li}`).join('; ')}`);
     } catch (e) {
       const m = e instanceof Error ? e.message : 'Pick failed.';
       // a ZINSR lot difference (Korber Lot ≠ the line's lots, or more than a lot gives): a warning the user can confirm
