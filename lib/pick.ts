@@ -326,7 +326,9 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
       // the sheet = the Korber client (where the roll physically is); SAP location when Korber has no client
       const kind: 'KFC' | 'PFC' = clientKind ?? sapKind;
       const row = PL_HEAD2.map((c) => (c === 'Actual Qty' ? Math.round(p.qty * 1000) / 1000 : c === 'Shade' ? p.shade ?? '' : c === 'Pick No' ? null : ((v(c) ?? '') as string | number)));
-      const group = ['Asn Number', 'Po Number', 'Lot Number'].map((c) => String(v(c) ?? '').trim()).join('\u0001');
+      // one table = one Item (Material) + ASN + Po + Lot Number: two items never share a table (v137), even with the same lot
+      const itemK = String(v('Item Number') ?? p.item ?? '').trim().toUpperCase().replace(/^[A-Z]{2,10}-(?=[A-Z0-9])/, '').replace(/^0+(?=\d)/, '') || String(p.item ?? '');
+      const group = [itemK, ...['Asn Number', 'Po Number', 'Lot Number'].map((c) => String(v(c) ?? '').trim())].join('\u0001');
       entries.push({ r, p, raw, kind, sapKind, client, clientKind, group, row, batches: rollBatches(r, m, p) });
     }
   }
