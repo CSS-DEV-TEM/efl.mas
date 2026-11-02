@@ -87,7 +87,7 @@ export interface BlockedRoll { lot: string; batch: string | null; roll_no: strin
 export interface PickReq { id: number; day: string; seq: number; pick_no: string | null; week: string; line: string; so: string; li: string; item: string; plant: string | null; need: number; qty: number; rolls: number; by_user: string; at: string; cancelled_at: string | null; cancelled_by: string | null; match?: string | null; kind?: string | null; closed?: number | null; short?: number | null;
   /** the Pick's ZMMBE rows of the line (batch, storage location) when the pick did not keep them */
   zstock?: { batch: string; sloc: string | null; ur: number }[] }
-export interface PickRoll { id: number; req_id: number; day: string; week: string; line: string; so: string; li: string; item: string; pallet: string; qty: number; roll_qty: number; partial: number; shade: string | null; lot: string | null; insp_lot: string | null; batch: string | null; note: string | null; by_user: string; at: string; cancelled_at: string | null; korber: string | null; /** picked from the pallet before this pick */ prior?: number }
+export interface PickRoll { id: number; req_id: number; day: string; week: string; line: string; so: string; li: string; item: string; pallet: string; qty: number; roll_qty: number; partial: number; shade: string | null; lot: string | null; insp_lot: string | null; batch: string | null; note: string | null; by_user: string; at: string; cancelled_at: string | null; korber: string | null; /** picked from the pallet before this pick */ prior?: number; /** ZROLLMGT QM Comment 1 (the inspection Report Number) */ qm1?: string | null }
 export interface PickHistory { day: string | null; requests: PickReq[]; picks: PickRoll[]; days: { day: string; n: number; open: number }[]; korberHeader: unknown[] | null }
 
 export const ordinal = (n: number) => { const v = n % 100, s = ['th', 'st', 'nd', 'rd']; return n + (s[(v - 20) % 10] || s[v] || s[0]); };
@@ -388,6 +388,9 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
   /** One sheet: the totals block, then a table per Asn + Po + Lot with its SAP lines under it. */
   const plSheet = (list0: Entry[]) => {
     const list = mergeByPallet(list0);
+    // v141: an Offsite pick's rolls carry their inspection Report Number (ZROLLMGT QM Comment 1) in a column of their own
+    const hasOff = list0.some((e) => e.r.kind === 'offsite');
+    const HEAD = hasOff ? [...PL_HEAD2, 'Report Number'] : PL_HEAD2;
     const aoa: (string | number | null)[][] = [
       ['TOTAL QTY', 'TOTAL ROLLS', 'HJ PICK', null, null, 'TOTAL PICK', 'CUT ROLLS'],
       [null, null, null, null, null, null, null],
@@ -399,7 +402,7 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
     const groups = new Map<string, Merged[]>();
     for (const m of list) { const g = groups.get(m.e.group); if (g) g.push(m); else groups.set(m.e.group, [m]); }
     for (const g of groups.values()) {
-      headRows.push(aoa.length); aoa.push([...PL_HEAD2]);
+      headRows.push(aoa.length); aoa.push([...HEAD]);
       const first = aoa.length;
       const seen = new Set<number>();
       for (const m of g) {
@@ -408,6 +411,7 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
         // the Pick No on each pick's first roll of the table
         const nos = m.parts.filter((x) => !seen.has(x.r.id)).map((x) => { seen.add(x.r.id); return pickNoOf(x.r); }).filter((x) => x !== '');
         row[PICKNO_COL] = nos.length ? (nos.length === 1 ? nos[0] : Array.from(new Set(nos)).join(', ')) : null;
+        if (hasOff) row.push(m.parts.some((x) => x.r.kind === 'offsite') ? (Array.from(new Set(m.parts.map((x) => String(x.p.qm1 ?? '').trim()).filter(Boolean))).join(', ') || null) : null);
         if (isCut(m.e.p.pallet)) cutRows.push(aoa.length);
         rollRows.push(aoa.length); aoa.push(row);
       }
@@ -454,13 +458,13 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
     for (const c of ['A', 'B', 'C', 'F', 'G']) { style(c + '1', ST.top); style(c + '2', ST.top); }
     style('D1', ST.dark);
     style('A4', ST.top); style('B4', ST.top);
-    for (const r0 of headRows) PL_HEAD2.forEach((_, i) => style(U.encode_col(i) + (r0 + 1), i === 4 || i === 8 || i === 9 ? ST.key : ST.head));
-    for (const r0 of rollRows) PL_HEAD2.forEach((_, i) => style(U.encode_col(i) + (r0 + 1), ST.cell));
+    for (const r0 of headRows) HEAD.forEach((_, i) => style(U.encode_col(i) + (r0 + 1), i === 4 || i === 8 || i === 9 ? ST.key : ST.head));
+    for (const r0 of rollRows) HEAD.forEach((_, i) => style(U.encode_col(i) + (r0 + 1), ST.cell));
     // a cut roll: its Pallet and Actual Qty (the cut QTY) in red, so it is seen on the floor
     for (const r0 of cutRows) for (const i of [0, QTY_COL]) style(U.encode_col(i) + (r0 + 1), ST.cut);
     for (const r0 of sapRows) for (let i = 0; i < 5; i++) style(U.encode_col(i) + (r0 + 1), ST.match);
     for (const r0 of badRows) style('A' + (r0 + 1), ST.cut);
-    ws['!cols'] = [17.5, 14, 19, 26, 12, 9, 12, 12, 24, 22, 22, 11, 10, 7, 12].map((w) => ({ wch: w }));
+    ws['!cols'] = [17.5, 14, 19, 26, 12, 9, 12, 12, 24, 22, 22, 11, 10, 7, 12, ...(hasOff ? [24] : [])].map((w) => ({ wch: w }));
     return ws;
   };
   const usedNames = new Set<string>();

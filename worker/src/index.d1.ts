@@ -562,7 +562,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 85; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 86; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -3201,18 +3201,20 @@ async function handlePick(env: Env, req: Request, p: string) {
     {
       const byWk = new Map<string, string[]>();
       for (const x of rolls.results as Row[]) { const wk = weekPlantRid(x.week, (reqs.results as Row[]).find((r) => r.id === x.req_id)?.plant); const a = byWk.get(wk); if (a) a.push(String(x.pallet)); else byWk.set(wk, [String(x.pallet)]); }
-      const zsh = new Map<string, Map<string, string>>();
+      const zsh = new Map<string, Map<string, { shade: string; qm1: string }>>();
       for (const [wk, pals] of byWk) {
         if (!envs.has(wk)) envs.set(wk, await envFor(env, wk));
-        const m1 = await zrollShades(envs.get(wk)!, pals);
+        const m1 = await zrollInfo(envs.get(wk)!, pals);
         const rest = pals.filter((p0) => !m1.has(up(p0)));
-        if (rest.length && envs.get(wk) !== env) for (const [k0, v0] of await zrollShades(env, rest)) m1.set(k0, v0);
+        if (rest.length && envs.get(wk) !== env) for (const [k0, v0] of await zrollInfo(env, rest)) m1.set(k0, v0);
         zsh.set(wk, m1);
       }
       for (const x of rolls.results as Row[]) {
         const wk = weekPlantRid(x.week, (reqs.results as Row[]).find((r) => r.id === x.req_id)?.plant);
         const z = zsh.get(wk)?.get(up(x.pallet));
-        if (z) x.shade = z;
+        if (z?.shade) x.shade = z.shade;
+        // v141: ZROLLMGT QM Comment 1 = the inspection Report Number (on the Packing List of an Offsite pick)
+        if (z?.qm1) x.qm1 = z.qm1;
       }
     }
     // a pick saved without a shade (a roll matched straight from ZINR to Korber): the ZCOMENT Shade, for the Packing List
@@ -3512,18 +3514,26 @@ function korberItem(display: unknown, item: unknown): string {
 /** v140: ZROLLMGT Shade Grp of each roll (its Barcode Number, else the same roll number written another way) */
 async function zrollShades(env: Env, pallets: string[]): Promise<Map<string, string>> {
   const out = new Map<string, string>();
+  for (const [k, v] of await zrollInfo(env, pallets)) if (v.shade) out.set(k, v.shade);
+  return out;
+}
+/** v141: ZROLLMGT Shade Grp and QM Comment 1 (the inspection Report Number) of each roll — by Barcode Number, else roll number */
+async function zrollInfo(env: Env, pallets: string[]): Promise<Map<string, { shade: string; qm1: string }>> {
+  const out = new Map<string, { shade: string; qm1: string }>();
   const ps = Array.from(new Set(pallets.map(up).filter(Boolean)));
   if (!ps.length) return out;
-  const shadeOf = (raw: unknown) => { try { const o = JSON.parse(String(raw ?? '{}')) as Record<string, unknown>; const key = Object.keys(o).find((x) => /^shade\s*(grp|group)?$/i.test(x.trim())); return key ? String(o[key] ?? '').trim() : ''; } catch { return ''; } };
+  const pick = (raw: unknown, re: RegExp) => { try { const o = JSON.parse(String(raw ?? '{}')) as Record<string, unknown>; const key = Object.keys(o).find((x) => re.test(x.trim())); return key ? String(o[key] ?? '').trim() : ''; } catch { return ''; } };
+  const infoOf = (raw: unknown) => ({ shade: pick(raw, /^shade\s*(grp|group)?$/i), qm1: pick(raw, /^qm\s*comment\s*1$/i) });
+  const has = (v: { shade: string; qm1: string }) => !!(v.shade || v.qm1);
   for (let i = 0; i < ps.length; i += 200) {
     const part = ps.slice(i, i + 200);
     const rows = (await env.DB.prepare('SELECT barcode, raw, qty FROM zroll WHERE barcode IN (SELECT value FROM json_each(?)) ORDER BY COALESCE(qty, 0) DESC').bind(JSON.stringify(part)).all<Row>()).results;
-    for (const z of rows) { const v = shadeOf(z.raw); if (v && !out.has(up(z.barcode))) out.set(up(z.barcode), v); }
+    for (const z of rows) { const v = infoOf(z.raw); if (has(v) && !out.has(up(z.barcode))) out.set(up(z.barcode), v); }
     const left = part.filter((p) => !out.has(p));
     const cores = new Map(left.map((p) => [palletCore(p), p]).filter(([c]) => !!c) as [string, string][]);
     if (cores.size) for (const z of (await env.DB.prepare('SELECT pcore, raw, qty FROM zroll WHERE pcore IN (SELECT value FROM json_each(?)) ORDER BY COALESCE(qty, 0) DESC').bind(JSON.stringify(Array.from(cores.keys()))).all<Row>()).results) {
-      const p = cores.get(String(z.pcore)); const v = shadeOf(z.raw);
-      if (p && v && !out.has(p)) out.set(p, v);
+      const p = cores.get(String(z.pcore)); const v = infoOf(z.raw);
+      if (p && has(v) && !out.has(p)) out.set(p, v);
     }
   }
   return out;
