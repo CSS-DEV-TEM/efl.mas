@@ -562,7 +562,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 83; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 85; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -2218,7 +2218,8 @@ async function saveTallyPick(env: Env, user: string, src: Row, pallet: string, t
   const lineId = known?.line || `${key}|${String(src.line ?? '').split('|')[3] ?? day}`;
   const seq = ((await env.DB.prepare('SELECT MAX(seq) n FROM pick_req WHERE day = ? AND by_user = ?').bind(day, user).first<{ n: number | null }>())?.n ?? 0) + 1;
   const match = JSON.stringify({ zmmbe: (t.zmmbe as Row[]).map((z) => ({ batch: z.batch, sloc: z.sloc, ur: z.ur, plant: z.plant, so_plant: z.so_plant })), zinr: t.lots, lots: t.lots, alloc: [{ pallet, batch: t.batch, qty }], tally: { from: src.id ?? null, pallet, so: src.so, li: src.li } });
-  const shade = await zcomentShade(info.kenv, { pallet: info.k.pallet, item: info.k.item, lot: info.k.lot, supplier_hu: info.k.supplier_hu }, (t.lots as Row[]).map((l) => String(l.lot)));
+  const kk = { pallet: info.k.pallet, item: info.k.item, lot: info.k.lot, supplier_hu: info.k.supplier_hu }, tl = (t.lots as Row[]).map((l) => String(l.lot));
+  const shade = (await zrollShades(info.kenv, [pallet])).get(pallet) ?? (await zcomentShade(info.kenv, kk, tl)) ?? (await zcomentShade(env, kk, tl));
   const note = noteIn ?? `Cut roll balance tallied — roll ${pallet} cut for ${src.so} / ${src.li}; ${qty} to ${t.same ? 'the same SO line ' : ''}${normId(tso)} / ${normId(tli)} (ZINSR lot ${(t.lots as Row[]).map((l) => l.lot).join(', ')}, Vendor Batch ${info.vb}) by ${user}`;
   const pick = { day, week: src.week, line: lineId, so: normId(tso), li: normId(tli), item: normId(titem), pallet, qty, roll_qty: info.base, partial: 1, shade, lot: info.k.lot, insp_lot: (t.lots as Row[]).map((l) => l.lot).join(','), batch: t.batch, note, by_user: user, at, korber: info.k.raw ?? null };
   let reqId = 0;
@@ -2883,7 +2884,7 @@ async function handlePick(env: Env, req: Request, p: string) {
       if (q > left + 1e-6) throw new HttpError(409, `Pallet ${x.pallet}: only ${left} left to pick (cut roll balance${r.picks.length ? ` after ${r.picks.map(pickText).join('; ')}` : ''}).`);
       if (r.needsConfirm && !x.confirmed) throw new HttpError(400, `Roll ${x.pallet}: ${r.warnings.join('; ')} — tick "Confirmed" for it.`);
       picks.push({ day, week: b.week, line: lineId, so: line.so, li: line.li, item: line.item, pallet: r.pallet, qty: q, roll_qty: r.base_qty,
-        partial: q < left - 1e-6 || r.picked_before > 0 || inThis > 0 || r3(inThis + q) < Number(r.base_qty) - 1e-6 ? 1 : 0, shade: r.shade || (await zcomentShade(senv, { pallet: r.pallet, item: r.item, lot: r.lot, supplier_hu: r.supplier_hu }, r.insp_lots)), lot: r.lot, insp_lot: r.insp_lots.join(','), batch: r.batches.join(','),
+        partial: q < left - 1e-6 || r.picked_before > 0 || inThis > 0 || r3(inThis + q) < Number(r.base_qty) - 1e-6 ? 1 : 0, shade: (await zrollShades(senv, [r.pallet])).get(up(r.pallet)) || r.shade || (await zcomentShade(senv, { pallet: r.pallet, item: r.item, lot: r.lot, supplier_hu: r.supplier_hu }, r.insp_lots)) || (await zcomentShade(env, { pallet: r.pallet, item: r.item, lot: r.lot, supplier_hu: r.supplier_hu }, r.insp_lots)), lot: r.lot, insp_lot: r.insp_lots.join(','), batch: r.batches.join(','),
         note: [x.smart ? `Smart suggestion (auto) — Pick all matched by ${s.u}` : '', nb ? '' : x.manual?.free ? (x.smart ? 'Item roll of the line\'s ZMMBE batch (no ZINSR lot)' : `Manual pallet for a shortage — added by ${s.u}`) : x.manual ? `Manual pick for roll ${x.manual.roll_no || '?'}${x.manual.barcode ? ' (barcode ' + x.manual.barcode + ')' : ''}` : '', r.warnings.length ? `${nb && !r.needsConfirm ? '' : 'Confirmed: '}${r.warnings.join('; ')}` : ''].filter(Boolean).join(' · ') || null,
         by_user: s.u, at, korber: r.raw });
     }
@@ -3195,6 +3196,25 @@ async function handlePick(env: Env, req: Request, p: string) {
       }
       r.zstock = zs.get(zk);
     }
+    // v140: the Shade on the Packing List = ZROLLMGT Shade Grp of the roll (the Pick's ZROLLMGT, else any); without it the
+    // shade kept with the pick (ZCOMENT), else ZCOMENT looked up now
+    {
+      const byWk = new Map<string, string[]>();
+      for (const x of rolls.results as Row[]) { const wk = weekPlantRid(x.week, (reqs.results as Row[]).find((r) => r.id === x.req_id)?.plant); const a = byWk.get(wk); if (a) a.push(String(x.pallet)); else byWk.set(wk, [String(x.pallet)]); }
+      const zsh = new Map<string, Map<string, string>>();
+      for (const [wk, pals] of byWk) {
+        if (!envs.has(wk)) envs.set(wk, await envFor(env, wk));
+        const m1 = await zrollShades(envs.get(wk)!, pals);
+        const rest = pals.filter((p0) => !m1.has(up(p0)));
+        if (rest.length && envs.get(wk) !== env) for (const [k0, v0] of await zrollShades(env, rest)) m1.set(k0, v0);
+        zsh.set(wk, m1);
+      }
+      for (const x of rolls.results as Row[]) {
+        const wk = weekPlantRid(x.week, (reqs.results as Row[]).find((r) => r.id === x.req_id)?.plant);
+        const z = zsh.get(wk)?.get(up(x.pallet));
+        if (z) x.shade = z;
+      }
+    }
     // a pick saved without a shade (a roll matched straight from ZINR to Korber): the ZCOMENT Shade, for the Packing List
     for (const x of rolls.results as Row[]) {
       if (x.shade) continue;
@@ -3204,7 +3224,7 @@ async function handlePick(env: Env, req: Request, p: string) {
       let kk: { pallet: unknown; item: unknown; lot: unknown; supplier_hu: unknown } = { pallet: x.pallet, item: x.item, lot: x.lot, supplier_hu: null };
       const kr = await env2.DB.prepare('SELECT item, lot, supplier_hu FROM korber WHERE pallet = ?').bind(x.pallet).first<Row>();
       if (kr) kk = { pallet: x.pallet, item: kr.item, lot: kr.lot, supplier_hu: kr.supplier_hu };
-      x.shade = await zcomentShade(env2, kk, String(x.insp_lot ?? '').split(','));
+      x.shade = (await zcomentShade(env2, kk, String(x.insp_lot ?? '').split(','))) ?? (env2 !== env ? await zcomentShade(env, kk, String(x.insp_lot ?? '').split(',')) : null);
     }
     return json({ day, week, owner, requests: reqs.results, picks: rolls.results, days: days.results, korberHeader: header ? JSON.parse(String(header)) : null });
   }
@@ -3489,16 +3509,53 @@ function korberItem(display: unknown, item: unknown): string {
  * The ZCOMENT Shade of a Korber roll: the Shade Report roll whose Barcode Number is the pallet, else the one of the same item
  * with Vendor Batch = Lot Number and Vendor Roll No = Supplier Hu (preferring this line's inspection lots).
  */
+/** v140: ZROLLMGT Shade Grp of each roll (its Barcode Number, else the same roll number written another way) */
+async function zrollShades(env: Env, pallets: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const ps = Array.from(new Set(pallets.map(up).filter(Boolean)));
+  if (!ps.length) return out;
+  const shadeOf = (raw: unknown) => { try { const o = JSON.parse(String(raw ?? '{}')) as Record<string, unknown>; const key = Object.keys(o).find((x) => /^shade\s*(grp|group)?$/i.test(x.trim())); return key ? String(o[key] ?? '').trim() : ''; } catch { return ''; } };
+  for (let i = 0; i < ps.length; i += 200) {
+    const part = ps.slice(i, i + 200);
+    const rows = (await env.DB.prepare('SELECT barcode, raw, qty FROM zroll WHERE barcode IN (SELECT value FROM json_each(?)) ORDER BY COALESCE(qty, 0) DESC').bind(JSON.stringify(part)).all<Row>()).results;
+    for (const z of rows) { const v = shadeOf(z.raw); if (v && !out.has(up(z.barcode))) out.set(up(z.barcode), v); }
+    const left = part.filter((p) => !out.has(p));
+    const cores = new Map(left.map((p) => [palletCore(p), p]).filter(([c]) => !!c) as [string, string][]);
+    if (cores.size) for (const z of (await env.DB.prepare('SELECT pcore, raw, qty FROM zroll WHERE pcore IN (SELECT value FROM json_each(?)) ORDER BY COALESCE(qty, 0) DESC').bind(JSON.stringify(Array.from(cores.keys()))).all<Row>()).results) {
+      const p = cores.get(String(z.pcore)); const v = shadeOf(z.raw);
+      if (p && v && !out.has(p)) out.set(p, v);
+    }
+  }
+  return out;
+}
 async function zcomentShade(env: Env, k: { pallet: unknown; item: unknown; lot: unknown; supplier_hu: unknown }, lots: string[] = []): Promise<string | null> {
+  // 1. ZCOMENT VIEW: the roll's Barcode Number = Korber Pallet
   const byBc = await env.DB.prepare("SELECT shade FROM zcoment WHERE barcode = ? AND COALESCE(shade, '') <> '' LIMIT 1").bind(up(k.pallet)).first<{ shade: string }>();
   if (byBc) return byBc.shade;
-  if (!k.supplier_hu || !k.lot) return null;
-  const rows = (await env.DB.prepare("SELECT lot, shade FROM zcoment WHERE material = ?1 AND upper(vendor_batch) = ?2 AND upper(roll_no) = ?3 AND COALESCE(shade, '') <> ''")
-    .bind(normId(k.item), up(k.lot), up(k.supplier_hu)).all<{ lot: string; shade: string }>()).results;
-  if (!rows.length) return null;
-  const mine = rows.find((r) => lots.includes(String(r.lot)));
-  if (mine) return mine.shade;
-  return new Set(rows.map((r) => r.shade)).size === 1 ? rows[0].shade : null; // one answer only
+  // 2. (v139) the same roll with its barcode written another way (CP… / COMPCP… / HP…): the same roll number
+  const core = palletCore(k.pallet);
+  if (core) {
+    const rs = (await env.DB.prepare("SELECT barcode, lot, shade FROM zcoment WHERE barcode LIKE ? AND COALESCE(shade, '') <> '' LIMIT 20").bind('%' + core).all<{ barcode: string; lot: string; shade: string }>()).results.filter((r) => palletCore(r.barcode) === core);
+    const mine = rs.find((r) => lots.includes(String(r.lot))) ?? (new Set(rs.map((r) => r.shade)).size === 1 ? rs[0] : undefined);
+    if (mine) return mine.shade;
+  }
+  // 3. Item + Lot Number (= Vendor Batch) + Supplier HU (= Vendor Roll No) — the roll number compared without spaces / leading 0s
+  if (k.supplier_hu && k.lot) {
+    const hu = (v: unknown) => up(v).replace(/[^A-Z0-9]/g, '').replace(/^0+(?=\d)/, '');
+    const rows = (await env.DB.prepare("SELECT lot, shade, roll_no FROM zcoment WHERE material = ?1 AND upper(vendor_batch) = ?2 AND COALESCE(shade, '') <> ''")
+      .bind(normId(k.item), up(k.lot)).all<{ lot: string; shade: string; roll_no: string }>()).results.filter((r) => hu(r.roll_no) === hu(k.supplier_hu));
+    if (rows.length) {
+      const mine = rows.find((r) => lots.includes(String(r.lot)));
+      if (mine) return mine.shade;
+      if (new Set(rows.map((r) => r.shade)).size === 1) return rows[0].shade; // one answer only
+    }
+  }
+  // 4. (v139) no Shade Report in ZCOMENT for the roll: ZROLLMGT's Shade Grp of the roll
+  const zr = (await env.DB.prepare('SELECT raw FROM zroll WHERE barcode = ? OR (pcore IS NOT NULL AND pcore = ?) ORDER BY (barcode = ?) DESC, COALESCE(qty, 0) DESC LIMIT 3').bind(up(k.pallet), core ?? '', up(k.pallet)).all<{ raw: string | null }>()).results;
+  for (const z of zr) {
+    try { const o = JSON.parse(String(z.raw ?? '{}')) as Record<string, unknown>; const key = Object.keys(o).find((x) => /^shade\s*(grp|group)?$/i.test(x.trim())); const v = key ? String(o[key] ?? '').trim() : ''; if (v) return v; } catch { /* no raw */ }
+  }
+  return null;
 }
 
 /** Korber Po Number (older uploads have it only in the raw row). */

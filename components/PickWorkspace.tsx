@@ -288,10 +288,24 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
   const [run, setRun] = useState<{ total: number; done: number; cur: string; res: RunRes[]; finished: boolean; offline?: boolean } | null>(null);
   const [runWhy, setRunWhy] = useState<Record<number, string>>({});
   const stopRef = useRef(false);
+  // v138: the Pick all matched mode — Offsite: the last roll cut to the exact QTY; Normal: the same picks, then each cut roll's
+  // balance is tallied (to another SO line that can take it, as the Packing List does). Settings → Pick rules give the default.
+  const [autoRules, setAutoRules] = useState<{ allowOffsite: boolean; defaultPickKind: 'normal' | 'offsite' }>({ allowOffsite: true, defaultPickKind: 'normal' });
+  const [autoKind, setAutoKind0] = useState<'normal' | 'offsite'>(() => { try { const v = localStorage.getItem('mas-auto-kind'); return v === 'offsite' ? 'offsite' : 'normal'; } catch { return 'normal'; } });
+  const setAutoKind = (k: 'normal' | 'offsite') => { setAutoKind0(k); try { localStorage.setItem('mas-auto-kind', k); } catch { /* private mode */ } };
+  useEffect(() => {
+    api<{ settings: { allowOffsite?: boolean; defaultPickKind?: 'normal' | 'offsite' } }>('/api/settings').then((r) => {
+      const ao = r.settings.allowOffsite !== false;
+      setAutoRules({ allowOffsite: ao, defaultPickKind: r.settings.defaultPickKind === 'offsite' ? 'offsite' : 'normal' });
+      let saved: string | null = null; try { saved = localStorage.getItem('mas-auto-kind'); } catch { /* */ }
+      if (!ao) setAutoKind0('normal'); else if (!saved) setAutoKind0(r.settings.defaultPickKind === 'offsite' ? 'offsite' : 'normal');
+    }).catch(() => {});
+  }, []);
   const runAll = async () => {
+    const kindNow: 'normal' | 'offsite' = autoRules.allowOffsite && autoKind === 'offsite' ? 'offsite' : 'normal';
     const targets = rows.filter((l) => !isDone(l) && todo(l) > 1e-9 && !l.hold);
     if (!targets.length) { toast('No open line with UR to pick in this Pick.'); return; }
-    if (!window.confirm(`Pick every All-match roll for ${targets.length} open line${targets.length === 1 ? '' : 's'} of ${label || week}?\n\nOnly rolls where everything matches are picked (as the system selects them, the last roll cut to the QTY) — also a roll SAP lists in the lots of several SO lines, up to each line's ZINSR lot QTY (a cut roll's balance first). Lines that need a check or a manual roll are left for you under “Needs manual” — the Smart suggestion shows there, you choose.\n\nKeep this tab open while it runs. If the network drops it waits and goes on by itself.`)) return;
+    if (!window.confirm(`${kindNow === 'offsite' ? 'OFFSITE' : 'NORMAL'} — pick every All-match roll for ${targets.length} open line${targets.length === 1 ? '' : 's'} of ${label || week}?\n\n${kindNow === 'offsite' ? 'Offsite: the last roll of each line is cut to the exact QTY (never over the plan, never closed short).' : 'Normal: the last roll is cut to the QTY, then each cut roll\'s balance is tallied to another SO line that can take it (same Material and LI, SO Plant, UR, a ZINSR lot with the roll\'s Vendor Batch).'}\n\nOnly rolls where everything matches are picked (as the system selects them, the last roll cut to the QTY) — also a roll SAP lists in the lots of several SO lines, up to each line's ZINSR lot QTY (a cut roll's balance first). Lines that need a check or a manual roll are left for you under “Needs manual” — the Smart suggestion shows there, you choose.\n\nKeep this tab open while it runs. If the network drops it waits and goes on by itself.`)) return;
     stopRef.current = false;
     setRunActive(true);
     // closing / reloading the tab while it runs: the browser asks first (the lines already picked stay picked)
@@ -307,6 +321,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
       }
     };
     const res: RunRes[] = []; const why: Record<number, string> = {};
+    const newReqs: number[] = [];
     setRun({ total: targets.length, done: 0, cur: '', res: [], finished: false });
     const task = startTask('Pick all matched', '', targets.length);
     try {
@@ -338,7 +353,8 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
             } else {
               const tot = r3(rolls.reduce((t, x) => t + x.qty, 0));
               sent = tot;
-              const pr = await api<{ qty: number; moved?: { pallet: string; so: string; li: string; qty: number }[]; movedErr?: string }>('/api/pick', { method: 'POST', body: { week: wk, key: l.key, date: l.date, kind: 'normal', auto: true, rolls } });
+              const pr = await api<{ id: number | null; qty: number; moved?: { pallet: string; so: string; li: string; qty: number }[]; movedErr?: string }>('/api/pick', { method: 'POST', body: { week: wk, key: l.key, date: l.date, kind: kindNow, auto: true, rolls } });
+              if (pr.id) newReqs.push(pr.id);
               // v129: a roll over this SO line's batch lot: that part went to another SO line (same Material, LI, SO Plant)
               const mv = pr.moved || [];
               const mvQ = r3(mv.reduce((t, x) => t + x.qty, 0));
@@ -357,6 +373,24 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
         }
         setRun((r) => r && { ...r, done: i + 1, res: [...res] });
         task.set(i + 1, undefined, `${l.so} / ${l.li}`);
+      }
+      // Normal: the balance of each roll cut in this run is tallied (to another SO line that can take it)
+      if (kindNow === 'normal' && newReqs.length && !stopRef.current) {
+        task.step('tallying cut roll balances');
+        setRun((r) => r && { ...r, cur: 'Tallying cut roll balances…' });
+        try {
+          const t = await api<{ rolls: { pallet: string; from: number; targets: { so: string; li: string; item: string; take: number }[] }[] }>('/api/pick/tally?ids=' + newReqs.join(','));
+          let n = 0, q = 0; const fail: string[] = [];
+          const tot = t.rolls.reduce((k, x) => k + x.targets.filter((y) => y.take > 0).length, 0);
+          task.step('tallying cut roll balances', tot);
+          for (const x of t.rolls) for (const y of x.targets) {
+            if (!(y.take > 0)) continue;
+            task.set(n + fail.length);
+            try { await api('/api/pick/tally', { method: 'POST', body: { pallet: x.pallet, so: y.so, li: y.li, item: y.item, qty: y.take, from: x.from } }); n++; q = r3(q + y.take); }
+            catch (e) { fail.push(`${x.pallet} → ${y.so} / ${y.li}: ${e instanceof Error ? e.message : 'failed'}`); }
+          }
+          if (n || fail.length) res.push({ id: -1, so: 'Cut roll balance', li: '', item: '', ok: fail.length && !n ? 'error' : 'picked', text: `${n} balance${n === 1 ? '' : 's'} tallied · ${fmtQty(q)}${fail.length ? ` · ${fail.length} not saved — ${fail[0]}` : ''}` });
+        } catch (e) { res.push({ id: -1, so: 'Cut roll balance', li: '', item: '', ok: 'error', text: e instanceof Error ? e.message : 'Could not read the cut rolls.' }); }
       }
     } finally {
       window.removeEventListener('beforeunload', onLeave);
@@ -419,7 +453,12 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
             <input type="search" className="as-search" placeholder="Search SO, item…" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search lines" />
             {repRid && <button className="btn" onClick={() => setShowReport(true)} title="The plan report of this Pick — on screen and as Excel">📋 {report?.name || 'Plan report'}</button>}
             {showReport && repRid && <PlanReport rid={repRid} onClose={() => setShowReport(false)} />}
-            {canEdit && <button className="btn primary run-all" disabled={!!run && !run.finished} onClick={runAll} title="Pick every roll where everything matches, line by line">⚡ Pick all matched</button>}
+            {canEdit && autoRules.allowOffsite && (
+              <div className="seg sm" role="radiogroup" aria-label="Pick all matched mode" title="Offsite: the last roll cut to the exact QTY · Normal: then each cut roll's balance is tallied to another SO line">
+                {(['normal', 'offsite'] as const).map((k) => <button key={k} type="button" role="radio" aria-checked={autoKind === k} className={autoKind === k ? 'on' : ''} disabled={!!run && !run.finished} onClick={() => setAutoKind(k)}>{k === 'normal' ? 'Normal' : 'Offsite'}</button>)}
+              </div>
+            )}
+            {canEdit && <button className="btn primary run-all" disabled={!!run && !run.finished} onClick={() => void runAll()} title={autoKind === 'offsite' && autoRules.allowOffsite ? 'Offsite: pick every All-match roll, the last roll cut to the exact QTY' : 'Normal: pick every All-match roll, then tally the cut roll balances'}>⚡ Pick all matched{autoRules.allowOffsite ? ` · ${autoKind === 'offsite' ? 'Offsite' : 'Normal'}` : ''}</button>}
             <button className="btn" disabled={repBusy} aria-busy={repBusy || undefined} onClick={() => void downloadReport()} title="Excel: the lines on screen with their State, and every roll of each line — can it be picked, and why not">{repBusy ? 'Preparing…' : '📄 Plan → Pick report'}</button>
             {canEdit && <button className="btn" onClick={() => setImportOpen(true)} title="A Packing List file (this system's format) into this Pick: its rolls are saved as picks of the Pick's SO lines">⬆ Import Packing List</button>}
             {importOpen && <ImportPLDialog week={week} label={label || week} toast={toast} onClose={(changed) => { setImportOpen(false); if (changed) { reload(); setHistKey((k) => k + 1); } }} />}
@@ -1477,11 +1516,13 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
       // lot with the roll's Vendor Batch) as a pick of that line — then the Packing List is made with them
       let hh = h!, target = target0, tallied = 0, tallyQty = 0;
       const tallyFail: string[] = [];
-      if (canEdit && autoTally && target.length) {
+      // an Offsite pick is cut to the exact QTY: its cut roll's balance is not tallied (it stays on the shelf)
+      const tallyFrom = target.filter((r) => r.kind !== 'offsite');
+      if (canEdit && autoTally && tallyFrom.length) {
         setPlProg('tallying cut rolls');
         task.step('tallying cut roll balances');
         try {
-          const t = await api<{ rolls: { pallet: string; from: number; targets: { so: string; li: string; item: string; take: number }[] }[] }>('/api/pick/tally?ids=' + target.map((r) => r.id).join(','));
+          const t = await api<{ rolls: { pallet: string; from: number; targets: { so: string; li: string; item: string; take: number }[] }[] }>('/api/pick/tally?ids=' + tallyFrom.map((r) => r.id).join(','));
           const newIds: number[] = [];
           const tTot = t.rolls.reduce((n, x) => n + x.targets.filter((y) => y.take > 0).length, 0);
           let tDone = 0;

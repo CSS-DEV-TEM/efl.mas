@@ -435,7 +435,9 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
     const pickNos = picks.map((id) => pickNoOf(reqs.find((r) => r.id === id)!)).filter((x) => x !== '');
     const cut = list.filter((m) => isCut(m.e.p.pallet)).length;
     const cust = String(list0.map((e) => { const i = col(['customer ref number']); return i >= 0 ? e.raw[i] : ''; }).find(Boolean) ?? '').split('-')[0];
-    const days = Array.from(new Set(list0.map((e) => e.p.day))).sort();
+    // v138: the date on the Packing List = the plan date (the Pick's day, else the plan line's date), not the day of the pick
+    const planDay = (e: Entry) => /^(\d{4}-\d{2}-\d{2})~/.exec(String(e.r.week || ''))?.[1] || (/^\d{4}-\d{2}-\d{2}$/.test(String(e.r.line ?? '').split('|')[3] ?? '') ? String(e.r.line).split('|')[3] : '') || e.p.day;
+    const days = Array.from(new Set(list0.map(planDay))).sort();
     aoa[1] = [qty, list.length, pickNos.length === 1 ? pickNos[0] : pickNos.join(', '), null, null, pickNos.length, cut];
     // the plant: the one chosen in the system for the Pick (its Pick Id), with its name from Settings → Plants;
     // else the plan line's plant; the Korber customer ref only when the Pick has no plant
