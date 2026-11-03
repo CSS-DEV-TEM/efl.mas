@@ -1515,14 +1515,19 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
       // cut roll balances first: each one goes to another SO line it can go to (same Material and LI, UR in ZMMBE, a ZINSR
       // lot with the roll's Vendor Batch) as a pick of that line — then the Packing List is made with them
       let hh = h!, target = target0, tallied = 0, tallyQty = 0;
-      const tallyFail: string[] = [];
+      const tallyFail: string[] = [], untallied: string[] = [];
       // an Offsite pick is cut to the exact QTY: its cut roll's balance is not tallied (it stays on the shelf)
       const tallyFrom = target.filter((r) => r.kind !== 'offsite');
       if (canEdit && autoTally && tallyFrom.length) {
         setPlProg('tallying cut rolls');
         task.step('tallying cut roll balances');
         try {
-          const t = await api<{ rolls: { pallet: string; from: number; targets: { so: string; li: string; item: string; take: number }[] }[] }>('/api/pick/tally?ids=' + tallyFrom.map((r) => r.id).join(','));
+          const t = await api<{ rolls: { pallet: string; from: number; balance: number; plant_missing?: string | null; targets: { so: string; li: string; item: string; take: number }[] }[] }>('/api/pick/tally?ids=' + tallyFrom.map((r) => r.id).join(','));
+          // v145: cut rolls whose balance (or part of it) no SO line can take — named in a message, so none is missed silently
+          for (const x of t.rolls) {
+            const left = r3(Number(x.balance) - x.targets.reduce((n, y) => n + (Number(y.take) || 0), 0));
+            if (left > 0.0005) untallied.push(`${x.pallet} ${fmtQty(left)}${x.plant_missing ? ` (no Plant code for ${x.plant_missing} in Settings → Plants & target times)` : x.targets.length ? '' : ' (no SO line with the same Material / LI, SO Plant and UR' + ' and a ZINSR lot of its Vendor Batch)'}`);
+          }
           const newIds: number[] = [];
           const tTot = t.rolls.reduce((n, x) => n + x.targets.filter((y) => y.take > 0).length, 0);
           let tDone = 0;
@@ -1626,6 +1631,7 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
       const file = `Packing_List_${day}${ptag}${tag}.xlsx`;
       const tallyMsg = tallied ? ` · ${tallied} cut roll balance${tallied === 1 ? '' : 's'} tallied (${fmtQty(tallyQty)})` : '';
       if (tallyFail.length) toast(`Cut roll tally: ${tallyFail.length} not saved — ${tallyFail[0]}`);
+      if (untallied.length) toast(`Cut roll balance not tallied (stays on the roll): ${untallied.length} roll${untallied.length === 1 ? '' : 's'} — ${untallied.slice(0, 3).join(' · ')}${untallied.length > 3 ? ' …' : ''}`);
       if (issues.length) { setPlCheck({ wb, file, issues }); if (tallied) toast(`${tallied} cut roll balance${tallied === 1 ? '' : 's'} tallied (${fmtQty(tallyQty)}) — on this Packing List`); }
       else { saveWorkbook(wb, file); toast(`Packing List checked ✓${tallyMsg} — ${target.length} pick${target.length === 1 ? '' : 's'}: SAP lines and Korber rows are right${notPicked.length ? ` · ${notPicked.length} line${notPicked.length === 1 ? '' : 's'} not picked (sheet “Not Picked”)` : ''}`); }
     } finally { setPlBusy(false); setPlProg(''); task.end(); }
