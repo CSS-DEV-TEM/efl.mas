@@ -236,11 +236,26 @@ const BASE_SCHEMA = [
   'CREATE INDEX IF NOT EXISTS zroll_barcode ON zroll(barcode)',
   'CREATE INDEX IF NOT EXISTS zroll_batch ON zroll(batch)',
   'CREATE INDEX IF NOT EXISTS zroll_pcore ON zroll(pcore)',
-  'CREATE INDEX IF NOT EXISTS ztrr_key ON ztrr(to_so, to_li, material)',
+  'CREATE INDEX IF NOT EXISTS ztrr_key ON ztrr(to_so, to_li, material)',  'CREATE INDEX IF NOT EXISTS zinr_mat_batch ON zinr(material, batch, rid)',
+  'CREATE INDEX IF NOT EXISTS zinr_mat_vb ON zinr(material, upper(vendor_batch), rid)',
+  'CREATE INDEX IF NOT EXISTS zinr_sol_rid ON zinr(so, li, material, rid)',
+  'CREATE INDEX IF NOT EXISTS zcoment_bc_rid ON zcoment(barcode, rid)',
+  'CREATE INDEX IF NOT EXISTS zcoment_lot_rid ON zcoment(lot, rid)',
+  'CREATE INDEX IF NOT EXISTS zcoment_mat_vb ON zcoment(material, upper(vendor_batch), rid)',
+  'CREATE INDEX IF NOT EXISTS zroll_bc_rid ON zroll(barcode, rid)',
+  'CREATE INDEX IF NOT EXISTS zroll_batch_rid ON zroll(batch, rid)',
+  'CREATE INDEX IF NOT EXISTS zroll_pcore_rid ON zroll(pcore, rid)',
+  'CREATE INDEX IF NOT EXISTS korber_pallet_rid ON korber(pallet, rid)',
+  'CREATE INDEX IF NOT EXISTS korber_item_rid ON korber(item, rid)',
+  'CREATE INDEX IF NOT EXISTS stock_mat_batch ON stock(src, material, batch, rid)',
+  'CREATE INDEX IF NOT EXISTS zinr_rid_mat ON zinr(rid, material, batch)',
+  'CREATE INDEX IF NOT EXISTS zroll_rid_bc ON zroll(rid, barcode)',
+  'CREATE INDEX IF NOT EXISTS zroll_rid_batch ON zroll(rid, batch)',
+  'CREATE INDEX IF NOT EXISTS stock_sent_rid ON stock_sent(rid, key)',
 ];
 /** per system (each has its own database) */
 const schemaDone = new Set<string>();
-const SCHEMA_V = '34';
+const SCHEMA_V = '35';
 async function ensureSchema(env: Env) {
   const dk = env.DIV || 'active';
   if (schemaDone.has(dk) || !env.DB) return;
@@ -453,6 +468,26 @@ async function ensureSchema(env: Env) {
     env.DB.prepare('CREATE INDEX IF NOT EXISTS upload_file_at ON upload_file(complete, uploaded_at)'),
     env.DB.prepare('CREATE TABLE IF NOT EXISTS upload_file_part (file_id INTEGER NOT NULL, n INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (file_id, n))'),
   ]);
+  // v35 (v142): indexes on the columns the pick matching looks up by (Material + Batch, Vendor Batch, Barcode, Lot, Pallet,
+  // Item) with the Pick (rid) last — a lookup reads only the rows it needs, not a whole report table of every Pick
+  await env.DB.batch([
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS zinr_mat_batch ON zinr(material, batch, rid)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS zinr_mat_vb ON zinr(material, upper(vendor_batch), rid)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS zinr_sol_rid ON zinr(so, li, material, rid)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS zcoment_bc_rid ON zcoment(barcode, rid)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS zcoment_lot_rid ON zcoment(lot, rid)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS zcoment_mat_vb ON zcoment(material, upper(vendor_batch), rid)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS zroll_bc_rid ON zroll(barcode, rid)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS zroll_batch_rid ON zroll(batch, rid)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS zroll_pcore_rid ON zroll(pcore, rid)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS korber_pallet_rid ON korber(pallet, rid)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS korber_item_rid ON korber(item, rid)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS stock_mat_batch ON stock(src, material, batch, rid)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS zinr_rid_mat ON zinr(rid, material, batch)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS zroll_rid_bc ON zroll(rid, barcode)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS zroll_rid_batch ON zroll(rid, batch)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS stock_sent_rid ON stock_sent(rid, key)'),
+  ]);
   await env.DB.prepare("INSERT INTO config (k, v) VALUES ('schema_v', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(SCHEMA_V).run();
   schemaDone.add(dk);
 }
@@ -482,11 +517,14 @@ const SQL_WORDS = new Set(['WHERE', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'OUTER', '
 /** A read of korber / zinr / zcoment / stock → only the rows of the scope's upload (writes are not touched). */
 function scopeSql(sql: string, sc: Scope) {
   if (!/^\s*(SELECT|WITH)\b/i.test(sql)) return sql;
+  const exact = sql.includes('/*exact*/');
   return sql.replace(/\b(FROM|JOIN)\s+(korber|zinr|zcoment|zroll|ztrr|stock_sent|stock)\b(\s+(?:AS\s+)?([A-Za-z_]\w*))?/gi, (_m, kw: string, t: string, aliasPart?: string, alias?: string) => {
     const tb = t.toLowerCase() as ReportTable;
     // +rid: a filter only — the joins keep using the selective indexes (item / lot / SO / pallet). An index lookup on rid
     // (nearly every row has the same rid) makes SQLite cross whole tables: 100 s instead of 1 ms.
-    const sub = `(SELECT * FROM ${tb} WHERE +rid = '${sc[tb].replace(/'/g, "''")}')`;
+    // v142: a query marked /*exact*/ looks the Pick up by its rid index too (rid-first indexes made for it) — it reads only
+    // this Pick's rows; the others keep +rid (a filter only)
+    const sub = `(SELECT * FROM ${tb} WHERE ${exact ? '' : '+'}rid = '${sc[tb].replace(/'/g, "''")}')`;
     if (alias && !SQL_WORDS.has(alias.toUpperCase())) return `${kw} ${sub} ${alias}`;
     return `${kw} ${sub} AS ${tb}${aliasPart ?? ''}`;
   });
@@ -544,9 +582,16 @@ async function broadcast(env: Env, msg: Record<string, unknown>) {
   const src = String(msg.src ?? '');
   const drop = msg.type === 'status' || src === 'pick' ? ['c_weeks'] : ['plan', 'clear', 'zmmbe', 'kfc', 'pfc', 'plant', 'trr'].includes(src) ? ['c_weeks', 'c_counts', 'c_pick_counts']
     : ['zinr', 'zcoment', 'korber', 'zroll', 'ztrr'].includes(src) ? ['c_pick_counts'] : [];
+  // v142: the kept pick candidates (cand_cache) — a pick changes only the lines of its Material(s) ("mrev:<item>"); every other
+  // change (an upload, the plan, the settings …) all of them ("drev")
+  const items = src === 'pick' && Array.isArray(msg.items) ? Array.from(new Set((msg.items as unknown[]).map((x) => normId(x)).filter(Boolean))) : null;
+  const stamp = now();
   try {
     await env.DB.batch([
-      env.DB.prepare("INSERT INTO config (k, v) VALUES ('rev', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(now()),
+      env.DB.prepare("INSERT INTO config (k, v) VALUES ('rev', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(stamp),
+      ...(items && items.length
+        ? items.map((it) => env.DB.prepare("INSERT INTO config (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind('c_mrev:' + it, stamp))
+        : [env.DB.prepare("INSERT INTO config (k, v) VALUES ('c_drev', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(stamp)]),
       ...drop.map((d) => env.DB.prepare("DELETE FROM config WHERE k = ?1 OR k LIKE ?1 || ':%'").bind(d)),
     ]);
   } catch { /* config table is created on first sign-in */ }
@@ -562,7 +607,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 86; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 87; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1363,7 +1408,7 @@ async function handlePlanReport(env: Env, req: Request) {
     // picks after the latest ZMMBE upload are not in its ALRADY SEND yet (the same rule as the pick's "to pick")
     const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(sr).first<{ at: string | null }>())?.at ?? '';
     const pk = new Map((await env.DB.prepare('SELECT line, ROUND(SUM(qty), 3) q, ROUND(SUM(CASE WHEN at > ?2 THEN qty ELSE 0 END), 3) qa, COUNT(*) n FROM picks WHERE week = ?1 AND cancelled_at IS NULL GROUP BY line').bind(rid, zAt).all<Row>()).results.map((x) => [String(x.line), x]));
-    scs.set(sr, { st, tn, pk, hasSent: !!(await senv.DB.prepare('SELECT 1 FROM stock_sent LIMIT 1').first()), zm: !!(await senv.DB.prepare("SELECT 1 FROM stock WHERE src = 'zmmbe' LIMIT 1").first()) });
+    scs.set(sr, { st, tn, pk, hasSent: !!(await senv.DB.prepare('SELECT /*exact*/ 1 FROM stock_sent LIMIT 1').first()), zm: !!(await senv.DB.prepare("SELECT /*exact*/ 1 FROM stock WHERE src = 'zmmbe' LIMIT 1").first()) });
   }
   const scList = Array.from(scs.values());
   const hasSent = scList.some((x) => x.hasSent), zm = scList.some((x) => x.zm), hasTrr = scList.some((x) => x.tn.size > 0);
@@ -1401,7 +1446,7 @@ async function handleZroll(env: Env, req: Request) {
   const q = up(sp.get('q')).trim();
   const state = sp.get('state') || 'all';
   const limit = Math.max(1, Math.min(2000, Number(sp.get('limit')) || 500));
-  const hasStatus = !!(await senv.DB.prepare("SELECT 1 FROM zroll WHERE COALESCE(status, '') <> '' LIMIT 1").first());
+  const hasStatus = !!(await senv.DB.prepare("SELECT /*exact*/ 1 FROM zroll WHERE COALESCE(status, '') <> '' LIMIT 1").first());
   const K = "(k.pallet = z.barcode OR (z.pcore IS NOT NULL AND k.pcore = z.pcore))";
   const cte = `WITH x AS (SELECT z.barcode, z.bin, z.material, z.batch, z.qty, z.uom, z.sloc, z.plant, z.so, z.li, z.status,
       ${binSql} AS bin_at,
@@ -1587,7 +1632,7 @@ async function handlePullPlan(env: Env, req: Request) {
     // its Shade Report barcodes, less what was picked from them (all Picks). "Ready to pull" needs this too (null = no Korber).
     try {
       const keys = Array.from(new Set(rs.map((r) => String(r.key))));
-      if (keys.length && (await g.env.DB.prepare('SELECT 1 FROM korber LIMIT 1').first())) {
+      if (keys.length && (await g.env.DB.prepare('SELECT /*exact*/ 1 FROM korber LIMIT 1').first())) {
         const kr = (await g.env.DB.prepare(`WITH lk AS (SELECT DISTINCT value AS key, substr(value, 1, instr(value, '|') - 1) AS so,
             substr(substr(value, instr(value, '|') + 1), 1, instr(substr(value, instr(value, '|') + 1), '|') - 1) AS li,
             substr(substr(value, instr(value, '|') + 1), instr(substr(value, instr(value, '|') + 1), '|') + 1) AS item FROM json_each(?1)),
@@ -2478,7 +2523,7 @@ async function handlePick(env: Env, req: Request, p: string) {
       if (qty > Number(t.can) + 0.0005) throw new HttpError(409, `${q0.so} / ${q0.li} can take ${t.can} (UR free ${t.ur_free}, ZINSR lot room ${t.lot_room}).`);
       const note = `Batch complete — ${line.so} / ${line.li} has used its ZINSR lot of batch ${t.batch}: roll ${pallet} ${qty} picked for ${normId(q0.so)} / ${normId(q0.li)} (same Item and LI, SO Plant ${t.plant ?? '–'}, ZINSR lot ${(t.lots as Row[]).map((l) => l.lot).join(', ')}, Vendor Batch ${info.vb}) by ${s.u}`;
       const id = await saveTallyPick(env, s.u, src, pallet, t, qty, info, note);
-      await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: 1, weeks: [week] });
+      await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: 1, weeks: [week], items: [line.item, q0.item] });
       return json({ ok: true, id, pallet, so: normId(q0.so), li: normId(q0.li), qty });
     }
     throw new HttpError(405, 'Method not allowed.');
@@ -2548,7 +2593,7 @@ async function handlePick(env: Env, req: Request, p: string) {
       if (qty > Number(t.can) + 0.0005) throw new HttpError(409, `${b.so} / ${b.li} can take ${t.can} (UR free ${t.ur_free}, ZINSR lot ${t.lot_room}).`);
       if (String(info.k.pick_id ?? '0') !== '0' && String(info.k.pick_id ?? '') !== '') throw new HttpError(409, `Pallet ${b.pallet} is on Korber Pick Id ${info.k.pick_id}.`);
       const reqId = await saveTallyPick(env, s.u, src, up(b.pallet), t, qty, info);
-      await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: 1, weeks: [String(src.week)] });
+      await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: 1, weeks: [String(src.week)], items: [b.item, src.item] });
       return json({ ok: true, id: reqId, qty, so: normId(b.so), li: normId(b.li) });
     }
     throw new HttpError(405, 'Method not allowed.');
@@ -2954,7 +2999,7 @@ async function handlePick(env: Env, req: Request, p: string) {
     if (!picks.length) {
       if (!moves.length) throw new HttpError(400, 'Nothing to pick.');
       const moved = await saveMoves({ id: null, day, week: b.week, line: lineId, so: line.so, li: line.li, pick_no: txt(b.pickNo) });
-      await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: moved.length, weeks: [b.week] });
+      await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: moved.length, weeks: [b.week], items: [line.item] });
       return json({ ok: true, id: null, seq: null, label: 'moved', day, qty: 0, rolls: 0, moved });
     }
     // each user's picks are numbered 1st, 2nd … per day (their own packing list)
@@ -3157,7 +3202,7 @@ async function handlePick(env: Env, req: Request, p: string) {
       try { moved = await saveMoves({ id: reqId, day, week: b.week, line: lineId, so: line.so, li: line.li, pick_no: txt(b.pickNo) }); }
       catch (e) { movedErr = e instanceof Error ? e.message : 'not saved'; }
     }
-    await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: picks.length + moved.length, weeks: [b.week] });
+    await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: picks.length + moved.length, weeks: [b.week], items: [line.item] });
     return json({ ok: true, id: reqId, seq, label: ordinal(seq), day, qty: total, rolls: picks.length, ...(moves.length ? { moved, ...(movedErr ? { movedErr } : {}) } : {}) });
   }
 
@@ -3250,7 +3295,7 @@ async function handlePick(env: Env, req: Request, p: string) {
       env.DB.prepare('UPDATE pick_req SET qty = (SELECT COALESCE(SUM(qty), 0) FROM picks WHERE req_id = ?1), rolls = (SELECT COUNT(*) FROM picks WHERE req_id = ?1) WHERE id = ?1').bind(r.req_id),
       env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(at, s.u, 'pick', `Rejected roll ${r.pallet} (${r.qty}) of ${r.so} / ${r.li} / ${r.item} — ${reason}`),
     ]);
-    await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: 1, weeks: [r.week] });
+    await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: 1, weeks: [r.week], items: [r.item] });
     return json({ ok: true });
   }
   if (part === 'rejects' && req.method === 'GET') {
@@ -3411,7 +3456,7 @@ async function handlePick(env: Env, req: Request, p: string) {
         renumber(r.day, r.by_user),
         env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(at, s.u, 'pick', `Deleted pick ${ordinal(Number(r.seq))} ${r.day} of ${r.by_user}: ${r.so} / ${r.li} — ${r.rolls} roll(s), ${r.qty}`),
       ]);
-      await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: 0, weeks: [r.week] });
+      await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: 0, weeks: [r.week], items: [r.item] });
     } else {
       const r = await env.DB.prepare('SELECT p.*, q.day AS req_day FROM picks p JOIN pick_req q ON q.id = p.req_id WHERE p.id = ?').bind(id).first<Row>();
       if (!r) throw new HttpError(404, 'That roll pick is gone.');
@@ -3424,7 +3469,7 @@ async function handlePick(env: Env, req: Request, p: string) {
         renumber(r.req_day, r.by_user),
         env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(at, s.u, 'pick', `Removed roll ${r.pallet} (${r.qty}) from a pick of ${r.by_user} (${r.so} / ${r.li})`),
       ]);
-      await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: 0, weeks: [r.week] });
+      await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: 0, weeks: [r.week], items: [r.item] });
     }
     return json({ ok: true });
   }
@@ -3744,20 +3789,20 @@ async function fastEnv(env: Env, material: string): Promise<Env> {
     WHERE p.pallet = ? AND p.cancelled_at IS NULL ORDER BY p.id`);
   // the rolls read up front: the Material's Korber pallets and the ZCOMENT barcodes of the Material's inspection lots
   const [u1, u2] = material ? await db.batch([
-    db.prepare('SELECT DISTINCT pallet b FROM korber WHERE item = ?').bind(material),
-    db.prepare('SELECT DISTINCT barcode b FROM zcoment WHERE lot IN (SELECT lot FROM zinr WHERE material = ?) AND barcode IS NOT NULL').bind(material),
+    db.prepare('SELECT /*exact*/ DISTINCT pallet b FROM korber WHERE item = ?').bind(material),
+    db.prepare('SELECT /*exact*/ DISTINCT c.barcode b FROM zinr z CROSS JOIN zcoment c WHERE c.lot = z.lot AND z.material = ?').bind(material),
   ]) : [{ results: [] }, { results: [] }];
   const U0 = new Set([...(u1.results as Row[]), ...(u2.results as Row[])].map((x) => String(x.b ?? '')).filter(Boolean));
   // a very large Material: no read-ahead (every read goes to the database, as before)
   const U = U0.size > 4000 ? new Set<string>() : U0;
   const pals = Array.from(U);
   const J = JSON.stringify(pals);
-  const kAll = pals.length ? (await db.prepare('SELECT * FROM korber WHERE pallet IN (SELECT value FROM json_each(?))').bind(J).all<Row>()).results : [];
+  const kAll = pals.length ? (await db.prepare('SELECT /*exact*/ * FROM korber WHERE pallet IN (SELECT value FROM json_each(?))').bind(J).all<Row>()).results : [];
   const byPal = new Map<string, Row[]>();
   for (const k of kAll) { const p = String(k.pallet); const a = byPal.get(p); if (a) a.push(k); else byPal.set(p, [k]); }
   const [zr, zc, pp] = pals.length ? await db.batch([
-    db.prepare('SELECT * FROM zroll WHERE barcode IN (SELECT value FROM json_each(?))').bind(J),
-    db.prepare('SELECT DISTINCT barcode FROM zcoment WHERE barcode IN (SELECT value FROM json_each(?))').bind(J),
+    db.prepare('SELECT /*exact*/ * FROM zroll WHERE barcode IN (SELECT value FROM json_each(?))').bind(J),
+    db.prepare('SELECT /*exact*/ DISTINCT barcode FROM zcoment WHERE barcode IN (SELECT value FROM json_each(?))').bind(J),
     db.prepare(`SELECT p.pallet _pal, p.day, p.by_user, p.qty, p.roll_qty, p.week, p.so, p.li, p.at, p.req_id, r.pick_no FROM picks p LEFT JOIN pick_req r ON r.id = p.req_id
       WHERE p.pallet IN (SELECT value FROM json_each(?)) AND p.cancelled_at IS NULL ORDER BY p.id`).bind(J),
   ]) : [{ results: [] }, { results: [] }, { results: [] }];
@@ -3857,18 +3902,21 @@ async function candCached<T>(env: Env, id: string, make: () => Promise<T>): Prom
   let rev = '', st = '';
   try {
     if (!candCacheReady) { await env.DB.prepare('CREATE TABLE IF NOT EXISTS cand_cache (k TEXT PRIMARY KEY, rev TEXT NOT NULL, at TEXT NOT NULL, v TEXT NOT NULL)').run(); candCacheReady = true; }
+    // the line's Material (id = week|so|li|item|date|rid): its own pick changes, and every other change
+    const item = normId(String(id).split('|')[3] ?? '');
     const [r1, r2] = await env.DB.batch([
-      env.DB.prepare("SELECT k, v FROM config WHERE k IN ('rev', 'settings')"),
+      env.DB.prepare("SELECT k, v FROM config WHERE k IN ('c_drev', 'settings', ?)").bind('c_mrev:' + item),
       env.DB.prepare('SELECT rev, at, v FROM cand_cache WHERE k = ?').bind(id),
     ]);
-    for (const x of r1.results as Row[]) { if (x.k === 'rev') rev = String(x.v ?? ''); else st = String(x.v ?? ''); }
-    const tag = `${API_VERSION}|${rev}|${st.length}:${hashStr(st)}`;
+    let mrev = '';
+    for (const x of r1.results as Row[]) { if (x.k === 'c_drev') rev = String(x.v ?? ''); else if (x.k === 'settings') st = String(x.v ?? ''); else mrev = String(x.v ?? ''); }
+    const tag = `${API_VERSION}|${rev}|${mrev}|${st.length}:${hashStr(st)}`;
     const hit = (r2.results as Row[])[0];
     if (hit && hit.rev === tag && Date.now() - Date.parse(String(hit.at)) < 15 * 60e3) return JSON.parse(String(hit.v)) as T;
     const v = await make();
     try {
       await env.DB.batch([
-        env.DB.prepare('DELETE FROM cand_cache WHERE rev <> ? OR at < ?').bind(tag, new Date(Date.now() - 15 * 60e3).toISOString()),
+        env.DB.prepare('DELETE FROM cand_cache WHERE at < ?').bind(new Date(Date.now() - 15 * 60e3).toISOString()),
         env.DB.prepare('INSERT OR REPLACE INTO cand_cache (k, rev, at, v) VALUES (?,?,?,?)').bind(id, tag, now(), JSON.stringify(v)),
       ]);
     } catch { /* only a cache */ }
@@ -3979,9 +4027,9 @@ async function makeGate(env: Env) {
   const on = st.rollGate !== false;
   // v128: ZROLLMGT Available Quantity is not checked (Korber is the physical stock) unless Settings turns it on
   const useAvail = on && st.zrollAvail === true;
-  const loaded = on ? !!(await env.DB.prepare('SELECT 1 FROM zroll LIMIT 1').first()) : true;
+  const loaded = on ? !!(await env.DB.prepare('SELECT /*exact*/ 1 FROM zroll LIMIT 1').first()) : true;
   // ZROLLMGT Status: when the report has it, a roll is picked only at Status UR (unrestricted)
-  const hasStatus = on && loaded ? !!(await env.DB.prepare("SELECT 1 FROM zroll WHERE COALESCE(status, '') <> '' LIMIT 1").first()) : false;
+  const hasStatus = on && loaded ? !!(await env.DB.prepare("SELECT /*exact*/ 1 FROM zroll WHERE COALESCE(status, '') <> '' LIMIT 1").first()) : false;
   const statusOk = (v: unknown) => ['UR', 'UNRESTRICTED', 'UNRESTRICTEDUSE', 'UNRESTRICTEDSTOCK', 'UNREST'].includes(up(v).replace(/[^A-Z]/g, ''));
   /** why one ZROLLMGT row is not pickable (null = it is): StorageBin, Status */
   const rowWhy = (z: Row): string | null => {
@@ -4132,7 +4180,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
   let need = r3(pickedLine + leftL);
   // ALRADY SEND (ZMMBE at the plant storage locations) is shown for information
   let sentQ: number | null = null;
-  if (await env.DB.prepare("SELECT 1 FROM stock_sent LIMIT 1").first()) {
+  if (await env.DB.prepare("SELECT /*exact*/ 1 FROM stock_sent LIMIT 1").first()) {
     sentQ = r3(Number((await env.DB.prepare("SELECT SUM(COALESCE(total - COALESCE(qi, 0) - COALESCE(block, 0), ur)) q FROM stock_sent WHERE key = ?").bind(key).first<{ q: number | null }>())?.q ?? 0));
     if (sentQ > 1e-9) steps.push(`ALRADY SEND ${sentQ} (ZMMBE at the plant storage locations) — for information: the plan QTY ${planQty} is picked, at most the warehouse UR.`);
   }
@@ -4377,7 +4425,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
       // one Line Item several batches, one batch several lots — and the same batch can be in other SO lines too)
       const myLots = new Set(zi.map((l) => String(l.lot)).filter(Boolean));
       // other SO lines with this batch: in ZINSR, or with UR of it in ZMMBE
-      const sharers = (await env.DB.prepare(`SELECT so, li FROM zinr WHERE material = ?1 AND batch = ?2 AND NOT (so = ?3 AND li = ?4)
+      const sharers = (await env.DB.prepare(`SELECT /*exact*/ so, li FROM zinr WHERE material = ?1 AND batch = ?2 AND NOT (so = ?3 AND li = ?4)
         UNION SELECT so, li FROM stock WHERE src = 'zmmbe' AND material = ?1 AND batch = ?2 AND ur > 0 AND NOT (so = ?3 AND li = ?4)`).bind(mat, bt, normId(line.so), normId(line.li)).all<Row>()).results;
       let added = 0, known = 0, off = 0, noK = 0, other = 0, otherLine = 0, shared = 0;
       for (const z of zr) {
@@ -4447,7 +4495,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
   // lot): it is not this line's alone. Such rolls are offered, not selected — and split over the SO lines the same way for
   // every line (SO / LI order, each SO line its lots' QTY), so two lines are not given the same rolls.
   for (const bt of urBatches) {
-    const lotsAll = (await env.DB.prepare(`SELECT z.lot, z.qty, z.so, z.li FROM zinr z WHERE z.material = ?1 AND z.batch = ?2
+    const lotsAll = (await env.DB.prepare(`SELECT /*exact*/ z.lot, z.qty, z.so, z.li FROM zinr z WHERE z.material = ?1 AND z.batch = ?2
       AND EXISTS (SELECT 1 FROM stock s WHERE s.src = 'zmmbe' AND s.so = z.so AND s.li = z.li AND s.material = z.material AND s.batch = z.batch AND s.ur > 0) ORDER BY z.so, z.li, z.lot`).bind(normId(line.item), bt).all<Row>()).results;
     const sol = (x: Row) => `${normId(x.so)}/${normId(x.li)}`;
     const me = `${normId(line.so)}/${normId(line.li)}`;
@@ -4940,23 +4988,24 @@ async function handleAdminPlans(env: Env, req: Request) {
 interface Meter { read: number; written: number; queries: number }
 type Meta = { rows_read?: number; rows_written?: number } | undefined;
 function meterDb(db: D1Database, m: Meter): D1Database {
-  const note = (meta: Meta) => { m.queries++; m.read += meta?.rows_read ?? 0; m.written += meta?.rows_written ?? 0; };
-  const wrapStmt = (st: D1PreparedStatement): D1PreparedStatement => new Proxy(st, {
+  const note = (meta: Meta, sql = '') => { m.queries++; m.read += meta?.rows_read ?? 0; m.written += meta?.rows_written ?? 0; };
+  const wrapStmt = (st: D1PreparedStatement, sql = ''): D1PreparedStatement => new Proxy(st, {
     get(t, k) {
       if (k === '__t') return t;
-      if (k === 'bind') return (...a: unknown[]) => wrapStmt(t.bind(...a));
-      if (k === 'all') return async () => { const r = await t.all(); note(r.meta as Meta); return r; };
-      if (k === 'run') return async () => { const r = await t.run(); note(r.meta as Meta); return r; };
-      if (k === 'first') return async (col?: string) => { const r = await t.all(); note(r.meta as Meta); const row = (r.results[0] ?? null) as Record<string, unknown> | null; return col ? (row ? row[col] ?? null : null) : row; };
+      if (k === '__sql') return sql;
+      if (k === 'bind') return (...a: unknown[]) => wrapStmt(t.bind(...a), sql);
+      if (k === 'all') return async () => { const r = await t.all(); note(r.meta as Meta, sql); return r; };
+      if (k === 'run') return async () => { const r = await t.run(); note(r.meta as Meta, sql); return r; };
+      if (k === 'first') return async (col?: string) => { const r = await t.all(); note(r.meta as Meta, sql); const row = (r.results[0] ?? null) as Record<string, unknown> | null; return col ? (row ? row[col] ?? null : null) : row; };
       if (k === 'raw') return async (o?: { columnNames?: boolean }) => { m.queries++; return o?.columnNames ? t.raw({ columnNames: true }) : t.raw(); };
       const v = Reflect.get(t, k); return typeof v === 'function' ? v.bind(t) : v;
     },
   });
   return new Proxy(db, {
     get(t, k) {
-      if (k === 'prepare') return (q: string) => wrapStmt(t.prepare(q));
+      if (k === 'prepare') return (q: string) => wrapStmt(t.prepare(q), q);
       // statements given to batch are proxies: unwrap by re-preparing is not possible, so pass them through (Proxy targets are real statements)
-      if (k === 'batch') return async (sts: D1PreparedStatement[]) => { const r = await t.batch(sts.map((x) => (x as unknown as { __t?: D1PreparedStatement }).__t ?? x)); r.forEach((x) => note(x.meta as Meta)); return r; };
+      if (k === 'batch') return async (sts: D1PreparedStatement[]) => { const r = await t.batch(sts.map((x) => (x as unknown as { __t?: D1PreparedStatement }).__t ?? x)); r.forEach((x, i) => note(x.meta as Meta, String((sts[i] as unknown as { __sql?: string }).__sql ?? 'BATCH?'))); return r; };
       const v = Reflect.get(t, k); return typeof v === 'function' ? v.bind(t) : v;
     },
   });
