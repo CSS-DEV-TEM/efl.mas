@@ -36,6 +36,8 @@ const STOCK_FIELDS: FieldDef[] = [
   { id: 'material', label: 'Material', required: true, aliases: ['material', 'item code', 'material number', 'fabric code'], keyed: 'H' },
   { id: 'batch', label: 'Batch', aliases: ['batch'], keyed: 'I' },
   { id: 'style', label: 'Style', aliases: ['style'], keyed: 'J' },
+  // v143: INTERLINING / FUSIBLE in it → picked from Korber without the ZINR / ZCOMENT VIEW / ZROLLMGT checks
+  { id: 'descr', label: 'Material Description', aliases: ['material description', 'material desc', 'material text'] },
   { id: 'qi', label: 'QI', numeric: true, aliases: ['so qi stock', 'qi', 'quality inspection', 'in quality insp', 'qi stock'], keyed: 'L' },
   { id: 'block', label: 'Block', numeric: true, aliases: ['so blocked stock stock', 'so blocked stock', 'block', 'blocked', 'blocked stock'], keyed: 'M' },
   { id: 'assigned', label: 'Assigned', numeric: true, aliases: ['assigned', 'assigned qty', 'assigned quantity'], keyed: 'N' },
