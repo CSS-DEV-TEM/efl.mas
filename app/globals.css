@@ -1018,3 +1018,130 @@ tr.on-hold td { background: color-mix(in srgb, #ef4444 9%, transparent); }
 .rounds-row { margin: -4px 0 12px; }
 .rounds-row .days.scroll { margin: 0; }
 @media (max-width: 640px) { .chip-row { flex-direction: column; align-items: stretch; } .chip-row > .weeks-label { width: auto; } }
+
+/* ================================================ v146 · Orange Liquid Glass theme
+   Warm orange light behind frosted, translucent surfaces with a bright top edge (Apple "liquid glass" style).
+   Only colours, surfaces and shapes change — no layout or behaviour. Light and dark follow the device setting. */
+:root {
+  --bg: #fbf4ee;
+  --panel: rgba(255, 252, 249, .94);          /* sticky headers, inputs: near solid so rows never show through */
+  --panel-2: rgba(255, 244, 235, .96);
+  --ink: #1d140d; --ink-2: #5c4a3d; --ink-3: #8f7c6d;
+  --line: rgba(120, 72, 30, .12); --line-strong: rgba(120, 72, 30, .22);
+  --accent: #e8590c; --accent-ink: #ffffff; --accent-soft: rgba(255, 122, 26, .14);
+  --glass: rgba(255, 255, 255, .52);
+  --glass-2: rgba(255, 255, 255, .72);
+  --glass-edge: rgba(255, 255, 255, .85);
+  --glass-rim: rgba(255, 255, 255, .55);
+  --glass-shade: 0 1px 0 rgba(255,255,255,.9) inset, 0 -1px 0 rgba(120,60,20,.05) inset, 0 10px 30px -12px rgba(140, 60, 10, .22), 0 2px 6px -2px rgba(140, 60, 10, .10);
+  --glow-1: rgba(255, 128, 32, .42); --glow-2: rgba(255, 176, 46, .38); --glow-3: rgba(255, 86, 48, .22);
+  --shadow: 0 8px 28px -10px rgba(140, 60, 10, .25);
+  --r: 18px;
+  --blur: saturate(180%) blur(22px);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0c0906; --panel: rgba(30, 22, 16, .95); --panel-2: rgba(40, 29, 21, .97);
+    --ink: #fbf1e8; --ink-2: #cdb8a6; --ink-3: #957f6d;
+    --line: rgba(255, 200, 150, .10); --line-strong: rgba(255, 200, 150, .18);
+    --accent: #ff8a2b; --accent-ink: #1a0b02; --accent-soft: rgba(255, 138, 43, .16);
+    --glass: rgba(255, 236, 220, .055); --glass-2: rgba(255, 236, 220, .09);
+    --glass-edge: rgba(255, 230, 210, .22); --glass-rim: rgba(255, 220, 190, .10);
+    --glass-shade: 0 1px 0 rgba(255,235,215,.16) inset, 0 -1px 0 rgba(0,0,0,.35) inset, 0 18px 40px -16px rgba(0,0,0,.7), 0 0 0 1px rgba(0,0,0,.25);
+    --glow-1: rgba(255, 112, 20, .42); --glow-2: rgba(255, 160, 40, .24); --glow-3: rgba(232, 67, 10, .32);
+    --shadow: 0 12px 34px -12px rgba(0,0,0,.75);
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0c0906; --panel: rgba(30, 22, 16, .95); --panel-2: rgba(40, 29, 21, .97);
+  --ink: #fbf1e8; --ink-2: #cdb8a6; --ink-3: #957f6d;
+  --line: rgba(255, 200, 150, .10); --line-strong: rgba(255, 200, 150, .18);
+  --accent: #ff8a2b; --accent-ink: #1a0b02; --accent-soft: rgba(255, 138, 43, .16);
+  --glass: rgba(255, 236, 220, .055); --glass-2: rgba(255, 236, 220, .09);
+  --glass-edge: rgba(255, 230, 210, .22); --glass-rim: rgba(255, 220, 190, .10);
+  --glass-shade: 0 1px 0 rgba(255,235,215,.16) inset, 0 -1px 0 rgba(0,0,0,.35) inset, 0 18px 40px -16px rgba(0,0,0,.7), 0 0 0 1px rgba(0,0,0,.25);
+  --glow-1: rgba(255, 112, 20, .42); --glow-2: rgba(255, 160, 40, .24); --glow-3: rgba(232, 67, 10, .32);
+  --shadow: 0 12px 34px -12px rgba(0,0,0,.75);
+}
+
+/* the warm light behind the glass (fixed, so it never moves with long tables) */
+body { background: var(--bg); min-height: 100vh; }
+body::before {
+  content: ""; position: fixed; inset: -10vmax; z-index: -1; pointer-events: none;
+  background:
+    radial-gradient(38vmax 30vmax at 12% 8%, var(--glow-1), transparent 70%),
+    radial-gradient(34vmax 28vmax at 92% 18%, var(--glow-2), transparent 70%),
+    radial-gradient(40vmax 32vmax at 70% 96%, var(--glow-3), transparent 70%),
+    radial-gradient(30vmax 24vmax at 4% 88%, var(--glow-2), transparent 72%);
+  filter: blur(10px);
+  animation: glassdrift 38s ease-in-out infinite alternate;
+}
+@keyframes glassdrift { from { transform: translate3d(0, 0, 0) scale(1); } to { transform: translate3d(-2vmax, 1.5vmax, 0) scale(1.06); } }
+
+/* glass surfaces */
+.bar, .card, .kpi, .modal, .drawer-head, .toast, .tip, .chip, .drop, .notice {
+  border: 1px solid var(--glass-rim) !important;
+  border-top-color: var(--glass-edge) !important;
+  box-shadow: var(--glass-shade);
+}
+.bar, .card, .kpi, .modal, .toast, .tip {
+  background: var(--glass) !important;
+  -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur);
+}
+/* big tables: frosted but without a live blur (smooth scrolling with thousands of rows) */
+.card.table-card, .drawer-table { background: var(--glass-2) !important; -webkit-backdrop-filter: none; backdrop-filter: none; }
+
+.bar { border-width: 0 0 1px !important; border-radius: 0; background: color-mix(in srgb, var(--bg) 58%, transparent) !important; }
+.card, .kpi { border-radius: var(--r); }
+.kpi { position: relative; overflow: hidden; }
+.kpi::after { content: ""; position: absolute; inset: 0 0 auto; height: 48%; border-radius: inherit; pointer-events: none;
+  background: linear-gradient(180deg, rgba(255,255,255,.16), transparent); }
+.kpi .v { letter-spacing: -.01em; }
+
+/* top nav: a glass capsule, the open page an orange pill */
+.nav { padding: 3px; border-radius: 999px; background: var(--glass); border: 1px solid var(--glass-rim); box-shadow: var(--glass-shade); }
+.nav a { border-radius: 999px; padding: 6px 14px; transition: background .2s, color .2s; }
+.nav a:hover { background: var(--accent-soft); color: var(--ink); }
+.nav a.on { color: #fff; background: linear-gradient(180deg, #ff9a3c, #f06414); box-shadow: 0 1px 0 rgba(255,255,255,.45) inset, 0 6px 16px -6px rgba(240, 100, 20, .7); }
+
+/* buttons: glass capsules; primary is lit orange glass */
+.btn { border-radius: 999px; border: 1px solid var(--glass-rim); border-top-color: var(--glass-edge); background: var(--glass-2);
+  -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); box-shadow: 0 1px 0 rgba(255,255,255,.25) inset, 0 4px 12px -6px rgba(0,0,0,.25); }
+.btn:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--glass-rim)); }
+.btn.primary { color: #fff; border-color: rgba(255, 170, 100, .7); background: linear-gradient(180deg, #ffa24a 0%, #f2701e 55%, #e2550a 100%);
+  box-shadow: 0 1px 0 rgba(255,255,255,.55) inset, 0 -2px 6px rgba(150, 40, 0, .25) inset, 0 8px 20px -8px rgba(240, 100, 20, .75); text-shadow: 0 1px 1px rgba(120, 40, 0, .35); }
+.btn.primary:hover { filter: brightness(1.06) saturate(1.05); }
+.btn.danger { color: var(--bad); }
+
+/* segmented controls, filters and inputs */
+.seg { border-radius: 999px; border: 1px solid var(--glass-rim); background: var(--glass); padding: 2px; gap: 2px; }
+.seg button { border: 0 !important; border-radius: 999px; background: transparent; }
+.seg button.on, .seg button[aria-checked="true"] { color: #fff; background: linear-gradient(180deg, #ff9a3c, #f06414); box-shadow: 0 1px 0 rgba(255,255,255,.4) inset; }
+.filters select, .filters input[type="search"], .drawer-tools input, .form input, .form select, .mgrid input, .modal input, .modal select, .modal textarea {
+  border-radius: 12px; border: 1px solid var(--line-strong); background: var(--panel); }
+.filters select:focus, .filters input:focus, .form input:focus, .modal input:focus, .drawer-tools input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+
+/* chips and pills */
+.chip { background: var(--glass) !important; }
+.pill { border: 1px solid color-mix(in srgb, currentColor 18%, transparent); }
+
+/* tables */
+.ledger th, table.mini th, .preview th { background: var(--panel-2); }
+.ledger tr:hover td { background: var(--accent-soft); }
+.table-wrap { border-top-color: var(--line); }
+
+/* modal, drawer, toasts */
+.modal-back, .drawer-back { background: rgba(20, 10, 4, .38); -webkit-backdrop-filter: blur(6px) saturate(140%); backdrop-filter: blur(6px) saturate(140%); }
+.modal { border-radius: 24px; background: color-mix(in srgb, var(--bg) 72%, transparent) !important; }
+.pkm .modal-foot { background: color-mix(in srgb, var(--bg) 82%, transparent); -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur); border-radius: 0 0 24px 24px; }
+.drawer { background: color-mix(in srgb, var(--bg) 88%, transparent); -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur); border-left: 1px solid var(--glass-rim); }
+.drawer-head { background: var(--glass) !important; border-radius: 0; }
+.toast { color: var(--ink) !important; border-radius: 999px; padding: 10px 18px; border-left: 1px solid var(--glass-rim) !important; background: color-mix(in srgb, var(--bg) 70%, transparent) !important; }
+.tip { border-radius: 12px; }
+
+/* glass that the browser cannot blur (older devices): more solid, still readable */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .bar, .card, .kpi, .modal, .toast, .tip, .chip, .nav, .seg, .btn { background: var(--panel) !important; }
+}
+@media (prefers-reduced-motion: reduce) { body::before { animation: none; } }
+@media print { body::before { display: none; } .card, .kpi, .bar { background: #fff !important; box-shadow: none; backdrop-filter: none; } }
