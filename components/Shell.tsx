@@ -1,4 +1,6 @@
 'use client';
+import ThemeToggle from './ThemeToggle';
+import SmartCoach from './SmartCoach';
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
@@ -198,6 +200,7 @@ export default function Shell({ children, admin, allowGuest }: { children: React
           </nav>
           <div className="bar-right">
             <Credit compact />
+            <ThemeToggle />
             <span className={`live ${state === 'live' ? 'on' : state === 'offline' ? 'off' : ''}`} title={online.length ? 'Online: ' + online.join(', ') : ''}>
               <i />{liveText}
             </span>
@@ -255,6 +258,7 @@ export default function Shell({ children, admin, allowGuest }: { children: React
       )}
       {children}
       <footer className="site-foot"><Logo size={22} /><span>EFL 3PL · MAS AUTOMATE PICK SYSTEM · {APP_VERSION}{apiV ? ` · API ${apiV}` : ''}</span><Credit /></footer>
+      {!guest && <SmartCoach />}
       <div className="toasts" aria-live="polite">
         {toasts.map((t) => <div key={t.id} className="toast">{t.text}</div>)}
       </div>

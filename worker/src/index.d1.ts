@@ -586,12 +586,24 @@ async function broadcast(env: Env, msg: Record<string, unknown>) {
     : ['zinr', 'zcoment', 'korber', 'zroll', 'ztrr'].includes(src) ? ['c_pick_counts'] : [];
   // v142: the kept pick candidates (cand_cache) — a pick changes only the lines of its Material(s) ("mrev:<item>"); every other
   // change (an upload, the plan, the settings …) all of them ("drev")
-  const items = src === 'pick' && Array.isArray(msg.items) ? Array.from(new Set((msg.items as unknown[]).map((x) => normId(x)).filter(Boolean))) : null;
+  let items = src === 'pick' && Array.isArray(msg.items) ? Array.from(new Set((msg.items as unknown[]).map((x) => normId(x)).filter(Boolean))) : null;
+  // v147: the Korber item of each picked roll too (a roll can be picked for a line of another Material)
+  if (items && Array.isArray(msg.pallets) && msg.pallets.length) {
+    try {
+      const ks = (await env.DB.prepare('SELECT DISTINCT item FROM korber WHERE pallet IN (SELECT value FROM json_each(?))').bind(JSON.stringify((msg.pallets as unknown[]).map((x) => up(x)))).all<{ item: string }>()).results;
+      // and the Material of the ZINR lots whose ZCOMENT VIEW barcode is that roll (a line may list it through its Shade Report)
+      const zs = (await env.DB.prepare('SELECT DISTINCT z.material item FROM zcoment c JOIN zinr z ON z.rid = c.rid AND z.lot = c.lot WHERE c.barcode IN (SELECT value FROM json_each(?))').bind(JSON.stringify((msg.pallets as unknown[]).map((x) => up(x)))).all<{ item: string }>()).results;
+      items = Array.from(new Set([...items, ...ks.map((x) => normId(x.item)), ...zs.map((x) => normId(x.item))].filter(Boolean)));
+    } catch { items = null; } // not known: every kept result is worked out again
+  } else if (items && !Array.isArray(msg.pallets)) items = null; // v147: no rolls named → every kept result goes (safe)
+  // v147: a line status / hold, dispatch or a QI / Block release is not read by the kept results (pick candidates, Korber on
+  // the shelf, report counts): only "rev" moves (open pages reload)
+  const keepKept = msg.type === 'status' || src === 'dispatch' || src === 'release';
   const stamp = now();
   try {
     await env.DB.batch([
       env.DB.prepare("INSERT INTO config (k, v) VALUES ('rev', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(stamp),
-      ...(items && items.length
+      ...(keepKept ? [] : items && items.length
         ? items.map((it) => env.DB.prepare("INSERT INTO config (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind('c_mrev:' + it, stamp))
         : [env.DB.prepare("INSERT INTO config (k, v) VALUES ('c_drev', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(stamp)]),
       ...drop.map((d) => env.DB.prepare("DELETE FROM config WHERE k = ?1 OR k LIKE ?1 || ':%'").bind(d)),
@@ -609,7 +621,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 90; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 92; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1219,6 +1231,10 @@ async function handleBackup(env: Env, req: Request, p: string) {
 
 /** Every report of a Pick: its own upload, or the shared one it reads instead; rows = the rows it reads. */
 async function reportStatus(env: Env, rid: string) {
+  // v147: kept until an upload / clear / plan change (the row counts read whole reports)
+  return revCached(env, 'rstat|' + (env.DIV || 'active') + '|' + rid, [], () => reportStatus0(env, rid));
+}
+async function reportStatus0(env: Env, rid: string) {
   const sc = await scopeOf(env, rid);
   const last = async (src: string, r: string) => (await env.DB.prepare('SELECT src, file_name, row_count, uploaded_by, uploaded_at, rid FROM uploads WHERE src = ? AND rid = ? ORDER BY id DESC LIMIT 1').bind(src, r).first<Row>()) ?? null;
   const out: { src: string; own: Row | null; shared: Row | null; rows: number; uses: 'own' | 'shared' | 'none'; missing?: string[] }[] = [];
@@ -1635,16 +1651,17 @@ async function handlePullPlan(env: Env, req: Request) {
     try {
       const keys = Array.from(new Set(rs.map((r) => String(r.key))));
       if (keys.length && (await g.env.DB.prepare('SELECT /*exact*/ 1 FROM korber LIMIT 1').first())) {
-        const kr = (await g.env.DB.prepare(`WITH lk AS (SELECT DISTINCT value AS key, substr(value, 1, instr(value, '|') - 1) AS so,
+        // v147: kept per plan line until a pick of its Material (or of the Korber item of one of its rolls) or any other change
+        const kr = await kavCached(env, `kav|${hashStr(JSON.stringify(g.sc))}|${hashStr(keys.join(','))}`, keys, async (sub) => (await g.env.DB.prepare(`WITH lk AS (SELECT DISTINCT value AS key, substr(value, 1, instr(value, '|') - 1) AS so,
             substr(substr(value, instr(value, '|') + 1), 1, instr(substr(value, instr(value, '|') + 1), '|') - 1) AS li,
             substr(substr(value, instr(value, '|') + 1), instr(substr(value, instr(value, '|') + 1), '|') + 1) AS item FROM json_each(?1)),
           zl AS (SELECT lk.key, lk.item, z.lot, upper(z.vendor_batch) vb, upper(z.invoice) inv FROM lk JOIN zinr z ON z.so = lk.so AND z.li = lk.li AND z.material = lk.item),
-          kp AS (SELECT zl.key, k.pallet, k.qty FROM zl JOIN korber k ON k.item = zl.item AND upper(k.lot) = zl.vb AND (zl.inv IS NULL OR k.invoice IS NULL OR upper(k.invoice) = zl.inv)
-            UNION SELECT zl.key, k.pallet, k.qty FROM zl JOIN zcoment c ON c.lot = zl.lot JOIN korber k ON k.pallet = c.barcode),
+          kp AS (SELECT zl.key, k.pallet, k.qty, k.item kit FROM zl JOIN korber k ON k.item = zl.item AND upper(k.lot) = zl.vb AND (zl.inv IS NULL OR k.invoice IS NULL OR upper(k.invoice) = zl.inv)
+            UNION SELECT zl.key, k.pallet, k.qty, k.item kit FROM zl JOIN zcoment c ON c.lot = zl.lot JOIN korber k ON k.pallet = c.barcode),
           pk AS (SELECT pallet, SUM(qty) q, MAX(roll_qty) base FROM picks WHERE cancelled_at IS NULL AND pallet IN (SELECT pallet FROM kp) GROUP BY pallet)
           SELECT kp.key, ROUND(SUM(MAX(0, COALESCE(pk.base, kp.qty) - COALESCE(pk.q, 0))), 3) AS avail,
-            SUM(CASE WHEN COALESCE(pk.base, kp.qty) - COALESCE(pk.q, 0) > 0.0005 THEN 1 ELSE 0 END) AS rolls
-          FROM kp LEFT JOIN pk ON pk.pallet = kp.pallet GROUP BY kp.key`).bind(JSON.stringify(keys)).all<{ key: string; avail: number; rolls: number }>()).results;
+            SUM(CASE WHEN COALESCE(pk.base, kp.qty) - COALESCE(pk.q, 0) > 0.0005 THEN 1 ELSE 0 END) AS rolls, GROUP_CONCAT(DISTINCT kp.kit) its
+          FROM kp LEFT JOIN pk ON pk.pallet = kp.pallet GROUP BY kp.key`).bind(JSON.stringify(sub)).all<{ key: string; avail: number; rolls: number; its: string | null }>()).results);
         const by = new Map(kr.map((x) => [x.key, x]));
         for (const r of rs) { const x = by.get(String(r.key)); r.korber_avail = x ? Number(x.avail) : 0; r.korber_rolls = x ? Number(x.rolls) : 0; }
       }
@@ -2528,7 +2545,7 @@ async function handlePick(env: Env, req: Request, p: string) {
       if (qty > Number(t.can) + 0.0005) throw new HttpError(409, `${q0.so} / ${q0.li} can take ${t.can} (UR free ${t.ur_free}, ZINSR lot room ${t.lot_room}).`);
       const note = `Batch complete — ${line.so} / ${line.li} has used its ZINSR lot of batch ${t.batch}: roll ${pallet} ${qty} picked for ${normId(q0.so)} / ${normId(q0.li)} (same Item and LI, SO Plant ${t.plant ?? '–'}, ZINSR lot ${(t.lots as Row[]).map((l) => l.lot).join(', ')}, Vendor Batch ${info.vb}) by ${s.u}`;
       const id = await saveTallyPick(env, s.u, src, pallet, t, qty, info, note);
-      await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: 1, weeks: [week], items: [line.item, q0.item] });
+      await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: 1, weeks: [week], items: [line.item, q0.item], pallets: [pallet] });
       return json({ ok: true, id, pallet, so: normId(q0.so), li: normId(q0.li), qty });
     }
     throw new HttpError(405, 'Method not allowed.');
@@ -2598,7 +2615,7 @@ async function handlePick(env: Env, req: Request, p: string) {
       if (qty > Number(t.can) + 0.0005) throw new HttpError(409, `${b.so} / ${b.li} can take ${t.can} (UR free ${t.ur_free}, ZINSR lot ${t.lot_room}).`);
       if (String(info.k.pick_id ?? '0') !== '0' && String(info.k.pick_id ?? '') !== '') throw new HttpError(409, `Pallet ${b.pallet} is on Korber Pick Id ${info.k.pick_id}.`);
       const reqId = await saveTallyPick(env, s.u, src, up(b.pallet), t, qty, info);
-      await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: 1, weeks: [String(src.week)], items: [b.item, src.item] });
+      await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: 1, weeks: [String(src.week)], items: [b.item, src.item], pallets: [b.pallet] });
       return json({ ok: true, id: reqId, qty, so: normId(b.so), li: normId(b.li) });
     }
     throw new HttpError(405, 'Method not allowed.');
@@ -3009,7 +3026,7 @@ async function handlePick(env: Env, req: Request, p: string) {
     if (!picks.length) {
       if (!moves.length) throw new HttpError(400, 'Nothing to pick.');
       const moved = await saveMoves({ id: null, day, week: b.week, line: lineId, so: line.so, li: line.li, pick_no: txt(b.pickNo) });
-      await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: moved.length, weeks: [b.week], items: [line.item] });
+      await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: moved.length, weeks: [b.week], items: [line.item], pallets: moves.map((m) => m.pallet) });
       return json({ ok: true, id: null, seq: null, label: 'moved', day, qty: 0, rolls: 0, moved });
     }
     // each user's picks are numbered 1st, 2nd … per day (their own packing list)
@@ -3212,7 +3229,7 @@ async function handlePick(env: Env, req: Request, p: string) {
       try { moved = await saveMoves({ id: reqId, day, week: b.week, line: lineId, so: line.so, li: line.li, pick_no: txt(b.pickNo) }); }
       catch (e) { movedErr = e instanceof Error ? e.message : 'not saved'; }
     }
-    await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: picks.length + moved.length, weeks: [b.week], items: [line.item] });
+    await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: picks.length + moved.length, weeks: [b.week], items: [line.item], pallets: [...picks.map((p) => p.pallet), ...moves.map((m) => m.pallet)] });
     return json({ ok: true, id: reqId, seq, label: ordinal(seq), day, qty: total, rolls: picks.length, ...(moves.length ? { moved, ...(movedErr ? { movedErr } : {}) } : {}) });
   }
 
@@ -3305,7 +3322,7 @@ async function handlePick(env: Env, req: Request, p: string) {
       env.DB.prepare('UPDATE pick_req SET qty = (SELECT COALESCE(SUM(qty), 0) FROM picks WHERE req_id = ?1), rolls = (SELECT COUNT(*) FROM picks WHERE req_id = ?1) WHERE id = ?1').bind(r.req_id),
       env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(at, s.u, 'pick', `Rejected roll ${r.pallet} (${r.qty}) of ${r.so} / ${r.li} / ${r.item} — ${reason}`),
     ]);
-    await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: 1, weeks: [r.week], items: [r.item] });
+    await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: 1, weeks: [r.week], items: [r.item], pallets: [r.pallet] });
     return json({ ok: true });
   }
   if (part === 'rejects' && req.method === 'GET') {
@@ -3460,13 +3477,14 @@ async function handlePick(env: Env, req: Request, p: string) {
       const r = await env.DB.prepare('SELECT * FROM pick_req WHERE id = ?').bind(id).first<Row>();
       if (!r) throw new HttpError(404, 'That pick is gone.');
       mine(r.by_user);
+      const rpals = (await env.DB.prepare('SELECT DISTINCT pallet FROM picks WHERE req_id = ?').bind(id).all<{ pallet: string }>()).results.map((x) => x.pallet);
       await env.DB.batch([
         env.DB.prepare('DELETE FROM picks WHERE req_id = ?').bind(id),
         env.DB.prepare('DELETE FROM pick_req WHERE id = ?').bind(id),
         renumber(r.day, r.by_user),
         env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(at, s.u, 'pick', `Deleted pick ${ordinal(Number(r.seq))} ${r.day} of ${r.by_user}: ${r.so} / ${r.li} — ${r.rolls} roll(s), ${r.qty}`),
       ]);
-      await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: 0, weeks: [r.week], items: [r.item] });
+      await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: 0, weeks: [r.week], items: [r.item], pallets: rpals });
     } else {
       const r = await env.DB.prepare('SELECT p.*, q.day AS req_day FROM picks p JOIN pick_req q ON q.id = p.req_id WHERE p.id = ?').bind(id).first<Row>();
       if (!r) throw new HttpError(404, 'That roll pick is gone.');
@@ -3479,7 +3497,7 @@ async function handlePick(env: Env, req: Request, p: string) {
         renumber(r.req_day, r.by_user),
         env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(at, s.u, 'pick', `Removed roll ${r.pallet} (${r.qty}) from a pick of ${r.by_user} (${r.so} / ${r.li})`),
       ]);
-      await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: 0, weeks: [r.week], items: [r.item] });
+      await broadcast(env, { type: 'data', src: 'pick', by: s.u, rows: 0, weeks: [r.week], items: [r.item], pallets: [r.pallet] });
     }
     return json({ ok: true });
   }
@@ -3678,7 +3696,7 @@ async function sapFit(env: Env, ctx: Awaited<ReturnType<typeof sapLineCtx>>, pal
   if (!ps.length) return out;
   const J = JSON.stringify(ps);
   const ks = new Map((await env.DB.prepare('SELECT * FROM korber WHERE pallet IN (SELECT value FROM json_each(?))').bind(J).all<Row>()).results.map((k) => [up(k.pallet), k]));
-  const zcs = (await env.DB.prepare('SELECT barcode, lot, batch, vendor_batch, roll_no, shade FROM zcoment WHERE barcode IN (SELECT value FROM json_each(?))').bind(J).all<Row>()).results;
+  const zcs = (await env.DB.prepare('SELECT /*exact*/ barcode, lot, batch, vendor_batch, roll_no, shade FROM zcoment WHERE barcode IN (SELECT value FROM json_each(?))').bind(J).all<Row>()).results;
   const zrs = (await env.DB.prepare('SELECT barcode, batch, bin, status, so, li FROM zroll WHERE barcode IN (SELECT value FROM json_each(?))').bind(J).all<Row>()).results;
   const st = await getSettings(env);
   const rule = binRule(st), bin = rule.mode === 'only' ? rule.only : 'Bin';
@@ -3908,30 +3926,125 @@ async function batchLotQty(env: Env, so: unknown, li: unknown, item: unknown) {
  * "Needs manual" check) is read back instead of worked out again. Kept 15 minutes at most.
  */
 let candCacheReady = false;
-async function candCached<T>(env: Env, id: string, make: () => Promise<T>): Promise<T> {
-  let rev = '', st = '';
+/**
+ * v147: a result kept until something it reads changes. It depends on
+ *   - "c_drev": every change that is not a pick of known Materials (an upload, the plan, the settings, a hold …);
+ *   - the settings;
+ *   - "c_mrev:<Material>" of each Material it covers: the line's own, and the Korber item of every roll in the result
+ *     (found in the result itself) — a pick bumps the line's Material and the Korber item of each picked roll.
+ * A pick made while the result was being worked out (its stamp is newer than the start) is never kept. 15 minutes at most.
+ */
+const ITEM_RE = /"item":"([^"]*)"/g;
+async function revCached<T>(env: Env, id: string, base: string[], make: () => Promise<T>): Promise<T> {
   try {
     if (!candCacheReady) { await env.DB.prepare('CREATE TABLE IF NOT EXISTS cand_cache (k TEXT PRIMARY KEY, rev TEXT NOT NULL, at TEXT NOT NULL, v TEXT NOT NULL)').run(); candCacheReady = true; }
-    // the line's Material (id = week|so|li|item|date|rid): its own pick changes, and every other change
-    const item = normId(String(id).split('|')[3] ?? '');
     const [r1, r2] = await env.DB.batch([
-      env.DB.prepare("SELECT k, v FROM config WHERE k IN ('c_drev', 'settings', ?)").bind('c_mrev:' + item),
+      env.DB.prepare("SELECT k, v FROM config WHERE k IN ('c_drev', 'settings')"),
       env.DB.prepare('SELECT rev, at, v FROM cand_cache WHERE k = ?').bind(id),
     ]);
-    let mrev = '';
-    for (const x of r1.results as Row[]) { if (x.k === 'c_drev') rev = String(x.v ?? ''); else if (x.k === 'settings') st = String(x.v ?? ''); else mrev = String(x.v ?? ''); }
-    const tag = `${API_VERSION}|${rev}|${mrev}|${st.length}:${hashStr(st)}`;
+    let drev = '', st = '';
+    for (const x of r1.results as Row[]) { if (x.k === 'c_drev') drev = String(x.v ?? ''); else st = String(x.v ?? ''); }
+    const head = `${API_VERSION}|${drev}|${st.length}:${hashStr(st)}`;
+    const mrevs = async (items: string[]) => {
+      const m: Record<string, string> = {};
+      if (!items.length) return m;
+      for (const x of (await env.DB.prepare("SELECT k, v FROM config WHERE k IN (SELECT 'c_mrev:' || value FROM json_each(?))").bind(JSON.stringify(items)).all<Row>()).results) m[String(x.k).slice(7)] = String(x.v ?? '');
+      return m;
+    };
     const hit = (r2.results as Row[])[0];
-    if (hit && hit.rev === tag && Date.now() - Date.parse(String(hit.at)) < 15 * 60e3) return JSON.parse(String(hit.v)) as T;
+    if (hit && Date.now() - Date.parse(String(hit.at)) < 15 * 60e3) {
+      try {
+        const tag = JSON.parse(String(hit.rev)) as { h: string; m: Record<string, string> };
+        if (tag.h === head) {
+          const cur = await mrevs(Object.keys(tag.m));
+          if (Object.keys(tag.m).every((k) => (cur[k] ?? '') === tag.m[k])) return JSON.parse(String(hit.v)) as T;
+        }
+      } catch { /* an older tag: worked out again */ }
+    }
+    const t0 = now();
     const v = await make();
     try {
+      const txt = JSON.stringify(v);
+      const deps = new Set(base.map((x) => normId(x)).filter(Boolean));
+      for (const m of txt.matchAll(ITEM_RE)) { const it = normId(m[1]); if (it) deps.add(it); }
+      const m = await mrevs(Array.from(deps));
+      const tag: Record<string, string> = {};
+      for (const it of deps) tag[it] = m[it] ?? '';
+      // a pick of one of these Materials while it was worked out: not kept (the next ask works it out again)
+      if (Object.values(tag).some((x) => x && x > t0) || txt.length > 1_500_000) return v;
       await env.DB.batch([
         env.DB.prepare('DELETE FROM cand_cache WHERE at < ?').bind(new Date(Date.now() - 15 * 60e3).toISOString()),
-        env.DB.prepare('INSERT OR REPLACE INTO cand_cache (k, rev, at, v) VALUES (?,?,?,?)').bind(id, tag, now(), JSON.stringify(v)),
+        env.DB.prepare('INSERT OR REPLACE INTO cand_cache (k, rev, at, v) VALUES (?,?,?,?)').bind(id, JSON.stringify({ h: head, m: tag }), now(), txt),
       ]);
     } catch { /* only a cache */ }
     return v;
   } catch { return make(); }
+}
+/**
+ * v147: the Korber rolls on the shelf of each plan line (Day / Week plan), kept per line: a line is worked out again only
+ * when a pick changed its Material or the Korber item of one of its rolls ("c_mrev:<item>"), or anything else changed
+ * ("c_drev"). Only the changed lines are read again; a pick made while they were read is not kept.
+ */
+async function kavCached(env: Env, id: string, keys: string[], run: (sub: string[]) => Promise<{ key: string; avail: number; rolls: number; its: string | null }[]>) {
+  type E = { a: number; r: number; d: Record<string, string>; t: number };
+  const out = new Map<string, { key: string; avail: number; rolls: number }>();
+  let drev = '', entries: Record<string, E> = {}, ok = false;
+  try {
+    if (!candCacheReady) { await env.DB.prepare('CREATE TABLE IF NOT EXISTS cand_cache (k TEXT PRIMARY KEY, rev TEXT NOT NULL, at TEXT NOT NULL, v TEXT NOT NULL)').run(); candCacheReady = true; }
+    const [r1, r2] = await env.DB.batch([
+      env.DB.prepare("SELECT v FROM config WHERE k = 'c_drev'"),
+      env.DB.prepare('SELECT rev, at, v FROM cand_cache WHERE k = ?').bind(id),
+    ]);
+    drev = String((r1.results as Row[])[0]?.v ?? '');
+    const hit = (r2.results as Row[])[0];
+    if (hit && hit.rev === `${API_VERSION}|${drev}`) entries = JSON.parse(String(hit.v)) as Record<string, E>;
+    for (const k of Object.keys(entries)) if (!(Date.now() - Number(entries[k].t) < 15 * 60e3)) delete entries[k]; // each line 15 minutes at most
+    ok = true;
+  } catch { /* no cache: all worked out */ }
+  const itemOf = (k: string) => normId(k.split('|')[2] ?? '');
+  const mrevs = async (items: string[]) => {
+    const m: Record<string, string> = {};
+    if (!ok || !items.length) return m;
+    for (const x of (await env.DB.prepare("SELECT k, v FROM config WHERE k IN (SELECT 'c_mrev:' || value FROM json_each(?))").bind(JSON.stringify(items)).all<Row>()).results) m[String(x.k).slice(7)] = String(x.v ?? '');
+    return m;
+  };
+  const kept = keys.filter((k) => entries[k]);
+  const cur = await mrevs(Array.from(new Set(kept.flatMap((k) => Object.keys(entries[k].d)))));
+  const stale = keys.filter((k) => !entries[k] || Object.entries(entries[k].d).some(([it, v]) => (cur[it] ?? '') !== v));
+  for (const k of keys) if (!stale.includes(k)) out.set(k, { key: k, avail: entries[k].a, rolls: entries[k].r });
+  if (stale.length) {
+    const t0 = now();
+    const rows = await run(stale);
+    const by = new Map(rows.map((x) => [String(x.key), x]));
+    const deps = new Map<string, string[]>();
+    for (const k of stale) {
+      const x = by.get(k);
+      out.set(k, { key: k, avail: x ? Number(x.avail) : 0, rolls: x ? Number(x.rolls) : 0 });
+      deps.set(k, Array.from(new Set([itemOf(k), ...String(x?.its ?? '').split(',').map((t) => normId(t))].filter(Boolean))));
+    }
+    const m = await mrevs(Array.from(new Set(Array.from(deps.values()).flat())));
+    for (const k of stale) {
+      const d: Record<string, string> = {};
+      for (const it of deps.get(k)!) d[it] = m[it] ?? '';
+      if (Object.values(d).some((v) => v && v > t0)) { delete entries[k]; continue; } // picked meanwhile: not kept
+      entries[k] = { a: out.get(k)!.avail, r: out.get(k)!.rolls, d, t: Date.now() };
+    }
+    if (ok) {
+      const keep: Record<string, E> = {};
+      for (const k of keys) if (entries[k]) keep[k] = entries[k];
+      try {
+        await env.DB.batch([
+          env.DB.prepare('DELETE FROM cand_cache WHERE at < ?').bind(new Date(Date.now() - 15 * 60e3).toISOString()),
+          env.DB.prepare('INSERT OR REPLACE INTO cand_cache (k, rev, at, v) VALUES (?,?,?,?)').bind(id, `${API_VERSION}|${drev}`, now(), JSON.stringify(keep)),
+        ]);
+      } catch { /* only a cache */ }
+    }
+  }
+  return Array.from(out.values());
+}
+/** The candidate rolls of a plan line (id = week|so|li|item|date|rid), kept until anything they read changes. */
+async function candCached<T>(env: Env, id: string, make: () => Promise<T>): Promise<T> {
+  return revCached(env, 'cand|' + id, [normId(String(id).split('|')[3] ?? '')], make);
 }
 function hashStr(t: string) { let h = 2166136261; for (let i = 0; i < t.length; i++) { h ^= t.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36); }
 async function palletPicks(env: Env, pallet: unknown) {
@@ -4078,7 +4191,7 @@ async function makeGate(env: Env) {
     const out = new Set<string>();
     // and, when ZROLLMGT has the roll's System Batch, it must be one of the line's ZMMBE batches
     const fine = (z: Row) => !rowWhy(z) && (!batches?.size || !z.batch || batches.has(normId(z.batch)));
-    const zr = (await env.DB.prepare('SELECT barcode, bin, batch, status, qty FROM zroll WHERE barcode IN (SELECT value FROM json_each(?))').bind(JSON.stringify(ps)).all<Row>()).results;
+    const zr = (await env.DB.prepare('SELECT /*exact*/ barcode, bin, batch, status, qty FROM zroll WHERE barcode IN (SELECT value FROM json_each(?))').bind(JSON.stringify(ps)).all<Row>()).results;
     for (const z of zr) if (fine(z)) out.add(up(z.barcode));
     // a Korber pallet whose ZROLLMGT barcode is written another way (same roll number)
     const rest = ps.filter((x) => !zr.some((z) => up(z.barcode) === x));
@@ -4177,7 +4290,7 @@ async function trimItem(env: Env, item: string, stock: Row[]): Promise<string> {
     trimHdr.set(dk, ix);
   }
   if (ix < 0) return '';
-  const k = await env.DB.prepare('SELECT raw FROM korber WHERE item = ? LIMIT 1').bind(item).first<{ raw: string | null }>();
+  const k = await env.DB.prepare('SELECT /*exact*/ raw FROM korber WHERE item = ? LIMIT 1').bind(item).first<{ raw: string | null }>();
   try { const d = String((JSON.parse(String(k?.raw ?? '[]')) as unknown[])[ix] ?? ''); const m = TRIM_WORDS.exec(d); return m ? up(m[1]) : ''; } catch { return ''; }
 }
 async function pickCandidates(env: Env, week: string, key: string, date: string, line: Row, srid: string = week) {
@@ -4297,7 +4410,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
     const rows0 = (await env.DB.prepare('SELECT * FROM zcoment WHERE lot = ? ORDER BY sys_roll, roll_no').bind(lot.lot).all<Row>()).results;
     lotInfo.push({ lot: lot.lot, batch: lot.batch, qty: lot.qty, need: lot.lot_need, picked: lot.lot_picked, cap: Math.max(0, r3((Number(lot.qty) || 0) - (Number(lot.lot_picked) || 0))), ur: lot.zmmbe_ur, qty_ok: true, invoice: lot.invoice, po: lot.po, vendor_batch: lot.vendor_batch, sloc: lot.sloc, rolls: rows0.length, roll_sum: 0, noShade: !rows0.length });
     // the Korber rolls of this lot's invoice + item (must), Pick Id 0
-    const base0 = (await env.DB.prepare(`SELECT * FROM korber WHERE item = ? AND ${PICKABLE}`).bind(normId(lot.material)).all<Row>()).results.filter((k) => !lot.invoice || invRoot(k.invoice) === invRoot(lot.invoice));
+    const base0 = (await env.DB.prepare(`SELECT /*exact*/ * FROM korber WHERE item = ? AND ${PICKABLE}`).bind(normId(lot.material)).all<Row>()).results.filter((k) => !lot.invoice || invRoot(k.invoice) === invRoot(lot.invoice));
     // ZROLLMGT check: a roll without a ZCOMENT barcode is picked only when its Korber Pallet is in ZROLLMGT at the bin
     const okBin = await gate.atBin(base0.map((k) => String(k.pallet)), urBatches);
     const base = base0.filter((k) => okBin.has(up(k.pallet)));
@@ -4435,7 +4548,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
   if (trims) {
     const bts = [...stock].filter((x) => Number(x.ur) > 0).sort((a, b) => Number(b.ur) - Number(a.ur)).map((x) => String(x.batch));
     if (bts.length) {
-      const ks = (await env.DB.prepare(`SELECT * FROM korber WHERE item = ? AND ${PICKABLE} ORDER BY fifo IS NULL, fifo, lot, supplier_hu`).bind(normId(line.item)).all<Row>()).results;
+      const ks = (await env.DB.prepare(`SELECT /*exact*/ * FROM korber WHERE item = ? AND ${PICKABLE} ORDER BY fifo IS NULL, fifo, lot, supplier_hu`).bind(normId(line.item)).all<Row>()).results;
       for (const k of ks) {
         if (rejected.has(up(k.pallet))) { rejectedSkip++; continue; }
         const c = await korberBase(k, { lot: '', batch: bts[0] }, { insp_lots: [], batches: bts, parts: undefined, checks: {}, warnings: [], needsConfirm: false,
@@ -4453,7 +4566,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
     const mat = normId(line.item);
     for (const st of stock.filter((x) => Number(x.ur) > 0)) {
       const bt = normId(st.batch);
-      const zr0 = (await env.DB.prepare('SELECT barcode, bin, batch, status, material, qty, pcore, so, li FROM zroll WHERE batch = ?').bind(bt).all<Row>()).results;
+      const zr0 = (await env.DB.prepare('SELECT /*exact*/ barcode, bin, batch, status, material, qty, pcore, so, li FROM zroll WHERE batch = ?').bind(bt).all<Row>()).results;
       // the same Material (a ZROLLMGT row without Material counts; the Korber item is checked below)
       const zr = zr0.filter((z) => !z.material || normId(z.material) === mat || normId(z.material) === normId(st.material));
       if (!zr.length) { steps.push(`Batch ${st.batch}: ZROLLMGT has no roll with System Batch ${bt}${zr0.length ? ` of material ${mat} (${zr0.length} of another material)` : ''}.`); continue; }
@@ -4549,7 +4662,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
   // every line (SO / LI order, each SO line its lots' QTY), so two lines are not given the same rolls.
   for (const bt of trims ? [] : urBatches) {
     const lotsAll = (await env.DB.prepare(`SELECT /*exact*/ z.lot, z.qty, z.so, z.li FROM zinr z WHERE z.material = ?1 AND z.batch = ?2
-      AND EXISTS (SELECT 1 FROM stock s WHERE s.src = 'zmmbe' AND s.so = z.so AND s.li = z.li AND s.material = z.material AND s.batch = z.batch AND s.ur > 0) ORDER BY z.so, z.li, z.lot`).bind(normId(line.item), bt).all<Row>()).results;
+      AND EXISTS (SELECT 1 FROM stock s WHERE s.src = 'zmmbe' AND s.so = z.so AND s.li = z.li AND s.material = z.material AND s.batch = z.batch AND s.ur > 0) ORDER BY +z.so, z.li, z.lot`).bind(normId(line.item), bt).all<Row>()).results;
     const sol = (x: Row) => `${normId(x.so)}/${normId(x.li)}`;
     const me = `${normId(line.so)}/${normId(line.li)}`;
     if (new Set(lotsAll.map(sol)).size < 2) continue;
@@ -5038,12 +5151,98 @@ async function handleAdminPlans(env: Env, req: Request) {
   throw new HttpError(400, 'Unknown action.');
 }
 
+// ---------------------------------------------------------------- v148 Smart Coach
+/**
+ * Advice learned from the system's own history (last 30 days of picks, rejects and uploads) — counts only, nothing is
+ * changed. The team numbers are worked out at most every 15 minutes (kept, see revCached); the user's own tips are chosen
+ * from them for each request.
+ */
+type Tip = { id: string; icon: string; tone: 'ok' | 'warn' | 'bad' | 'info' | 'accent'; title: string; text: string; who?: string };
+async function adviceStats(env: Env) {
+  const since = new Date(Date.now() + 5.5 * 3600e3 - 30 * 86400e3).toISOString().slice(0, 10);
+  const reqs = (await env.DB.prepare('SELECT by_user u, day, at, kind, auto, short, closed, item mat, qty, need FROM pick_req WHERE day >= ? AND cancelled_at IS NULL').bind(since).all<Row>()).results;
+  const rej = (await env.DB.prepare('SELECT reason, item mat, by_user u, day FROM pick_reject WHERE day >= ?').bind(since).all<Row>()).results;
+  const notes = (await env.DB.prepare("SELECT p.note, r.by_user u FROM pick_req r JOIN picks p ON p.req_id = r.id WHERE r.day >= ? AND r.cancelled_at IS NULL AND p.cancelled_at IS NULL AND p.note LIKE '%Confirmed%'").bind(since).all<Row>()).results;
+  const tallied = Number((await env.DB.prepare("SELECT COUNT(*) n FROM pick_req r JOIN picks p ON p.req_id = r.id WHERE r.day >= ? AND r.cancelled_at IS NULL AND p.note LIKE 'Cut roll balance tallied%'").bind(since).first<{ n: number }>())?.n ?? 0);
+  const ups = (await env.DB.prepare("SELECT src, uploaded_at FROM uploads WHERE src IN ('korber', 'zroll', 'zmmbe') AND uploaded_at >= ?").bind(since).all<Row>()).results;
+  const lk = (iso: unknown) => new Date(Date.parse(String(iso)) + 5.5 * 3600e3); // Sri Lanka time
+  const users: Record<string, { lines: number; auto: number; short: number; days: Record<string, number>; confirms: number; rejects: number; offsite: number }> = {};
+  const U = (u: unknown) => (users[String(u || '–')] ??= { lines: 0, auto: 0, short: 0, days: {}, confirms: 0, rejects: 0, offsite: 0 });
+  const hours = new Array(24).fill(0);
+  const shortBy: Record<string, number> = {}, linesBy: Record<string, number> = {};
+  const firstPick: Record<string, string> = {};
+  for (const r of reqs) {
+    const x = U(r.u); x.lines++; if (Number(r.auto)) x.auto++; if (Number(r.short) > 1e-9) x.short++; if (r.kind === 'offsite') x.offsite++;
+    x.days[String(r.day)] = (x.days[String(r.day)] ?? 0) + 1;
+    const m = normId(r.mat); linesBy[m] = (linesBy[m] ?? 0) + 1; if (Number(r.short) > 1e-9) shortBy[m] = (shortBy[m] ?? 0) + 1;
+    if (r.at) { hours[lk(r.at).getUTCHours()]++; const d = String(r.day); if (!firstPick[d] || String(r.at) < firstPick[d]) firstPick[d] = String(r.at); }
+  }
+  const reasons: Record<string, number> = {}, rejMat: Record<string, number> = {};
+  for (const r of rej) { U(r.u).rejects++; const k = String(r.reason || '–').trim().slice(0, 60).toLowerCase(); reasons[k] = (reasons[k] ?? 0) + 1; const m = normId(r.mat); rejMat[m] = (rejMat[m] ?? 0) + 1; }
+  const confirmKinds: Record<string, number> = {};
+  for (const n of notes) {
+    U(n.u).confirms++;
+    const t = String(n.note ?? '');
+    const k = /over ZINSR lot/i.test(t) ? 'lot' : /not a ZINSR lot/i.test(t) ? 'notlot' : 'other';
+    confirmKinds[k] = (confirmKinds[k] ?? 0) + 1;
+  }
+  // days on which the Korber Inventory was uploaded after picking had started
+  const korberDays: Record<string, string[]> = {};
+  for (const u0 of ups) if (u0.src === 'korber') { const d = lk(u0.uploaded_at).toISOString().slice(0, 10); (korberDays[d] ??= []).push(String(u0.uploaded_at)); }
+  let lateKorber = 0, pickDays = 0;
+  for (const [d, at] of Object.entries(firstPick)) { pickDays++; if ((korberDays[d] || []).some((t) => t > at) && !(korberDays[d] || []).some((t) => t <= at)) lateKorber++; }
+  const top = (o: Record<string, number>, n = 3) => Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, n);
+  return { since, total: reqs.length, users, hours, shortTop: top(shortBy).map(([m, n]) => ({ mat: m, n, of: linesBy[m] ?? n })), reasons: top(reasons), rejTop: top(rejMat, 1),
+    confirms: notes.length, confirmKinds, tallied, lateKorber, pickDays, rejects: rej.length };
+}
+function adviceFor(st: Awaited<ReturnType<typeof adviceStats>>, me: string): Tip[] {
+  const tips: Tip[] = [];
+  const pct = (a: number, b: number) => (b ? Math.round((a / b) * 100) : 0);
+  const mine = st.users[me];
+  const today = new Date(Date.now() + 5.5 * 3600e3).toISOString().slice(0, 10);
+  const people = Object.entries(st.users).filter(([u]) => u !== '–');
+  if (!st.total) return [{ id: 'start', icon: '👋', tone: 'info', title: 'Learning from your picks', text: 'No picks in the last 30 days yet. As you pick, the system learns which Materials run short, why rolls are rejected and when you are busiest — and gives tips here.' }];
+  // personal pace today
+  if (mine) {
+    const days = Object.keys(mine.days).filter((d) => d !== today);
+    const avg = days.length ? mine.lines - (mine.days[today] ?? 0) : 0;
+    const per = days.length ? avg / days.length : 0;
+    const t = mine.days[today] ?? 0;
+    if (per > 0) tips.push({ id: 'pace', icon: t >= per ? '🚀' : '⏱️', tone: t >= per ? 'ok' : 'info', title: t >= per ? 'Ahead of your usual day' : 'Your day so far',
+      text: `Today you picked ${t} line${t === 1 ? '' : 's'} — your usual day is about ${Math.round(per)} (last 30 days).${t >= per ? ' Great pace!' : ''}` });
+    const ap = pct(mine.auto, mine.lines);
+    const best = people.filter(([, x]) => x.lines >= 10).sort((a, b) => pct(b[1].auto, b[1].lines) - pct(a[1].auto, a[1].lines))[0];
+    if (mine.lines >= 10 && ap < 50) tips.push({ id: 'auto', icon: '⚡', tone: 'accent', title: 'Let Pick all matched do the easy lines',
+      text: `Only ${ap}% of your ${mine.lines} lines were picked by ⚡ Pick all matched${best && best[0] !== me ? ` (${best[0]}: ${pct(best[1].auto, best[1].lines)}%)` : ''}. Run it first, then pick the Needs-manual lines by hand.` });
+    if (mine.confirms >= 5) tips.push({ id: 'confirm', icon: '🧭', tone: 'warn', title: '“Pick anyway” used often',
+      text: `${mine.confirms} of your rolls were picked with “I checked — pick anyway”. Picking a roll of the batch the system names keeps the SAP batch QTY right.` });
+  }
+  for (const x of st.shortTop.filter((x) => x.n >= 2).slice(0, 2)) tips.push({ id: 'short-' + x.mat, icon: '📉', tone: 'bad', title: `Material ${x.mat} often runs short`,
+    text: `It was short in ${x.n} of its ${x.of} picks (last 30 days). Check its ZMMBE UR and ZINR before the plan goes out.` });
+  if (st.reasons.length && st.rejects >= 3) {
+    const [r, n] = st.reasons[0];
+    tips.push({ id: 'reject', icon: '🔍', tone: 'warn', title: 'Most rejected rolls', text: `${st.rejects} rolls were rejected — ${n} for “${r}”${st.rejTop[0] ? `, most of Material ${st.rejTop[0][0]}` : ''}. Check that first when you open those rolls.` });
+  }
+  const peak = st.hours.indexOf(Math.max(...st.hours));
+  if (st.total >= 20) {
+    const h = (x: number) => `${((x + 11) % 12) + 1}${x < 12 ? ' AM' : ' PM'}`;
+    tips.push({ id: 'peak', icon: '🕙', tone: 'info', title: 'Busiest pick hour', text: `${h(peak)}–${h((peak + 1) % 24)} has ${pct(st.hours[peak], st.total)}% of all picks. Upload Korber Inventory and ZROLLMGT before then so no roll is missed.` });
+  }
+  if (st.lateKorber >= 2) tips.push({ id: 'late', icon: '📦', tone: 'warn', title: 'Korber uploaded after picking started', text: `On ${st.lateKorber} of ${st.pickDays} days the first pick was made before that day's Korber Inventory upload. Upload it first — the rolls on the shelf then match.` });
+  if (st.tallied) tips.push({ id: 'tally', icon: '🧵', tone: 'ok', title: 'Cut roll balances are working for you', text: `${st.tallied} cut roll balance${st.tallied === 1 ? ' was' : 's were'} tallied to other SO lines. Keep “Tally cut roll balances” on when you download the Packing List.` });
+  const week = new Date(Date.now() + 5.5 * 3600e3 - 6 * 86400e3).toISOString().slice(0, 10);
+  const lead = people.map(([u, x]) => [u, Object.entries(x.days).filter(([d]) => d >= week).reduce((t, [, n]) => t + n, 0)] as const).sort((a, b) => b[1] - a[1])[0];
+  if (lead && lead[1] > 0) tips.push({ id: 'lead', icon: '🏆', tone: 'accent', title: 'Top picker this week', text: `${lead[0] === me ? 'You' : lead[0]} — ${lead[1]} lines in the last 7 days.${lead[0] === me ? ' Keep it up!' : ''}`, who: lead[0] });
+  return tips;
+}
 // ---------------------------------------------------------------- D1 meter
 /** Counts the rows D1 reads and writes for one request (sent back as x-d1-rows-read / x-d1-rows-written). */
 interface Meter { read: number; written: number; queries: number }
 type Meta = { rows_read?: number; rows_written?: number } | undefined;
+const QLOG = { on: false, min: 300 }; // local profiling only (wrangler dev --var QLOG:1)
 function meterDb(db: D1Database, m: Meter): D1Database {
-  const note = (meta: Meta, sql = '') => { m.queries++; m.read += meta?.rows_read ?? 0; m.written += meta?.rows_written ?? 0; };
+  const note = (meta: Meta, sql = '') => { m.queries++; m.read += meta?.rows_read ?? 0; m.written += meta?.rows_written ?? 0;
+    if (QLOG.on && (meta?.rows_read ?? 0) >= QLOG.min) console.log('QLOG', meta?.rows_read, String(sql).replace(/\s+/g, ' ').slice(0, 260)); };
   const wrapStmt = (st: D1PreparedStatement, sql = ''): D1PreparedStatement => new Proxy(st, {
     get(t, k) {
       if (k === '__t') return t;
@@ -5108,6 +5307,7 @@ export default {
     const url = new URL(req.url);
     const meter: Meter = { read: 0, written: 0, queries: 0 };
     const rawDb = env.DB; // the users database, not metered: the day's live data is kept there
+    QLOG.on = String((env as unknown as { QLOG?: string }).QLOG ?? '') === '1';
     if (env.DB) env = { ...env, DB: meterDb(env.DB, meter) };
     const cors = corsHeaders(env, req);
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
@@ -5263,6 +5463,11 @@ export default {
         res = json({ activity: r.results });
       } else if (p.startsWith('/api/users')) res = await handleUsers(env, req, p);
       else if (p.startsWith('/api/data/') && req.method === 'DELETE') res = await handleClear(env, req, p.split('/').pop() || '');
+      else if (p === '/api/advice' && req.method === 'GET') {
+        const s = await requireUser(env, req);
+        const st = await revCached(env, 'adv|' + (env.DIV || 'active'), [], () => adviceStats(env));
+        res = json({ tips: adviceFor(st, s.u), learned: { since: st.since, picks: st.total, users: Object.keys(st.users).length } });
+      }
       else if (p === '/api/online') {
         // v126: who is signed in now — each open tab says "I am here" every minute (POST); a tab not heard from for 2.5
         // minutes is not counted; signing out removes the tab (DELETE). Kept in the users database (both systems).
