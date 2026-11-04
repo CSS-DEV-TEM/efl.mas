@@ -24,11 +24,11 @@ export default function LoginPage() {
       const ds = userDivs(r.user);
       if (!ds.includes(div)) {
         // no access to the chosen system: the user's own system opens, or the sign-in stops when there is a choice to make
-        if (ds.length === 1) { setDiv(ds[0]); saveSession(r); router.replace('/'); return; }
+        if (ds.length === 1) { setDiv(ds[0]); saveSession(r); try { localStorage.setItem('mas-welcome', String(Date.now())); } catch { /* */ } router.replace('/'); return; }
         clearSession(); throw new Error(`${r.user.username} has no access to ${DIV_NAME[div]}.`);
       }
       setDiv(div);
-      saveSession(r);
+      saveSession(r); try { localStorage.setItem('mas-welcome', String(Date.now())); } catch { /* */ }
       router.replace('/');
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Sign in failed.');

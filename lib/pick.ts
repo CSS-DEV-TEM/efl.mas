@@ -82,6 +82,8 @@ export interface Candidates {
   need: number; picked: number; stock: { batch: string; ur: number; sloc: string }[]; lots: LotInfo[]; rolls: Candidate[]; steps: string[];
   /** ZROLLMGT check: rolls of this line that cannot be picked, and why */
   blocked?: BlockedRoll[]; gate?: { on: boolean; bin: string; loaded: boolean };
+  /** v143: INTERLINING / FUSIBLE line */
+  trim?: boolean;
 }
 export interface BlockedRoll { lot: string; batch: string | null; roll_no: string | null; barcode: string | null; shade: string | null; pallet: string | null; qty: number | null; why: string }
 export interface PickReq { id: number; day: string; seq: number; pick_no: string | null; week: string; line: string; so: string; li: string; item: string; plant: string | null; need: number; qty: number; rolls: number; by_user: string; at: string; cancelled_at: string | null; cancelled_by: string | null; match?: string | null; kind?: string | null; closed?: number | null; short?: number | null;

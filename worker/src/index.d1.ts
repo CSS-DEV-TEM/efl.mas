@@ -621,7 +621,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 92; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 93; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -5157,7 +5157,7 @@ async function handleAdminPlans(env: Env, req: Request) {
  * changed. The team numbers are worked out at most every 15 minutes (kept, see revCached); the user's own tips are chosen
  * from them for each request.
  */
-type Tip = { id: string; icon: string; tone: 'ok' | 'warn' | 'bad' | 'info' | 'accent'; title: string; text: string; who?: string };
+type Tip = { id: string; icon: string; tone: 'ok' | 'warn' | 'bad' | 'info' | 'accent'; title: string; text: string; si?: string; who?: string };
 async function adviceStats(env: Env) {
   const since = new Date(Date.now() + 5.5 * 3600e3 - 30 * 86400e3).toISOString().slice(0, 10);
   const reqs = (await env.DB.prepare('SELECT by_user u, day, at, kind, auto, short, closed, item mat, qty, need FROM pick_req WHERE day >= ? AND cancelled_at IS NULL').bind(since).all<Row>()).results;
@@ -5178,7 +5178,8 @@ async function adviceStats(env: Env) {
     if (r.at) { hours[lk(r.at).getUTCHours()]++; const d = String(r.day); if (!firstPick[d] || String(r.at) < firstPick[d]) firstPick[d] = String(r.at); }
   }
   const reasons: Record<string, number> = {}, rejMat: Record<string, number> = {};
-  for (const r of rej) { U(r.u).rejects++; const k = String(r.reason || '–').trim().slice(0, 60).toLowerCase(); reasons[k] = (reasons[k] ?? 0) + 1; const m = normId(r.mat); rejMat[m] = (rejMat[m] ?? 0) + 1; }
+  const rejBy: Record<string, Record<string, number>> = {};
+  for (const r of rej) { U(r.u).rejects++; const k = String(r.reason || '–').trim().slice(0, 60).toLowerCase(); reasons[k] = (reasons[k] ?? 0) + 1; const m = normId(r.mat); rejMat[m] = (rejMat[m] ?? 0) + 1; const e = (rejBy[m] ??= {}); e[k] = (e[k] ?? 0) + 1; }
   const confirmKinds: Record<string, number> = {};
   for (const n of notes) {
     U(n.u).confirms++;
@@ -5193,7 +5194,7 @@ async function adviceStats(env: Env) {
   for (const [d, at] of Object.entries(firstPick)) { pickDays++; if ((korberDays[d] || []).some((t) => t > at) && !(korberDays[d] || []).some((t) => t <= at)) lateKorber++; }
   const top = (o: Record<string, number>, n = 3) => Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, n);
   return { since, total: reqs.length, users, hours, shortTop: top(shortBy).map(([m, n]) => ({ mat: m, n, of: linesBy[m] ?? n })), reasons: top(reasons), rejTop: top(rejMat, 1),
-    confirms: notes.length, confirmKinds, tallied, lateKorber, pickDays, rejects: rej.length };
+    confirms: notes.length, confirmKinds, tallied, lateKorber, pickDays, rejects: rej.length, shortBy, linesBy, rejBy };
 }
 function adviceFor(st: Awaited<ReturnType<typeof adviceStats>>, me: string): Tip[] {
   const tips: Tip[] = [];
@@ -5201,39 +5202,56 @@ function adviceFor(st: Awaited<ReturnType<typeof adviceStats>>, me: string): Tip
   const mine = st.users[me];
   const today = new Date(Date.now() + 5.5 * 3600e3).toISOString().slice(0, 10);
   const people = Object.entries(st.users).filter(([u]) => u !== '–');
-  if (!st.total) return [{ id: 'start', icon: '👋', tone: 'info', title: 'Learning from your picks', text: 'No picks in the last 30 days yet. As you pick, the system learns which Materials run short, why rolls are rejected and when you are busiest — and gives tips here.' }];
-  // personal pace today
+  if (!st.total) return [{ id: 'start', icon: '👋', tone: 'info', title: 'Learning from your picks', text: 'No picks in the last 30 days yet. As you pick, the system learns which Materials run short, why rolls are rejected and when you are busiest — and gives tips here.',
+    si: 'පහුගිය දවස් 30 තුළ picks නැහැ. ඔයා pick කරනකොට, short වෙන Materials, rolls reject වෙන හේතු, වැඩ වැඩි වෙලාවල් system එක ඉගෙනගෙන මෙතන උපදෙස් දෙනවා.' }];
   if (mine) {
     const days = Object.keys(mine.days).filter((d) => d !== today);
-    const avg = days.length ? mine.lines - (mine.days[today] ?? 0) : 0;
-    const per = days.length ? avg / days.length : 0;
+    const per = days.length ? (mine.lines - (mine.days[today] ?? 0)) / days.length : 0;
     const t = mine.days[today] ?? 0;
     if (per > 0) tips.push({ id: 'pace', icon: t >= per ? '🚀' : '⏱️', tone: t >= per ? 'ok' : 'info', title: t >= per ? 'Ahead of your usual day' : 'Your day so far',
-      text: `Today you picked ${t} line${t === 1 ? '' : 's'} — your usual day is about ${Math.round(per)} (last 30 days).${t >= per ? ' Great pace!' : ''}` });
+      text: `Today you picked ${t} line${t === 1 ? '' : 's'} — your usual day is about ${Math.round(per)} (last 30 days).${t >= per ? ' Great pace!' : ''}`,
+      si: `අද ඔයා lines ${t}ක් pick කලා. ඔයාගේ සාමාන්‍ය දවසක lines ${Math.round(per)}ක් පමණ (පහුගිය දවස් 30).${t >= per ? ' නියම වේගයක්!' : ''}` });
     const ap = pct(mine.auto, mine.lines);
     const best = people.filter(([, x]) => x.lines >= 10).sort((a, b) => pct(b[1].auto, b[1].lines) - pct(a[1].auto, a[1].lines))[0];
+    const bestT = best && best[0] !== me ? ` (${best[0]}: ${pct(best[1].auto, best[1].lines)}%)` : '';
     if (mine.lines >= 10 && ap < 50) tips.push({ id: 'auto', icon: '⚡', tone: 'accent', title: 'Let Pick all matched do the easy lines',
-      text: `Only ${ap}% of your ${mine.lines} lines were picked by ⚡ Pick all matched${best && best[0] !== me ? ` (${best[0]}: ${pct(best[1].auto, best[1].lines)}%)` : ''}. Run it first, then pick the Needs-manual lines by hand.` });
+      text: `Only ${ap}% of your ${mine.lines} lines were picked by ⚡ Pick all matched${bestT}. Run it first, then pick the Needs-manual lines by hand.`,
+      si: `ඔයාගේ lines ${mine.lines}න් ${ap}%ක් විතරයි ⚡ Pick all matched එකෙන් pick උනේ${bestT}. මුලින්ම ඒක run කරලා, ඉතුරු Needs-manual lines විතරක් අතින් pick කරන්න — වෙලාව ඉතුරු වෙනවා.` });
     if (mine.confirms >= 5) tips.push({ id: 'confirm', icon: '🧭', tone: 'warn', title: '“Pick anyway” used often',
-      text: `${mine.confirms} of your rolls were picked with “I checked — pick anyway”. Picking a roll of the batch the system names keeps the SAP batch QTY right.` });
+      text: `${mine.confirms} of your rolls were picked with “I checked — pick anyway”. Picking a roll of the batch the system names keeps the SAP batch QTY right.`,
+      si: `ඔයාගේ rolls ${mine.confirms}ක් “I checked — pick anyway” එකෙන් pick කරලා. ගැටලුව: SAP batch QTY එක mismatch වෙන්න පුළුවන්. කරන්න ඕනේ: system එක පෙන්නන batch එකේ roll එකක් තෝරන්න.` });
   }
   for (const x of st.shortTop.filter((x) => x.n >= 2).slice(0, 2)) tips.push({ id: 'short-' + x.mat, icon: '📉', tone: 'bad', title: `Material ${x.mat} often runs short`,
-    text: `It was short in ${x.n} of its ${x.of} picks (last 30 days). Check its ZMMBE UR and ZINR before the plan goes out.` });
+    text: `It was short in ${x.n} of its ${x.of} picks (last 30 days). Check its ZMMBE UR and ZINR before the plan goes out.`,
+    si: `Material ${x.mat} picks ${x.of}න් ${x.n}ක short උනා (දවස් 30). කරන්න ඕනේ: plan එක යවන්න කලින් ඒකේ ZMMBE UR එකයි ZINR එකයි බලන්න.` });
   if (st.reasons.length && st.rejects >= 3) {
     const [r, n] = st.reasons[0];
-    tips.push({ id: 'reject', icon: '🔍', tone: 'warn', title: 'Most rejected rolls', text: `${st.rejects} rolls were rejected — ${n} for “${r}”${st.rejTop[0] ? `, most of Material ${st.rejTop[0][0]}` : ''}. Check that first when you open those rolls.` });
+    const m = st.rejTop[0] ? st.rejTop[0][0] : '';
+    tips.push({ id: 'reject', icon: '🔍', tone: 'warn', title: 'Most rejected rolls', text: `${st.rejects} rolls were rejected — ${n} for “${r}”${m ? `, most of Material ${m}` : ''}. Check that first when you open those rolls.`,
+      si: `Rolls ${st.rejects}ක් reject උනා — ${n}ක් “${r}” නිසා${m ? `, වැඩියෙන්ම Material ${m}` : ''}. කරන්න ඕනේ: ඒ rolls open කරනකොට මුලින්ම ඒ දේ check කරන්න.` });
   }
   const peak = st.hours.indexOf(Math.max(...st.hours));
   if (st.total >= 20) {
     const h = (x: number) => `${((x + 11) % 12) + 1}${x < 12 ? ' AM' : ' PM'}`;
-    tips.push({ id: 'peak', icon: '🕙', tone: 'info', title: 'Busiest pick hour', text: `${h(peak)}–${h((peak + 1) % 24)} has ${pct(st.hours[peak], st.total)}% of all picks. Upload Korber Inventory and ZROLLMGT before then so no roll is missed.` });
+    tips.push({ id: 'peak', icon: '🕙', tone: 'info', title: 'Busiest pick hour', text: `${h(peak)}–${h((peak + 1) % 24)} has ${pct(st.hours[peak], st.total)}% of all picks. Upload Korber Inventory and ZROLLMGT before then so no roll is missed.`,
+      si: `වැඩියෙන්ම picks වෙන්නේ ${h(peak)}–${h((peak + 1) % 24)} (${pct(st.hours[peak], st.total)}%). කරන්න ඕනේ: ඊට කලින් Korber Inventory සහ ZROLLMGT upload කරන්න, එතකොට roll එකක්වත් මගහැරෙන්නේ නැහැ.` });
   }
-  if (st.lateKorber >= 2) tips.push({ id: 'late', icon: '📦', tone: 'warn', title: 'Korber uploaded after picking started', text: `On ${st.lateKorber} of ${st.pickDays} days the first pick was made before that day's Korber Inventory upload. Upload it first — the rolls on the shelf then match.` });
-  if (st.tallied) tips.push({ id: 'tally', icon: '🧵', tone: 'ok', title: 'Cut roll balances are working for you', text: `${st.tallied} cut roll balance${st.tallied === 1 ? ' was' : 's were'} tallied to other SO lines. Keep “Tally cut roll balances” on when you download the Packing List.` });
+  if (st.lateKorber >= 2) tips.push({ id: 'late', icon: '📦', tone: 'warn', title: 'Korber uploaded after picking started', text: `On ${st.lateKorber} of ${st.pickDays} days the first pick was made before that day's Korber Inventory upload. Upload it first — the rolls on the shelf then match.`,
+    si: `දවස් ${st.pickDays}න් ${st.lateKorber}ක Korber Inventory upload කලේ picking පටන් ගත්තට පස්සේ. ගැටලුව: shelf එකේ rolls match නොවෙන්න පුළුවන්. කරන්න ඕනේ: මුලින්ම Korber upload කරලා pick කරන්න.` });
+  if (st.tallied) tips.push({ id: 'tally', icon: '🧵', tone: 'ok', title: 'Cut roll balances are working for you', text: `${st.tallied} cut roll balance${st.tallied === 1 ? ' was' : 's were'} tallied to other SO lines. Keep “Tally cut roll balances” on when you download the Packing List.`,
+    si: `Cut roll balances ${st.tallied}ක් වෙන SO lines වලට tally උනා. Packing List download කරනකොට “Tally cut roll balances” tick එක දාලා තියන්න.` });
   const week = new Date(Date.now() + 5.5 * 3600e3 - 6 * 86400e3).toISOString().slice(0, 10);
   const lead = people.map(([u, x]) => [u, Object.entries(x.days).filter(([d]) => d >= week).reduce((t, [, n]) => t + n, 0)] as const).sort((a, b) => b[1] - a[1])[0];
-  if (lead && lead[1] > 0) tips.push({ id: 'lead', icon: '🏆', tone: 'accent', title: 'Top picker this week', text: `${lead[0] === me ? 'You' : lead[0]} — ${lead[1]} lines in the last 7 days.${lead[0] === me ? ' Keep it up!' : ''}`, who: lead[0] });
+  if (lead && lead[1] > 0) tips.push({ id: 'lead', icon: '🏆', tone: 'accent', title: 'Top picker this week', text: `${lead[0] === me ? 'You' : lead[0]} — ${lead[1]} lines in the last 7 days.${lead[0] === me ? ' Keep it up!' : ''}`,
+    si: `මේ සතියේ වැඩියෙන්ම pick කලේ ${lead[0] === me ? 'ඔයා' : lead[0]} — දවස් 7ට lines ${lead[1]}ක්.${lead[0] === me ? ' දිගටම කරගෙන යන්න!' : ''}`, who: lead[0] });
   return tips;
+}
+/** One Material's history (last 30 days): for the coach in the pick window. */
+function adviceItem(st: Awaited<ReturnType<typeof adviceStats>>, item: string) {
+  const m = normId(item);
+  const rs = st.rejBy[m] || {};
+  const top = Object.entries(rs).sort((a, b) => b[1] - a[1])[0];
+  return { lines: st.linesBy[m] ?? 0, short: st.shortBy[m] ?? 0, rejects: Object.values(rs).reduce((t, n) => t + n, 0), reason: top ? top[0] : null };
 }
 // ---------------------------------------------------------------- D1 meter
 /** Counts the rows D1 reads and writes for one request (sent back as x-d1-rows-read / x-d1-rows-written). */
@@ -5465,8 +5483,10 @@ export default {
       else if (p.startsWith('/api/data/') && req.method === 'DELETE') res = await handleClear(env, req, p.split('/').pop() || '');
       else if (p === '/api/advice' && req.method === 'GET') {
         const s = await requireUser(env, req);
+        const url0 = new URL(req.url);
         const st = await revCached(env, 'adv|' + (env.DIV || 'active'), [], () => adviceStats(env));
-        res = json({ tips: adviceFor(st, s.u), learned: { since: st.since, picks: st.total, users: Object.keys(st.users).length } });
+        const it = url0.searchParams.get('item');
+        res = json({ tips: it ? [] : adviceFor(st, s.u), learned: { since: st.since, picks: st.total, users: Object.keys(st.users).length }, ...(it ? { item: adviceItem(st, it) } : {}) });
       }
       else if (p === '/api/online') {
         // v126: who is signed in now — each open tab says "I am here" every minute (POST); a tab not heard from for 2.5

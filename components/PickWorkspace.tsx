@@ -1,4 +1,5 @@
 'use client';
+import LineCoach from './LineCoach';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Loader, Skeleton } from '@/components/Loader';
 import { ApiError, api, getSession, isBossRole } from '@/lib/api';
@@ -1140,6 +1141,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
               {c.steps.length > 0 && <button type="button" className="linkish" onClick={() => setShowNotes((v) => !v)}>{showNotes ? 'Hide' : 'Show'} {c.steps.length} note{c.steps.length === 1 ? '' : 's'}</button>}
             </div>
             {showNotes && <div className="notice warn" style={{ fontSize: 12.5 }}>{c.steps.map((s, i) => <div key={i}>{s}</div>)}</div>}
+            <LineCoach c={c} />
             {c.gate?.on && !c.gate.loaded && <div className="notice bad">No ZROLLMGT uploaded for this Pick — upload it on the Data tab (or the Pick card). Only rolls at StorageBin {c.gate.bin} can be picked.</div>}
 
             <div className="pk-sec">

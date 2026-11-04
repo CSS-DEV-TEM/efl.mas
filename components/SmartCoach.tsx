@@ -6,7 +6,7 @@ import { api } from '@/lib/api';
  * v148: Smart Coach — tips the system learned from its own history (last 30 days of picks, rejects and uploads).
  * A glowing orb at the bottom left; the first tip comes up once per session as a bubble, the panel lists them all.
  */
-type Tip = { id: string; icon: string; tone: 'ok' | 'warn' | 'bad' | 'info' | 'accent'; title: string; text: string };
+type Tip = { id: string; icon: string; tone: 'ok' | 'warn' | 'bad' | 'info' | 'accent'; title: string; text: string; si?: string };
 type Advice = { tips: Tip[]; learned: { since: string; picks: number; users: number } };
 
 function useTyped(text: string, on: boolean) {
@@ -64,6 +64,7 @@ export default function SmartCoach() {
         <div className={`coach-bubble tone-${cur.tone}`} role="status" onClick={() => { setOpen(true); setBubble(false); }}>
           <b><span aria-hidden>{cur.icon}</span> {cur.title}</b>
           <p>{typed}<span className="caret" aria-hidden /></p>
+          {cur.si && typed.length >= cur.text.length && <p className="si" lang="si">{cur.si}</p>}
         </div>
       )}
       {open && (
@@ -81,7 +82,7 @@ export default function SmartCoach() {
             {tips.map((t, i) => (
               <div key={t.id} className={`coach-tip tone-${t.tone}`} style={{ animationDelay: `${i * 70}ms` }}>
                 <span className="ct-icon" aria-hidden>{t.icon}</span>
-                <div><b>{t.title}</b><p>{t.text}</p></div>
+                <div><b>{t.title}</b><p>{t.text}</p>{t.si && <p className="si" lang="si">{t.si}</p>}</div>
               </div>
             ))}
           </div>

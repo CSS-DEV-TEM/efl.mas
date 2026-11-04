@@ -1,6 +1,7 @@
 'use client';
 import ThemeToggle from './ThemeToggle';
 import SmartCoach from './SmartCoach';
+import Welcome from './Welcome';
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
@@ -259,6 +260,7 @@ export default function Shell({ children, admin, allowGuest }: { children: React
       {children}
       <footer className="site-foot"><Logo size={22} /><span>EFL 3PL · MAS AUTOMATE PICK SYSTEM · {APP_VERSION}{apiV ? ` · API ${apiV}` : ''}</span><Credit /></footer>
       {!guest && <SmartCoach />}
+      {!guest && <Welcome name={user.username} />}
       <div className="toasts" aria-live="polite">
         {toasts.map((t) => <div key={t.id} className="toast">{t.text}</div>)}
       </div>
