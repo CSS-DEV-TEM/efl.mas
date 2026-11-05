@@ -198,8 +198,10 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
     const tns = new Set(u.flatMap((x) => String(x.tn ?? '').split(',').map((t) => t.trim()).filter(Boolean)));
     return { sent: sumU((x) => x.sent), sentN: u.filter((x) => x.sent > 1e-9).length, qi: sumU((x) => x.qi), qiN: u.filter((x) => x.qi > 1e-9).length,
       block: sumU((x) => x.block), blockN: u.filter((x) => x.block > 1e-9).length, possible: pp.reduce((t0, x) => t0 + Number(x.possible), 0), possibleN: pp.length,
-      tnCount: tns.size, tnLines: u.filter((x) => x.tn).length, tnQty: u.reduce((t0, x) => t0 + (Number(x.tn_qty) || 0), 0) };
+      tnCount: tns.size, tnLines: u.filter((x) => x.tn).length, tnQty: u.reduce((t0, x) => t0 + (Number(x.tn_qty) || 0), 0), tnUr: u.reduce((t0, x) => t0 + (Number(x.tn_ur) || 0), 0) };
   }, [repMap, scoped]);
+  // v164: the table's TN-UR column (from the plan report)
+  const ledgerRows = useMemo(() => (!repMap ? tableRows : tableRows.map((l) => { const x = repMap.get(`${l.week}|${l.key}|${l.date ?? ''}`); return x && x.tn_ur ? { ...l, tn_ur: Number(x.tn_ur) } : l; })), [tableRows, repMap]);
   const tips = useMemo(() => insights(scoped, data?.uploads || [], today, data?.dispatch), [scoped, data?.uploads, today, data?.dispatch]);
   const viewCounts = useMemo(() => {
     const c: Record<string, number> = {};
@@ -253,7 +255,7 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <button className="btn" onClick={refreshNow} disabled={refreshing} title="Load the latest data now">{refreshing ? 'Refreshing…' : '↻ Refresh'}</button>
           {canEdit && <Link className="btn" href="/upload/">Upload reports</Link>}
-          <button className="btn primary" disabled={!tableRows.length} onClick={() => exportPullPlan(tableRows, isDay ? `MAS_Day_Plan_${data?.day || ''}${data?.week ? '_' + roundLabel(data.week).replace(/[^\w]+/g, '_') : ''}` : `MAS_Weekly_Plan_${(data?.week || '').replace('-', '_')}`)}>Export Excel ({fmt(tableRows.length)})</button>
+          <button className="btn primary" disabled={!tableRows.length} onClick={() => exportPullPlan(ledgerRows, isDay ? `MAS_Day_Plan_${data?.day || ''}${data?.week ? '_' + roundLabel(data.week).replace(/[^\w]+/g, '_') : ''}` : `MAS_Weekly_Plan_${(data?.week || '').replace('-', '_')}`)}>Export Excel ({fmt(tableRows.length)})</button>
         </div>
       </div>
 
@@ -408,7 +410,7 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
         <div className="kpi"><span className="k">Plan UR</span><span className="v"><CountUp value={planUr.v} format={compact} /></span><span className="s" title="Each line's QTY, at most its UR (Total − QI − Block − Assigned)">of QTY {compact(t.qty)} · {fmt(planUr.short)} lines short</span>
           <div className="meter"><span style={{ width: `${t.qty ? Math.min(100, (planUr.v / t.qty) * 100) : 0}%`, background: 'var(--ok)' }} /></div></div>
         {rep && <>
-          <div className="kpi"><span className="k">Transfer notes</span><span className="v"><CountUp value={rep.tnCount} format={(n) => fmt(n)} /></span><span className="s" title="ZMM_TRR transfer requests of these SO lines">{fmt(rep.tnLines)} SO/LI lines · {compact(rep.tnQty)} QTY</span></div>
+          <div className="kpi"><span className="k">Transfer notes</span><span className="v"><CountUp value={rep.tnCount} format={(n) => fmt(n)} /></span><span className="s" title="ZMM_TRR transfer requests of these SO lines">{fmt(rep.tnLines)} SO/LI lines · {compact(rep.tnQty)} QTY{rep.tnUr > 1e-9 ? ` · TN-UR ${compact(rep.tnUr)}` : ''}</span></div>
           <div className="kpi"><span className="k">Alrady send</span><span className="v"><CountUp value={rep.sent} format={compact} /></span><span className="s" title="ZMMBE at the plant storage locations (40 / 70 / 75)">{fmt(rep.sentN)} SO/LI lines · at the plant</span></div>
           <div className={`kpi ${rep.qiN ? 'warn' : ''}`}><span className="k">QI</span><span className="v"><CountUp value={rep.qi} format={compact} /></span><span className="s" title="SO QI stock (ZMMBE) — not picked until released">{fmt(rep.qiN)} SO/LI lines</span></div>
           <div className={`kpi ${rep.blockN ? 'bad' : ''}`}><span className="k">Block</span><span className="v"><CountUp value={rep.block} format={compact} /></span><span className="s" title="SO Blocked stock (ZMMBE) — not picked until released">{fmt(rep.blockN)} SO/LI lines</span></div>
@@ -553,7 +555,7 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
                   </button>
                 ))}
               </div>
-              <Ledger rows={tableRows} canEdit={canEdit} full={full} flash={flash} onSave={save} onEdit={(l) => setEditing(l)} />
+              <Ledger rows={ledgerRows} canEdit={canEdit} full={full} flash={flash} onSave={save} onEdit={(l) => setEditing(l)} />
               <datalist id="status-options">{STATUS_OPTIONS.map((s) => <option key={s} value={s} />)}</datalist>
               <datalist id="vehicle-options">{vehicles.map((s) => <option key={s} value={s} />)}</datalist>
             </section>

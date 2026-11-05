@@ -90,6 +90,10 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
   // the plan report's balance: QTY − picked (ALRADY SEND is shown for information only)
   const repRow = useMemo(() => new Map((report?.hasSent ? report.rows : []).map((x) => [`${x.key}|${x.pick_date ?? ''}`, x])), [report]);
   const sentOf = useCallback((l: LineP) => repRow.get(`${l.key}|${l.date ?? ''}`), [repRow]);
+  // v164: TN-UR of each line (the plan report): the UR of its TRANSFER NOTE batch, picked first
+  const tnUrMap = useMemo(() => new Map((report?.rows || []).filter((x) => (x.tn_ur ?? 0) > 1e-9).map((x) => [`${x.key}|${x.pick_date ?? ''}`, Number(x.tn_ur)])), [report]);
+  const tnUrOf = (l: LineP) => tnUrMap.get(`${l.key}|${l.date ?? ''}`) ?? 0;
+  const TnUr = ({ l }: { l: LineP }) => { const v = tnUrOf(l); return v > 1e-9 ? <div className="small tn-ur" title="TN-UR: the UR of the TRANSFER NOTE batch — picked first">TN-UR {fmtQty(v)}</div> : null; };
   const bal = useCallback((l: LineP) => { const x = sentOf(l); return x ? (x.left ?? Math.max(0, r3(Number(l.qty) - (l.picked ?? 0)))) : need(l); }, [sentOf]);
   /** what can be picked now: the balance, at most the UR left */
   const todo = useCallback((l: LineP) => (isDone(l) ? 0 : Math.max(0, r3(Math.min(bal(l), Math.max(0, avail(l)))))), [bal]);
@@ -589,7 +593,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
                             const pk = l.picked ?? 0;
                             return (
                               <tr key={l.id} className={l.hold && !isDone(l) ? 'on-hold' : ''}>
-                                <td>{l.li}</td><td>{l.item}</td><td>{l.plant}</td><td className="n">{fmtQty(l.qty)}</td><td className="n">{fmtQty(Number(l.ur) || 0)}</td>
+                                <td>{l.li}</td><td>{l.item}</td><td>{l.plant}</td><td className="n">{fmtQty(l.qty)}</td><td className="n">{fmtQty(Number(l.ur) || 0)}<TnUr l={l} /></td>
                                 <td className="n"><b>{fmtQty(pickQty(l))}</b>{Number(l.qty) > (Number(l.ur) || 0) + 1e-9 && <span className="muted small" title="QTY is more than the UR: the UR is picked"> (UR)</span>}</td>
                                 <td className="n">{pk ? fmtQty(pk) : '–'}</td><td className="n">{fmtQty(bal(l))}</td>
                                 <td className="n">{korberOf(l)}</td>
@@ -618,7 +622,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
                     <td>{l.so}</td><td>{l.li}</td><td>{l.item}</td><td>{fmtDate(l.date)}</td><td>{l.plant}</td>
                     <td className="n">{fmtQty(l.qty)}</td>
                     <td className="n">{pk ? <>{fmtQty(pk)} <span className="muted">({l.picked_rolls} roll{l.picked_rolls === 1 ? '' : 's'})</span></> : '–'}</td>
-                    <td className="n"><b>{fmtQty(bal(l))}</b>{sentOf(l) && sentOf(l)!.sent > 1e-9 && <div className="muted small" title="ALRADY SEND (ZMMBE at the plant storage locations) is taken off the balance">sent {fmtQty(sentOf(l)!.sent)}</div>}</td><td className="n">{fmtQty(avail(l))}</td>
+                    <td className="n"><b>{fmtQty(bal(l))}</b>{sentOf(l) && sentOf(l)!.sent > 1e-9 && <div className="muted small" title="ALRADY SEND (ZMMBE at the plant storage locations) is taken off the balance">sent {fmtQty(sentOf(l)!.sent)}</div>}</td><td className="n">{fmtQty(avail(l))}<TnUr l={l} /></td>
                     <td className="n">{korberOf(l)}</td>
                     <td>{stateOf(l)}
                       {scope === 'manual' && (scan[l.id]?.why || runWhy[l.id]) && <div className="small run-why"><span className="pill warn">Manual</span> <span className="muted">{scan[l.id]?.why || runWhy[l.id]}</span></div>}

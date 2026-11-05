@@ -678,7 +678,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 106; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 107; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1456,6 +1456,55 @@ async function handleFollow(env: Env, req: Request) {
  *   QI / BLOCK     = SO QI / SO Blocked stock (every storage location)
  *   TRANSFER NOTE  = ZMM_TRR Transfer Request Number of To Sales Order + Item + Material
  */
+/**
+ * v164: TN-UR of plan lines — the same rule as the pick: the ZMMBE UR (not at the plant storage locations, the Pick plant's SO
+ * Plants) of each TRANSFER NOTE batch, at most the TN QTY of that batch. The TNs: ZMM_TRR (To SO + Item + Material, Transfer
+ * Quantity), else the ZINSR lot of the line whose ZCOMENT VIEW comment has TN# (Insp. Lot Quantity). senv = the reports' scope.
+ */
+async function tnUrOf(env: Env, senv: Env, rid: string, keys: string[]): Promise<Map<string, { tnUr: number; tns: string[] }>> {
+  const out = new Map<string, { tnUr: number; tns: string[] }>();
+  if (!keys.length) return out;
+  const want = new Set(keys);
+  const tk = (v: unknown) => String(v ?? '').trim().replace(/^0+(?=\d)/, '');
+  // key → tn|batch → QTY
+  const units = new Map<string, Map<string, number>>();
+  const addU = (key: string, tn: string, bt: string, q: number) => { const m = units.get(key) ?? new Map<string, number>(); m.set(`${tn}|${bt}`, r3((m.get(`${tn}|${bt}`) ?? 0) + q)); units.set(key, m); };
+  for (const t of (await senv.DB.prepare('SELECT to_so, to_li, material, tn, batch, qty, approved, tqty FROM ztrr').all<Row>()).results) {
+    const key = lineKey(t.to_so, t.to_li, t.material);
+    if (!want.has(key)) continue;
+    addU(key, tk(t.tn), normId(t.batch), r3(Number(t.tqty) > 0 ? Number(t.tqty) : Number(t.approved) > 0 ? Number(t.approved) : Number(t.qty) || 0));
+  }
+  const inTrr = new Set(Array.from(units).flatMap(([key, m]) => Array.from(m.keys()).map((u) => `${key}|${u.split('|')[0]}`)));
+  // no ZMM_TRR row: the TN of the ZINSR lot (ZCOMENT VIEW comment)
+  const fromZ = (await senv.DB.prepare("SELECT DISTINCT c.lot, c.tn, z.so, z.li, z.material, z.batch, z.qty FROM zcoment c JOIN zinr z ON z.lot = c.lot WHERE c.tn >= '|'").all<Row>()).results;
+  const seenZ = new Set<string>();
+  for (const z of fromZ) {
+    const key = lineKey(z.so, z.li, z.material);
+    if (!want.has(key)) continue;
+    for (const t of String(z.tn).split('|').filter(Boolean)) {
+      if (seenZ.has(`${z.lot}|${t}`)) continue; seenZ.add(`${z.lot}|${t}`);
+      if (inTrr.has(`${key}|${t}`)) continue; // in ZMM_TRR: its Transfer Quantity
+      addU(key, t, normId(z.batch), Number(z.qty) || 0);
+    }
+  }
+  if (!units.size) return out;
+  const st0 = await getSettings(env);
+  const plantLocs = new Set((st0.plantSlocs || []).map((x) => up(normId(x))));
+  const pCode = (st0.zmmbePlants || []).length ? await pickPlantCode(env, rid) : '';
+  const own = pickSoPairs(st0.zmmbePlants || [], pCode);
+  const soOk = own.own ? new Set(own.pairs.map((x) => x.soPlant)) : null;
+  const stock = (await senv.DB.prepare("SELECT key, sloc, so_plant, batch, ur FROM stock WHERE src = 'zmmbe' AND key IN (SELECT value FROM json_each(?))").bind(JSON.stringify(Array.from(units.keys()))).all<Row>()).results
+    .filter((x) => !plantLocs.has(up(normId(x.sloc))) && (!soOk || soOk.has('*') || soOk.has(up(x.so_plant))));
+  for (const [key, m] of units) {
+    const byB = new Map<string, number>();
+    for (const [u, q] of m) { const bt = u.split('|')[1]; byB.set(bt, r3((byB.get(bt) ?? 0) + q)); }
+    let tnUr = 0;
+    for (const [bt, q] of byB) tnUr = r3(tnUr + Math.min(q, r3(stock.filter((x) => x.key === key && normId(x.batch) === bt).reduce((t, x) => t + Math.max(0, Number(x.ur) || 0), 0))));
+    out.set(key, { tnUr, tns: Array.from(new Set(Array.from(m.keys()).map((u) => u.split('|')[0]))) });
+  }
+  return out;
+}
+
 async function handlePlanReport(env: Env, req: Request) {
   await requireUser(env, req);
   const sp0 = new URL(req.url).searchParams;
@@ -1475,7 +1524,7 @@ async function handlePlanReport(env: Env, req: Request) {
   const SO_UR = "COALESCE(total - COALESCE(qi, 0) - COALESCE(block, 0), ur)";
   // each scope of reports: a Pick's own; a week plan: each plant's own (2026-W43@ASIALLINE), else the shared ones
   const ridOf = (l: Row) => (isWeek ? weekPlantRid(rid, l.plant) : rid);
-  type Sc = { st: Map<string, Row>; tn: Map<string, Row>; pk: Map<string, Row>; hasSent: boolean; zm: boolean };
+  type Sc = { st: Map<string, Row>; tn: Map<string, Row>; pk: Map<string, Row>; hasSent: boolean; zm: boolean; tu: Map<string, { tnUr: number; tns: string[] }> };
   const scs = new Map<string, Sc>();
   for (const sr of Array.from(new Set(lines.map(ridOf)))) {
     const senv = await envFor(env, sr);
@@ -1490,13 +1539,14 @@ async function handlePlanReport(env: Env, req: Request) {
     // picks after the latest ZMMBE upload are not in its ALRADY SEND yet (the same rule as the pick's "to pick")
     const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(sr).first<{ at: string | null }>())?.at ?? '';
     const pk = new Map((await env.DB.prepare('SELECT line, ROUND(SUM(qty), 3) q, ROUND(SUM(CASE WHEN at > ?2 THEN qty ELSE 0 END), 3) qa, COUNT(*) n FROM picks WHERE week = ?1 AND cancelled_at IS NULL GROUP BY line').bind(rid, zAt).all<Row>()).results.map((x) => [String(x.line), x]));
-    scs.set(sr, { st, tn, pk, hasSent: !!(await senv.DB.prepare('SELECT /*exact*/ 1 FROM stock_sent LIMIT 1').first()), zm: !!(await senv.DB.prepare("SELECT /*exact*/ 1 FROM stock WHERE src = 'zmmbe' LIMIT 1").first()) });
+    const tu = await tnUrOf(env, senv, sr, JSON.parse(keys) as string[]);
+    scs.set(sr, { tu, st, tn, pk, hasSent: !!(await senv.DB.prepare('SELECT /*exact*/ 1 FROM stock_sent LIMIT 1').first()), zm: !!(await senv.DB.prepare("SELECT /*exact*/ 1 FROM stock WHERE src = 'zmmbe' LIMIT 1").first()) });
   }
   const scList = Array.from(scs.values());
-  const hasSent = scList.some((x) => x.hasSent), zm = scList.some((x) => x.zm), hasTrr = scList.some((x) => x.tn.size > 0);
+  const hasSent = scList.some((x) => x.hasSent), zm = scList.some((x) => x.zm), hasTrr = scList.some((x) => x.tn.size > 0 || x.tu.size > 0);
   const rows = lines.map((l) => {
     const S = scs.get(ridOf(l))!;
-    const x = S.st.get(String(l.key)), t = S.tn.get(String(l.key)), p0 = S.pk.get(`${l.key}|${l.date ?? ''}`);
+    const x = S.st.get(String(l.key)), t = S.tn.get(String(l.key)), p0 = S.pk.get(`${l.key}|${l.date ?? ''}`), u0 = S.tu.get(String(l.key));
     const avail = Number(x?.avail ?? 0), sent = Number(x?.sent ?? 0), qty = Number(l.qty);
     const pending = r3(qty - sent);
     // POSIBAL PENDING: the warehouse has free UR for it — UR = Total − QI − Block − Assigned (an Assigned Qty is not free to send)
@@ -1505,14 +1555,14 @@ async function handlePlanReport(env: Env, req: Request) {
     const pq = p0 ? Number(p0.q) : 0;
     const left = Math.max(0, r3(qty - pq));
     return { left, unic: `${l.so}${l.li}${l.item}A`, so: l.so, li: l.li, item: l.item, date: l.plan_date, pick_date: l.date, qty, avail: r3(avail), sent: r3(sent), pending, possible,
-      qi: r3(Number(x?.qi ?? 0)), block: r3(Number(x?.block ?? 0)), tn: t?.tn ?? null, tn_qty: t ? Number(t.tn_qty) : null, tn_status: t?.tn_status ?? null,
+      qi: r3(Number(x?.qi ?? 0)), block: r3(Number(x?.block ?? 0)), tn: t?.tn ?? (u0?.tns.length ? u0.tns.join(',') : null), tn_qty: t ? Number(t.tn_qty) : null, tn_status: t?.tn_status ?? null, tn_ur: u0 ? u0.tnUr : 0,
       wh: r3(avail - sent), wh_ur: r3(Number(x?.wh_ur ?? 0)), assigned: r3(Number(x?.assigned ?? 0)), picked: p0 ? Number(p0.q) : 0, rolls: p0 ? Number(p0.n) : 0, key: l.key, plant: l.plant, remarks: l.remarks };
   });
   const sum = (f: (r: typeof rows[number]) => number) => r3(rows.reduce((t0, r) => t0 + f(r), 0));
   const weekPlants = isWeek ? (await env.DB.prepare("SELECT DISTINCT upper(COALESCE(plant, '')) p FROM plan WHERE week = ? AND plan_type = 'week' ORDER BY 1").bind(rid).all<{ p: string }>()).results.map((x) => x.p).filter(Boolean) : [];
   return json({ rid, name, day: firstDay, plant: plantCode || null, week: isWeek, plants: weekPlants, hasZmmbe: zm, hasSent, hasTrr, rows,
     totals: { lines: rows.length, qty: sum((r) => r.qty), avail: sum((r) => r.avail), sent: sum((r) => r.sent), pending: sum((r) => Math.max(0, r.pending)), possible: sum((r) => r.possible ?? 0),
-      possibleLines: rows.filter((r) => r.possible).length, qi: sum((r) => r.qi), block: sum((r) => r.block), tnLines: rows.filter((r) => r.tn).length, picked: sum((r) => r.picked) } });
+      possibleLines: rows.filter((r) => r.possible).length, qi: sum((r) => r.qi), block: sum((r) => r.block), tnLines: rows.filter((r) => r.tn).length, tnUr: sum((r) => r.tn_ur), picked: sum((r) => r.picked) } });
 }
 
 async function handleZroll(env: Env, req: Request) {

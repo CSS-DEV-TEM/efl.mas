@@ -9,6 +9,8 @@ export interface Line {
   /** the plant(s) the ZMMBE rows are linked to (Settings → ZMMBE plants) */
   stock_link?: string | null;
   tn_qty: number; tn_number: string | null; dup: number;
+  /** v164: TN-UR (the plan report: UR of the TRANSFER NOTE batch, picked first) — only where the dashboard adds it */
+  tn_ur?: number;
   /** 1 when the same SO / LI / Item was in the previous week's plan and not marked Done there */
   carried?: number;
   status: string | null; comment: string | null; vehicle: string | null; qi_note: string | null;

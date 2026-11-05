@@ -12,7 +12,7 @@ export function exportPullPlan(rows: Line[], name = 'MAS_Weekly_Plan') {
     'UR (Full)': l.ur, 'UR left': avail(l), 'QI (Full)': l.qi, 'Block (Full)': l.block, Assigned: l.assigned, Variance: l.variance,
     'KFC UR': l.kfc_ur, 'KFC QI': l.kfc_qi, 'KFC Block': l.kfc_block, 'PFC UR': l.pfc_ur, 'PFC QI': l.pfc_qi, 'PFC Block': l.pfc_block,
     'Stock plant': l.stock_plant, 'St Location': l.stock_sloc,
-    'TN QTY': l.tn_qty, 'TN number': l.tn_number, Coverage: coverage(l), 'Short (Balance − UR left)': shortBy(l), Done: isDone(l) ? 'Yes' : 'No',
+    'TN QTY': l.tn_qty, 'TN number': l.tn_number, 'TN-UR': l.tn_ur ?? 0, Coverage: coverage(l), 'Short (Balance − UR left)': shortBy(l), Done: isDone(l) ? 'Yes' : 'No',
     'Updated by': l.updated_by, 'Updated at': l.updated_at,
   }));
   const ws = XLSX.utils.json_to_sheet(data);

@@ -42,6 +42,7 @@ const COLS: Col[] = [
   { id: 'stock_link', label: 'For plant', grp: 'Stock at', full: true, get: (l) => l.stock_link || '' },
   { id: 'tn_qty', label: 'TN QTY', grp: 'TRR', n: true, get: (l) => l.tn_qty, render: (l) => q(l.tn_qty) },
   { id: 'tn_number', label: 'TN #', grp: 'TRR', get: (l) => l.tn_number || '' },
+  { id: 'tn_ur', label: 'TN-UR', grp: 'TRR', n: true, get: (l) => l.tn_ur ?? 0, render: (l) => (l.tn_ur ? <b className="tn-ur">{q(l.tn_ur)}</b> : q(0)) },
   { id: 'remarks', label: 'Remarks', get: (l) => l.remarks || '' },
   { id: 'plant', label: 'Plant', grp: 'Plan', full: true, get: (l) => l.plant || '' },
 ];

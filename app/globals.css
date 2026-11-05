@@ -1412,3 +1412,5 @@ p.si-line { margin: 2px 0 0; }
 .pk-tn-c.done { background: color-mix(in srgb, var(--ink-2) 10%, transparent); color: var(--muted, var(--ink-2)); }
 .pk-tn-c.bad { background: color-mix(in srgb, var(--warn) 16%, transparent); }
 .pill.tn { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+/* v164: TN-UR under the UR of a line */
+.tn-ur { color: var(--accent); font-weight: 600; white-space: nowrap; }
