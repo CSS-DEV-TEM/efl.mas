@@ -511,11 +511,48 @@ const weekPlantRid = (week: unknown, plant: unknown) => {
   const w = String(week ?? ''), p = String(plant ?? '').trim().toUpperCase().replace(/\s+/g, '');
   return /^\d{4}-W\d{2}$/.test(w) && p ? `${w}@${p}` : w;
 };
+/**
+ * v158: one Korber Inventory for every Pick ("All Picks", rid 'ALL'): uploaded once, read by every Pick (and the shared view)
+ * for 24 hours from its upload — unless a Pick has its own Korber uploaded after it. After 24 hours it expires: its rows are
+ * deleted and the Picks go back to their own (or the shared) Korber. Checked at most once a minute per system.
+ */
+const ALL_RID = 'ALL';
+const KORBER_TTL = 24 * 3600e3;
+const allKorber = new Map<string, { at: string | null; checked: number }>();
+async function allKorberAt(env: Env): Promise<string | null> {
+  const dk = env.DIV || 'active';
+  const c = allKorber.get(dk);
+  if (c && Date.now() - c.checked < 30e3) return c.at && Date.now() - Date.parse(c.at) < KORBER_TTL ? c.at : null;
+  let at: string | null = null;
+  try { at = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE rid = 'ALL' AND src = 'korber'").first<{ at: string | null }>())?.at ?? null; } catch { /* */ }
+  allKorber.set(dk, { at, checked: Date.now() });
+  if (at && Date.now() - Date.parse(at) >= KORBER_TTL) {
+    // expired: its rows go (the Picks read their own / the shared Korber again) — every kept result is worked out again
+    try {
+      await env.DB.batch([
+        env.DB.prepare("DELETE FROM korber WHERE rid = 'ALL'"),
+        env.DB.prepare("DELETE FROM uploads WHERE rid = 'ALL' AND src = 'korber'"),
+        env.DB.prepare("DELETE FROM upload_file_part WHERE file_id IN (SELECT id FROM upload_file WHERE rid = 'ALL')"),
+        env.DB.prepare("DELETE FROM upload_file WHERE rid = 'ALL'"),
+        env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), 'system', 'upload', `Korber Inventory for all Picks expired (uploaded ${at}) — removed`),
+      ]);
+      allKorber.set(dk, { at: null, checked: Date.now() });
+      await broadcast(env, { type: 'data', src: 'korber', by: 'system', rows: 0 });
+    } catch { /* tried again later */ }
+    return null;
+  }
+  return at;
+}
 async function scopeOf(env: Env, rid: unknown): Promise<Scope> {
-  if (!scopeRid(rid)) return SHARED;
-  const own = new Set((await env.DB.prepare('SELECT DISTINCT src FROM uploads WHERE rid = ?').bind(String(rid)).all<{ src: string }>()).results.map((x) => x.src));
+  const allAt = await allKorberAt(env);
+  if (!scopeRid(rid)) return allAt ? { ...SHARED, korber: ALL_RID } : SHARED;
+  const ups = (await env.DB.prepare('SELECT src, MAX(uploaded_at) at FROM uploads WHERE rid = ? GROUP BY src').bind(String(rid)).all<{ src: string; at: string }>()).results;
+  const own = new Set(ups.map((x) => x.src));
   const r = String(rid);
-  return { stock: own.has('zmmbe') ? r : '', stock_sent: own.has('zmmbe') ? r : '', zinr: own.has('zinr') ? r : '', zcoment: own.has('zcoment') ? r : '', korber: own.has('korber') ? r : '', zroll: own.has('zroll') ? r : '', ztrr: own.has('ztrr') ? r : '' };
+  // the Korber: the Pick's own when it was uploaded after the All-Picks one, else the All-Picks one (while it lives)
+  const ownK = ups.find((x) => x.src === 'korber')?.at ?? null;
+  const korber = allAt && (!ownK || allAt >= ownK) ? ALL_RID : ownK ? r : '';
+  return { stock: own.has('zmmbe') ? r : '', stock_sent: own.has('zmmbe') ? r : '', zinr: own.has('zinr') ? r : '', zcoment: own.has('zcoment') ? r : '', korber, zroll: own.has('zroll') ? r : '', ztrr: own.has('ztrr') ? r : '' };
 }
 const SQL_WORDS = new Set(['WHERE', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'OUTER', 'CROSS', 'NATURAL', 'ON', 'USING', 'ORDER', 'GROUP', 'LIMIT', 'UNION', 'HAVING', 'WINDOW', 'EXCEPT', 'INTERSECT', 'AS', 'SET', 'VALUES']);
 /** A read of korber / zinr / zcoment / stock → only the rows of the scope's upload (writes are not touched). */
@@ -623,7 +660,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 101; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 102; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1239,7 +1276,7 @@ async function reportStatus(env: Env, rid: string) {
 async function reportStatus0(env: Env, rid: string) {
   const sc = await scopeOf(env, rid);
   const last = async (src: string, r: string) => (await env.DB.prepare('SELECT src, file_name, row_count, uploaded_by, uploaded_at, rid FROM uploads WHERE src = ? AND rid = ? ORDER BY id DESC LIMIT 1').bind(src, r).first<Row>()) ?? null;
-  const out: { src: string; own: Row | null; shared: Row | null; rows: number; uses: 'own' | 'shared' | 'none'; missing?: string[] }[] = [];
+  const out: { src: string; own: Row | null; shared: Row | null; rows: number; uses: 'own' | 'shared' | 'none' | 'all'; missing?: string[]; all?: Row | null }[] = [];
   for (const src of ['plan', 'zmmbe', 'zinr', 'zcoment', 'korber', 'zroll', 'ztrr']) {
     const own = rid ? await last(src, rid) : null;
     const shared = src === 'plan' ? null : await last(src, '');
@@ -1254,6 +1291,13 @@ async function reportStatus0(env: Env, rid: string) {
     let missing: string[] | undefined;
     if (src === 'korber' && own && rid) {
       missing = (await env.DB.prepare(`SELECT DISTINCT p.item FROM plan p WHERE p.week = ?1 AND NOT EXISTS (SELECT 1 FROM korber k WHERE k.rid = ?1 AND k.item = p.item) LIMIT 20`).bind(rid).all<{ item: string }>()).results.map((x) => String(x.item));
+    }
+    // v158: the Korber Inventory for all Picks (24 h): which one this Pick reads
+    if (src === 'korber') {
+      const all = sc.korber === ALL_RID || !rid ? await last('korber', ALL_RID) : await last('korber', ALL_RID);
+      const live = all && Date.now() - Date.parse(String(all.uploaded_at)) < KORBER_TTL ? { ...all, expires: new Date(Date.parse(String(all.uploaded_at)) + KORBER_TTL).toISOString() } : null;
+      out.push({ src, own, shared, rows, all: live, uses: sc.korber === ALL_RID ? 'all' : own ? 'own' : shared && rows ? 'shared' : 'none', ...(missing?.length ? { missing } : {}) } as typeof out[number]);
+      continue;
     }
     out.push({ src, own, shared, rows, uses: own ? 'own' : shared && rows ? 'shared' : 'none', ...(missing?.length ? { missing } : {}) });
   }
@@ -2417,8 +2461,9 @@ async function handlePick(env: Env, req: Request, p: string) {
     const s = await requireUser(env, req, 'editor');
     const b = (await req.json()) as { src: 'zinr' | 'zcoment' | 'korber' | 'zroll' | 'ztrr'; header: unknown[]; rows: unknown[][]; fileName?: string; total?: number; rid?: string };
     if (!PICK_COLS[b.src]) throw new HttpError(400, 'Unknown report.');
-    // the Pick this report belongs to ('' = the shared report)
-    const rid = scopeRid(b.rid);
+    // the Pick this report belongs to ('' = the shared report; v158: 'ALL' = the Korber Inventory for every Pick, 24 hours)
+    if (b.rid === ALL_RID && b.src !== 'korber') throw new HttpError(400, 'Only the Korber Inventory can be uploaded for all Picks.');
+    const rid = b.rid === ALL_RID ? ALL_RID : scopeRid(b.rid);
     if (rid && parseRound(rid)) { const pr = parseRound(rid)!; await env.DB.batch([env.DB.prepare('INSERT OR IGNORE INTO plan_day (day, created_by, created_at) VALUES (?,?,?)').bind(pr.day, s.u, now()),
       env.DB.prepare('INSERT OR IGNORE INTO pick_round (rid, day, plant, round, created_by, created_at) VALUES (?,?,?,?,?,?)').bind(rid, pr.day, pr.plant, pr.round, s.u, now())]); }
     if (!Array.isArray(b.header) || !Array.isArray(b.rows)) throw new HttpError(400, 'No rows in the upload.');
@@ -2519,8 +2564,9 @@ async function handlePick(env: Env, req: Request, p: string) {
     stmts.push(env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'upload',
       `${PICK_LABEL[b.src]}${rid ? ' · ' + periodLabel(rid) : ''}: ${rows.length} rows${b.total && b.total > rows.length ? ` (of ${b.total} in the file)` : ''}${b.fileName ? ' from ' + b.fileName : ''}`));
     await env.DB.batch(stmts);
+    if (rid === ALL_RID) allKorber.delete(env.DIV || 'active');
     await broadcast(env, { type: 'data', src: b.src, by: s.u, rows: rows.length });
-    return json({ ok: true, rows: rows.length, skipped, rid });
+    return json({ ok: true, rows: rows.length, skipped, rid, ...(rid === ALL_RID ? { expires: new Date(Date.now() + KORBER_TTL).toISOString() } : {}) });
   }
 
   // the rolls that can be picked for one plan line, with every check of the chain
@@ -5626,6 +5672,8 @@ export default {
           if (s0 && !(await userDivs(env, s0.u, s0.role)).includes(div)) throw new HttpError(403, `${s0.u} has no access to ${DIV_NAME[div]}. Ask the admin, or switch to ${DIV_NAME[div === 'active' ? 'kreeda' : 'active']}.`);
         }
         env = { ...env, MAIN: env.DB, DIV: div, DB: div === 'kreeda' && env.DB_KREEDA ? meterDb(env.DB_KREEDA, meter) : env.DB };
+        // v158: the Korber Inventory for all Picks expires 24 hours after its upload (checked at most every 30 s per system)
+        if (p !== '/api/health' && p !== '/api/auth/login' && env.DB) { try { await allKorberAt(env); } catch { /* checked next time */ } }
       }
       // "has anything changed?" — one row, answered before anything else so it stays cheap
       if (p === '/api/changes') {

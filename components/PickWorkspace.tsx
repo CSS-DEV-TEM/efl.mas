@@ -37,7 +37,7 @@ function pendingWhy(l: LineP): string {
 
 /** Pick tab of the Dispatch page: the three pick reports, Ready-to-pull lines with Pick, and the pick history / Packing List. */
 export default function PickWorkspace({ week, rows, canEdit, toast, reload, label, plant }: { week: string; rows: LineP[]; canEdit: boolean; toast: (m: string) => void; reload: () => void; /** what is on screen, e.g. "20 Oct · ASIALINE Pick 2" */ label?: string; /** a week plan: one plant of it */ plant?: string }) {
-  const [status, setStatus] = useState<{ counts: { src: string; n: number }[]; uploads: { src: string; file_name: string | null; row_count: number; uploaded_by: string; uploaded_at: string }[]; reports?: { src: string; uses: 'own' | 'shared' | 'none' }[] } | null>(null);
+  const [status, setStatus] = useState<{ counts: { src: string; n: number }[]; uploads: { src: string; file_name: string | null; row_count: number; uploaded_by: string; uploaded_at: string }[]; reports?: { src: string; uses: 'own' | 'shared' | 'none' | 'all'; all?: { file_name: string | null; uploaded_by: string; uploaded_at: string; expires: string; row_count: number } | null }[] } | null>(null);
   const [busy, setBusy] = useState<PickSrc | null>(null);
   const [scope, setScope] = useState<'pending' | 'ready' | 'open' | 'picked' | 'done' | 'hold' | 'manual' | 'possible'>('pending');
   // the plan by SO (open an SO to see its items) or as one list of lines
@@ -70,10 +70,12 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
   const loadStatus = useCallback(() => { api<NonNullable<typeof status>>('/api/pick/status' + (rid ? '?rid=' + encodeURIComponent(rid) : '')).then(setStatus).catch(() => {}); }, [rid]);
   useEffect(() => { loadStatus(); }, [loadStatus]);
 
-  const upload = async (src: PickSrc, f: File) => {
+  const upload = async (src: PickSrc, f: File, forAll = false) => {
     setBusy(src);
     try {
-      const r = await uploadPickFile(src, f, rid || null);
+      // v158: the Korber Inventory for every Pick (24 hours)
+      const r = await uploadPickFile(src, f, forAll ? 'ALL' : rid || null);
+      if (forAll) { toast(`Korber Inventory for all Picks: ${fmt(r.rows)} rows saved — every Pick reads it for 24 hours (a Pick's own Korber uploaded later wins)`); loadStatus(); return; }
       toast(`${PICK_SRCS.find((x) => x.src === src)!.title}: ${fmt(r.rows)} rows saved${r.total > r.rows ? ` (of ${fmt(r.total)} in the file${src === 'korber' ? ' — only plan items kept' : src === 'zcoment' ? ' — Shade Report only' : ''})` : ''}`);
       loadStatus();
     } catch (e) { toast(e instanceof Error ? e.message : 'Upload failed.'); }
@@ -444,12 +446,22 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
             return (
               <div key={p.src} className="pick-up">
                 <div><b>{p.title}</b> <span className="pill mute">{fmt(cnt(p.src))} rows</span>{' '}
-                  {(() => { const u0 = status?.reports?.find((x) => x.src === p.src)?.uses; return rid && u0 ? <span className={`pill ${u0 === 'own' ? 'ok' : u0 === 'shared' ? 'warn' : 'bad'}`}>{u0 === 'own' ? 'this Pick' : u0 === 'shared' ? 'shared' : 'missing'}</span> : null; })()}</div>
+                  {(() => { const u0 = status?.reports?.find((x) => x.src === p.src)?.uses; return rid && u0 ? <span className={`pill ${u0 === 'own' || u0 === 'all' ? 'ok' : u0 === 'shared' ? 'warn' : 'bad'}`}>{u0 === 'own' ? 'this Pick' : u0 === 'shared' ? 'shared' : u0 === 'all' ? 'all Picks · 24 h' : 'missing'}</span> : null; })()}</div>
                 <span className="muted small">{u ? `${u.file_name || ''} · ${u.uploaded_by} · ${ago(u.uploaded_at)}` : p.hint}</span>
+                {p.src === 'korber' && (() => {
+                  const a = status?.reports?.find((x) => x.src === 'korber')?.all;
+                  if (!a) return null;
+                  const h = Math.max(0, (Date.parse(a.expires) - Date.now()) / 3600e3);
+                  return <span className="all-korber small">🌐 All Picks: <b>{a.file_name || 'Korber'}</b> · {fmt(a.row_count)} rows · {a.uploaded_by} · {ago(a.uploaded_at)} · <b>expires in {(() => { const m = Math.floor(h * 60); return m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`; })()}</b></span>;
+                })()}
                 {u && <button className="btn sm" title="Download the Excel file as it was uploaded" onClick={() => downloadLatest(p.src, rid || '').then((n) => toast(`${n} downloaded`)).catch((e) => toast(e instanceof Error ? e.message : 'Could not download.'))}>⬇ Original</button>}
                 {canEdit && <>
                   <button className="btn sm primary" aria-busy={busy === p.src || undefined} disabled={!!busy || !rid} title={rid ? `Upload to ${label || rid}` : isWk ? 'Choose the plant first: a week plan\'s reports belong to one plant' : 'Choose a Pick first'} onClick={() => inputs.current[p.src]?.click()}>{busy === p.src ? 'Uploading…' : `Upload ${p.title}`}</button>
                   <input ref={(el) => { inputs.current[p.src] = el; }} type="file" hidden accept=".xlsx,.xls,.xlsm,.csv" onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(p.src, f); e.target.value = ''; }} />
+                  {p.src === 'korber' && <>
+                    <button className="btn sm" aria-busy={busy === p.src || undefined} disabled={!!busy} title="Upload one Korber Inventory that every Pick reads for 24 hours (then it expires). A Pick's own Korber uploaded later is used instead for that Pick." onClick={() => inputs.current['korber_all']?.click()}>🌐 Upload for all Picks (24 h)</button>
+                    <input ref={(el) => { inputs.current['korber_all'] = el; }} type="file" hidden accept=".xlsx,.xls,.xlsm,.csv" onChange={(e) => { const f = e.target.files?.[0]; if (f) upload('korber', f, true); e.target.value = ''; }} />
+                  </>}
                 </>}
               </div>
             );

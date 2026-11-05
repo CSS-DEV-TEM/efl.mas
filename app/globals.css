@@ -1397,3 +1397,5 @@ p.si-line { margin: 2px 0 0; }
 .coach-orb { width: 48px; height: 48px; opacity: .88; }
 .coach-orb:hover, .coach-orb:focus-visible, .coach-orb.open { opacity: 1; }
 .site-foot { padding-bottom: 72px; }
+/* v158: the Korber Inventory for all Picks (24 h) */
+.all-korber { display: block; margin: 2px 0; padding: 5px 8px; border-radius: 10px; background: var(--ok-soft); color: var(--ok); line-height: 1.4; }
