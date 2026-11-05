@@ -1,4 +1,5 @@
 'use client';
+import { MaintBar } from '@/components/Maintenance';
 import ThemeToggle from './ThemeToggle';
 import SmartCoach from './SmartCoach';
 import Welcome from './Welcome';
@@ -283,6 +284,7 @@ export default function Shell({ children, admin, allowGuest }: { children: React
           Paste the latest <b>worker.js</b> in Cloudflare → Worker → Edit code → Deploy, then reload this page.
         </div>
       )}
+      {user.role === 'admin' && <MaintBar />}
       {children}
       <footer className="site-foot"><Logo size={22} /><span>EFL 3PL · MAS AUTOMATE PICK SYSTEM · {APP_VERSION}{apiV ? ` · API ${apiV}` : ''}</span><Credit /></footer>
       {!guest && <SmartCoach />}

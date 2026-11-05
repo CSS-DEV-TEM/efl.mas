@@ -5,6 +5,7 @@ import Shell, { useShell } from '@/components/Shell';
 import { ClearDatabase, UsersAdmin } from '@/components/AdminUsers';
 import BackupRestore from '@/components/BackupRestore';
 import DataManager from '@/components/DataManager';
+import Maintenance from '@/components/Maintenance';
 import { api } from '@/lib/api';
 import type { PlantInfo } from '@/lib/summary';
 
@@ -16,7 +17,7 @@ export interface SystemSettings { pickBinMode?: 'only' | 'except'; pickBinExcept
 export interface BlockLoc { wh: string; loc: string; note?: string }
 export interface PlantPair { plant: string; soPlant: string; link: string }
 
-const TABS = [['plants', 'Plants'], ['zmmbe', 'ZMMBE plants'], ['reports', 'Locations'], ['time', 'Time setup'], ['plans', 'Plans (data change)'], ['pick', 'Pick rules'], ['users', 'Users & roles'], ['data', 'Data manager'], ['backup', 'Backup & Restore'], ['database', 'Database']] as const;
+const TABS = [['plants', 'Plants'], ['zmmbe', 'ZMMBE plants'], ['reports', 'Locations'], ['time', 'Time setup'], ['plans', 'Plans (data change)'], ['pick', 'Pick rules'], ['users', 'Users & roles'], ['data', 'Data manager'], ['backup', 'Backup & Restore'], ['database', 'Database'], ['maint', 'Maintenance']] as const;
 type Tab = (typeof TABS)[number][0];
 
 /** Admin only: the system settings. Head accounts can do everything else but cannot open this page. */
@@ -46,6 +47,7 @@ function Settings() {
       {tab === 'data' && <DataManager toast={toast} />}
       {tab === 'backup' && <BackupRestore toast={toast} />}
       {tab === 'database' && <ClearDatabase toast={toast} />}
+      {tab === 'maint' && <Maintenance toast={toast} />}
     </main>
   );
 }

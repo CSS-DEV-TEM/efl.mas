@@ -3,9 +3,9 @@
 export const API_URL = (process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8787').replace(/\/+$/, '');
 
 /** The Worker version this website needs (see API_VERSION in worker/src/index.ts). */
-export const NEEDS_API = 109;
+export const NEEDS_API = 110;
 /** This website's release (shown in the header and footer; the Worker's API version is shown next to it). */
-export const APP_VERSION = 'v166';
+export const APP_VERSION = 'v167';
 
 export type Role = 'admin' | 'head' | 'editor' | 'viewer';
 /** How each role is called on screen (the "editor" role is a planner's user account). */
@@ -44,7 +44,9 @@ export function setViewUser(u: string) { try { if (u) localStorage.setItem(VIEW_
 /** "&user=…" for the plan and pick-history requests (the Worker ignores it for editors). */
 export function userParam(first = false): string { const u = getViewUser(); return u ? (first ? '?' : '&') + 'user=' + encodeURIComponent(u) : ''; }
 
-export class ApiError extends Error { constructor(public status: number, msg: string) { super(msg); } }
+export class ApiError extends Error { constructor(public status: number, msg: string, public data?: unknown) { super(msg); } }
+/** v167: the maintenance shutdown (Settings → Maintenance) */
+export interface MaintInfo { on: boolean; msg?: string; at?: string; by?: string; until?: string | null }
 
 /** How many requests are in flight: the header shows a thin loading bar while any is (see useApiBusy). */
 let inflight = 0;
@@ -102,7 +104,12 @@ async function apiCall<T>(path: string, opts: { method?: string; body?: unknown 
     clearSession();
     if (typeof window !== 'undefined' && !location.pathname.startsWith('/login')) location.href = '/login/';
   }
-  if (!res.ok) throw new ApiError(res.status, (data as { error?: string }).error || `Request failed (${res.status}).`);
+  // v167: the system is down for maintenance — back to the sign-in page (it asks for the maintenance password)
+  if (res.status === 423 && (data as { maintenance?: unknown }).maintenance && path !== '/api/auth/login') {
+    clearSession();
+    if (typeof window !== 'undefined' && !location.pathname.startsWith('/login')) location.href = '/login/?maint=1';
+  }
+  if (!res.ok) throw new ApiError(res.status, (data as { error?: string }).error || `Request failed (${res.status}).`, data);
   return data as T;
 }
 

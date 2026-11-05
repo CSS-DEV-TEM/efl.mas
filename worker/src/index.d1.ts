@@ -44,7 +44,7 @@ async function userDivs(env: Env, u: string, role: Role): Promise<Div[]> {
 const hubName = (env: Env) => (env.DIV === 'kreeda' ? 'kreeda' : 'main');
 /** admin: everything incl. system settings · head: everything except system settings · editor (user): own plan and picks · viewer: read only */
 const isBoss = (s: Session | null) => !!s && (s.role === 'admin' || s.role === 'head');
-interface Session { u: string; role: Role; exp: number }
+interface Session { u: string; role: Role; exp: number; /** v167: signed in with the maintenance password of this shutdown (its id) */ mp?: string }
 
 const STOCK_SRCS = ['zmmbe', 'kfc', 'pfc', 'plant'] as const;
 const ALL_SRCS = ['plan', ...STOCK_SRCS, 'trr'] as const;
@@ -678,7 +678,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 109; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 110; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1223,7 +1223,7 @@ async function cached<T>(env: Env, k: string, make: () => Promise<T>): Promise<T
  */
 // the original Excel files are not in a backup (they are big; the reports' data is)
 const BACKUP_SKIP = new Set(['users', 'presence', 'live_day', 'cand_cache', 'sqlite_sequence', '_cf_METADATA', '_cf_KV', 'upload_file', 'upload_file_part']);
-const CONFIG_SECRET = "k IN ('jwt_secret', 'database_url', 'schema_v', 'rev', 'unlock_pw') OR k LIKE 'c\\_%' ESCAPE '\\'";
+const CONFIG_SECRET = "k IN ('jwt_secret', 'database_url', 'schema_v', 'rev', 'unlock_pw', 'maint', 'maint_pw') OR k LIKE 'c\\_%' ESCAPE '\\'";
 async function backupTables(env: Env) {
   const t = (await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\' ORDER BY name").all<{ name: string }>()).results;
   return t.map((x) => x.name).filter((n) => !BACKUP_SKIP.has(n) && /^[a-z_][a-z0-9_]*$/i.test(n));
@@ -1267,7 +1267,7 @@ async function handleBackup(env: Env, req: Request, p: string) {
     const keep = cols.map((c, i) => [c, i] as const).filter(([c]) => have.has(c) && /^[a-z_][a-z0-9_]*$/i.test(c));
     if (!keep.length) throw new HttpError(400, `No columns of ${t} in the file.`);
     let rows = (b.rows || []).map((r) => Object.fromEntries(keep.map(([c, i]) => [c, (r as unknown[])[i] ?? null])) as Row);
-    if (t === 'config') rows = rows.filter((r) => !/^(jwt_secret|database_url|schema_v|rev)$|^c_/.test(String(r.k ?? '')));
+    if (t === 'config') rows = rows.filter((r) => !/^(jwt_secret|database_url|schema_v|rev|unlock_pw|maint|maint_pw)$|^c_/.test(String(r.k ?? '')));
     // INSERT OR REPLACE: a row sent twice (a retried page) or a config key the system wrote meanwhile is not an error
     const names = keep.map(([c]) => c);
     const sel = names.map((c) => `json_extract(value, '$.${c}')`).join(', ');
@@ -5481,8 +5481,48 @@ async function handlePlanLine(env: Env, req: Request, idPart: string) {
 
 // ---------------------------------------------------------------- auth & users
 
+// ---------------------------------------------------------------- v167: maintenance shutdown
+/**
+ * The Admin shuts the system down for maintenance (Settings → Maintenance): both systems (MAS Active and MAS Kreeda) answer
+ * every request with 423 "under maintenance" — except the Admin, and anyone who signs in with the maintenance password of
+ * this shutdown. Kept in the main database's config (maint / maint_pw — never in a backup), read at most every 10 s.
+ */
+interface Maint { on: boolean; id: string; by: string; at: string; msg: string; until?: string | null }
+const maintCache: { at: number; v: Maint | null } = { at: 0, v: null };
+async function maintOf(db: D1Database, fresh = false): Promise<Maint | null> {
+  if (!fresh && Date.now() - maintCache.at < 10e3) return maintCache.v;
+  let v: Maint | null = null;
+  try { const r = await db.prepare("SELECT v FROM config WHERE k = 'maint'").first<{ v: string }>(); v = r ? (JSON.parse(r.v) as Maint) : null; } catch { v = null; }
+  maintCache.at = Date.now(); maintCache.v = v && v.on ? v : null;
+  return maintCache.v;
+}
+const maintPublic = (m: Maint | null) => (m ? { on: true, msg: m.msg, at: m.at, by: m.by, until: m.until ?? null } : { on: false });
+async function handleMaint(env: Env, req: Request) {
+  const db = udb(env);
+  if (req.method === 'GET') return json(maintPublic(await maintOf(db, true)));
+  const s = await requireUser(env, req, 'admin');
+  const b = (await req.json().catch(() => ({}))) as { on?: boolean; msg?: string; password?: string; until?: string | null };
+  if (b.on) {
+    const pw = String(b.password ?? '');
+    if (pw.length < 4) throw new HttpError(400, 'Set a maintenance password (4 or more characters) — users sign in with it while the system is down.');
+    const h = await hashPassword(pw);
+    const m: Maint = { on: true, id: b64url(crypto.getRandomValues(new Uint8Array(9))), by: s.u, at: now(), msg: String(b.msg ?? '').trim().slice(0, 300) || 'Back soon — a system update is in progress.', until: b.until ? String(b.until).slice(0, 40) : null };
+    await db.batch([
+      db.prepare("INSERT INTO config (k, v) VALUES ('maint_pw', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(JSON.stringify(h)),
+      db.prepare("INSERT INTO config (k, v) VALUES ('maint', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(JSON.stringify(m)),
+    ]);
+  } else {
+    await db.prepare("INSERT INTO config (k, v) VALUES ('maint', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(JSON.stringify({ on: false, id: '', by: s.u, at: now(), msg: '' })).run();
+    await db.prepare("DELETE FROM config WHERE k = 'maint_pw'").run();
+  }
+  maintCache.at = 0;
+  const m = await maintOf(db, true);
+  try { await broadcast(env, { type: 'status', src: 'maint', on: !!m }); } catch { /* the others see it on their next request */ }
+  return json(maintPublic(m));
+}
+
 async function handleLogin(env: Env, req: Request) {
-  const { username, password } = (await req.json()) as { username?: string; password?: string };
+  const { username, password, maint_pw } = (await req.json()) as { username?: string; password?: string; maint_pw?: string };
   const u = (username || '').trim().toLowerCase();
   if (!u || !password) throw new HttpError(400, 'Enter a username and password.');
   let user = await udb(env).prepare('SELECT * FROM users WHERE username = ?').bind(u).first<{ username: string; pass_hash: string; salt: string; role: Role }>();
@@ -5505,6 +5545,14 @@ async function handleLogin(env: Env, req: Request) {
     if (!safeEqual(h.hash, user.pass_hash)) throw new HttpError(401, 'Wrong username or password.');
   }
   const session: Session = { u: user.username, role: user.role, exp: Date.now() + 12 * 3600 * 1000 };
+  // v167: while the system is down for maintenance only the Admin, or the maintenance password, gets in
+  const m = await maintOf(udb(env), true);
+  if (m && user.role !== 'admin') {
+    const ph = await udb(env).prepare("SELECT v FROM config WHERE k = 'maint_pw'").first<{ v: string }>();
+    const ok = !!ph && !!maint_pw && await (async () => { const st = JSON.parse(ph.v) as { hash: string; salt: string }; return safeEqual((await hashPassword(String(maint_pw), st.salt)).hash, st.hash); })();
+    if (!ok) return json({ error: maint_pw ? 'Wrong maintenance password.' : `System down for maintenance: ${m.msg.replace(/[.\s]*$/, '.')} Sign in with the maintenance password.`, maintenance: maintPublic(m) }, 423);
+    session.mp = m.id;
+  }
   const divs = await userDivs({ ...env, MAIN: udb(env) }, user.username, user.role);
   return json({ token: await signToken(env, session), user: { username: user.username, role: user.role, divs }, expires: session.exp, kreeda: !!env.DB_KREEDA });
 }
@@ -5981,9 +6029,15 @@ export default {
         // a signed-in user may open only the systems they have access to
         const h = req.headers.get('Authorization') || '';
         const tok = h.startsWith('Bearer ') ? h.slice(7) : url.searchParams.get('token');
-        if (tok && p !== '/api/health' && p !== '/api/auth/login') {
-          const s0 = await verifyToken(env, tok);
-          if (s0 && !(await userDivs(env, s0.u, s0.role)).includes(div)) throw new HttpError(403, `${s0.u} has no access to ${DIV_NAME[div]}. Ask the admin, or switch to ${DIV_NAME[div === 'active' ? 'kreeda' : 'active']}.`);
+        const s0 = tok && p !== '/api/health' && p !== '/api/auth/login' ? await verifyToken(env, tok) : null;
+        if (s0 && !(await userDivs(env, s0.u, s0.role)).includes(div)) throw new HttpError(403, `${s0.u} has no access to ${DIV_NAME[div]}. Ask the admin, or switch to ${DIV_NAME[div === 'active' ? 'kreeda' : 'active']}.`);
+        // v167: down for maintenance — only the Admin and the maintenance password's sign-ins get through
+        if (p !== '/api/health' && p !== '/api/auth/login' && p !== '/api/maint' && p !== '/api/changes') {
+          const m = await maintOf(rawDb);
+          if (m && !(s0 && (s0.role === 'admin' || s0.mp === m.id))) {
+            if (p === '/api/live') return new Response('Down for maintenance', { status: 423, headers: cors });
+            return new Response(JSON.stringify({ error: `System down for maintenance: ${m.msg}`, maintenance: maintPublic(m) }), { status: 423, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...cors } });
+          }
         }
         env = { ...env, MAIN: env.DB, DIV: div, DB: div === 'kreeda' && env.DB_KREEDA ? meterDb(env.DB_KREEDA, meter) : env.DB };
         // v158: the Korber Inventory for all Picks expires 24 hours after its upload (checked at most every 30 s per system)
@@ -6015,6 +6069,7 @@ export default {
         res = json({ ok: db === 'ok', db, users, kreeda: env.DB_KREEDA ? 'bound' : 'not bound', setup: db !== 'ok' ? 'fix db first' : users === 0 ? 'ready: the first sign-in creates the admin account' : 'done', realtime: env.HUB ? 'on' : 'off (polling)', version: API_VERSION, at: now() });
       }
       else if (p === '/api/auth/login' && req.method === 'POST') res = await handleLogin(env, req);
+      else if (p === '/api/maint') res = await handleMaint(env, req);
       else if (p === '/api/me') { const s = await requireUser(env, req); res = json({ user: { username: s.u, role: s.role, plant: await userPlant(env, s.u), divs: await userDivs(env, s.u, s.role) }, div: env.DIV, kreeda: !!env.DB_KREEDA }); }
       else if (p === '/api/plan' || p.startsWith('/api/plan/')) res = await handlePlanLine(env, req, p.split('/')[3] || '');
       else if (p === '/api/dispatch') res = await handleDispatch(env, req);

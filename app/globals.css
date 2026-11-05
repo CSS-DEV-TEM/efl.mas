@@ -1414,3 +1414,11 @@ p.si-line { margin: 2px 0 0; }
 .pill.tn { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 /* v164: TN-UR under the UR of a line */
 .tn-ur { color: var(--accent); font-weight: 600; white-space: nowrap; }
+
+/* v167: maintenance shutdown */
+.maint-note { display: grid; gap: 4px; padding: 12px 14px; border-radius: 14px; border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent); background: color-mix(in srgb, var(--warn) 14%, transparent); font-size: 13px; text-align: left; }
+.maint-note small { color: var(--ink-2); }
+.maint-form { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
+.maint-form label:first-child { grid-column: 1 / -1; }
+@media (max-width: 640px) { .maint-form { grid-template-columns: 1fr; } }
+.maint-bar { margin: 8px 16px 0; }
