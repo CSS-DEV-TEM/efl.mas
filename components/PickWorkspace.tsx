@@ -1,6 +1,7 @@
 'use client';
 import LineCoach from './LineCoach';
 import ReconModal from './ReconModal';
+import DayEndModal from './DayEndModal';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Loader, Skeleton } from '@/components/Loader';
@@ -49,6 +50,14 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
   const [histKey, setHistKey] = useState(0);
   const [importOpen, setImportOpen] = useState(false);
   const [reconOpen, setReconOpen] = useState(false);
+  const plApi = useRef<DayPL | null>(null);
+  const [dayEnd, setDayEnd] = useState(false);
+  // v155 Day end: a day plan view (All picks of the day) — and whether that day was ended
+  const viewDay = /^\d{4}-\d{2}-\d{2}$/.test(week) ? week : /^(\d{4}-\d{2}-\d{2})~/.exec(week)?.[1] ?? '';
+  const [ended, setEnded] = useState<null | { by_user: string; at: string; rids: string[] }>(null);
+  const loadEnded = useCallback(() => { if (!viewDay) { setEnded(null); return; } api<{ done: typeof ended }>('/api/pick/dayend?brief=1&day=' + viewDay).then((r) => setEnded(r.done)).catch(() => setEnded(null)); }, [viewDay]);
+  useEffect(() => { loadEnded(); }, [loadEnded]);
+  const isBossUser = isBossRole(getSession()?.user.role);
   const inputs = useRef<Record<string, HTMLInputElement | null>>({});
 
   // the reports of the Pick on screen (a day plan round); the whole day / a week: the shared reports
@@ -191,8 +200,8 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
   };
   // v134: Plan → Pick report — the lines on screen with their State, and each line's rolls: can it be picked, and why not
   const [repBusy, setRepBusy] = useState(false);
-  const downloadReport = async () => {
-    const ls = list.slice();
+  const downloadReport = async (opts?: { capture: (wb: ReturnType<typeof planPickWorkbook>) => void }) => {
+    const ls = (opts ? rows : list).slice();
     if (!ls.length) { toast('No lines on screen for the report.'); return; }
     setRepBusy(true);
     const task = startTask('Plan → Pick report', 'checking the rolls of each line', ls.length);
@@ -245,6 +254,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
           outR.push({ ...base, pallet: '', roll: '', lot: '', batch: '', shade: '', location: '', korberQty: null, available: null, pickable: 'No', reason: 'No roll found for this line', note: (c.steps || []).slice(-2).join(' · ') });
       }
       const title = `${label || week}${scope ? ` · ${scope}` : ''}`;
+      if (opts) { opts.capture(planPickWorkbook(outL, outR, `${label || week} · Day end`)); return; }
       saveWorkbook(planPickWorkbook(outL, outR, title), `Plan_Pick_Report_${(label || week).replace(/[^\w]+/g, '_')}.xlsx`);
       toast(`Plan → Pick report: ${outL.length} lines, ${outR.length} rolls`);
     } catch (e) { toast(e instanceof Error ? e.message : 'Could not make the report.'); }
@@ -464,6 +474,8 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
             )}
             {canEdit && <button className="btn primary run-all" disabled={!!run && !run.finished} onClick={() => void runAll()} title={autoKind === 'offsite' && autoRules.allowOffsite ? 'Offsite: pick every All-match roll, the last roll cut to the exact QTY' : 'Normal: pick every All-match roll, then tally the cut roll balances'}>⚡ Pick all matched{autoRules.allowOffsite ? ` · ${autoKind === 'offsite' ? 'Offsite' : 'Normal'}` : ''}</button>}
             <button className="btn" disabled={repBusy} aria-busy={repBusy || undefined} onClick={() => void downloadReport()} title="Excel: the lines on screen with their State, and every roll of each line — can it be picked, and why not">{repBusy ? 'Preparing…' : '📄 Plan → Pick report'}</button>
+            {ended && <button type="button" className="pill accent de-pill" title={`Day ended by ${ended.by_user} at ${new Date(ended.at).toLocaleString()} — the day's Pick reports were cleared; the Day end report has the final state. Click to download it.`} onClick={() => void downloadLatest('dayend', viewDay).catch((e) => toast(e instanceof Error ? e.message : 'Not found'))}>🌙 Day ended · {ended.by_user} · ⬇ report</button>}
+            {isBossUser && canEdit && /^\d{4}-\d{2}-\d{2}$/.test(week) && <button className="btn dayend-btn" onClick={() => setDayEnd(true)} title="Day end: the day's full report is saved in the system, then the day's Pick reports are deleted (plan, picks and history stay)">🌙 Day end</button>}
             {rid && <button className="btn" onClick={() => setReconOpen(true)} title="Korber ↔ SAP tally: every Material of this Pick — SAP UR, ZROLLMGT rolls and Korber rolls, and what differs">🔄 Korber ↔ SAP tally</button>}
             {canEdit && <button className="btn" onClick={() => setImportOpen(true)} title="A Packing List file (this system's format) into this Pick: its rolls are saved as picks of the Pick's SO lines">⬆ Import Packing List</button>}
             {importOpen && <ImportPLDialog week={week} label={label || week} toast={toast} onClose={(changed) => { setImportOpen(false); if (changed) { reload(); setHistKey((k) => k + 1); } }} />}
@@ -616,11 +628,17 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
       {holding && <HoldDialog line={holding} onClose={() => setHolding(null)} onSave={(r) => { const l = holding; setHolding(null); void setHold(l, r); }} />}
 
 
-      <PickHistoryCard key={histKey} canEdit={canEdit} toast={toast} onChanged={() => { reload(); setHistKey((k) => k + 1); }} />
+      <PickHistoryCard key={histKey} canEdit={canEdit} toast={toast} onChanged={() => { reload(); setHistKey((k) => k + 1); }} plApi={plApi} />
 
       <RejectedRolls key={`rj${histKey}`} canEdit={canEdit} toast={toast} onChanged={() => { reload(); setHistKey((k) => k + 1); }} />
 
 
+      {dayEnd && <DayEndModal day={viewDay} rows={rows as never} toast={toast}
+        autoLeft={rows.filter((l) => !l.hold && todo(l) > 1e-9 && (scan[l.id]?.auto ?? 0) > 1e-9).length}
+        openLines={rows.filter((l) => !l.hold && todo(l) > 1e-9).length}
+        buildPL={async () => (plApi.current ? plApi.current.run(viewDay) : null)}
+        buildReport={() => new Promise((res) => { void downloadReport({ capture: (wb) => res(wb) }).then(() => res(null)); })}
+        onClose={(changed) => { setDayEnd(false); if (changed) { loadEnded(); loadStatus(); reload(); setHistKey((k) => k + 1); } }} />}
       {reconOpen && rid && <ReconModal rid={rid} label={label || rid} onClose={() => setReconOpen(false)} />}
       {picking && <PickModal week={picking.week || week} line={picking} onClose={() => setPicking(null)}
         onDone={(m) => { setPicking(null); toast(m); reload(); setHistKey((k) => k + 1); }} />}
@@ -1489,8 +1507,11 @@ function KorberChooser({ item, rid, batches, lineKey, roll, title, taken, mine =
 
 /** The day chosen in the pick history: kept when the card reloads after a change (cancel, tally, …). */
 let histDay = '';
-function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toast: (m: string) => void; onChanged: () => void }) {
+/** v155 Day end: the Packing List of a day built without saving it (the Day end report takes its sheets) */
+export type DayPL = { run: (day: string) => Promise<{ wb: ReturnType<typeof packingListWorkbook>; file: string; issues: number; picks: number; tallied: number } | null> };
+function PickHistoryCard({ canEdit, toast, onChanged, plApi }: { canEdit: boolean; toast: (m: string) => void; onChanged: () => void; plApi?: React.MutableRefObject<DayPL | null> }) {
   const [day, setDay0] = useState(histDay || today());
+  const day0 = day;
   const setDay = (d: string) => { histDay = d; setDay0(d); };
   const [h, setH] = useState<PickHistory | null>(null);
   const [open, setOpen] = useState<number | null>(null);
@@ -1530,18 +1551,19 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
   const setAutoTally = (v: boolean) => { setAutoTally0(v); try { localStorage.setItem('pl_auto_tally', v ? '1' : '0'); } catch { /* */ } };
   const ptag = pickId ? '_' + pickName(pickId).replace(/[^\w]+/g, '_') : '';
   const [plBusy, setPlBusy] = useState(false);
-  const downloadPL = async () => {
+  const downloadPL = async (opts?: { hist: PickHistory; day: string; capture: (x: { wb: ReturnType<typeof packingListWorkbook>; file: string; issues: number; picks: number; tallied: number }) => void }) => {
+    const day = opts?.day ?? day0;
     setPlBusy(true);
     // v126: the progress bar at the top (steps and lines checked)
     const task = startTask('Packing List download', 'starting');
     try {
       // cut roll balances first: each one goes to another SO line it can go to (same Material and LI, UR in ZMMBE, a ZINSR
       // lot with the roll's Vendor Batch) as a pick of that line — then the Packing List is made with them
-      let hh = h!, target = target0, tallied = 0, tallyQty = 0;
+      let hh = opts?.hist ?? h!, target = opts ? opts.hist.requests.filter((r) => !r.cancelled_at) : target0, tallied = 0, tallyQty = 0;
       const tallyFail: string[] = [], untallied: string[] = [];
       // an Offsite pick is cut to the exact QTY: its cut roll's balance is not tallied (it stays on the shelf)
       const tallyFrom = target.filter((r) => r.kind !== 'offsite');
-      if (canEdit && autoTally && tallyFrom.length) {
+      if (canEdit && (autoTally || !!opts) && tallyFrom.length) {
         setPlProg('tallying cut rolls');
         task.step('tallying cut roll balances');
         try {
@@ -1562,11 +1584,11 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
             catch (e) { tallyFail.push(`${x.pallet} → ${y.so} / ${y.li}: ${e instanceof Error ? e.message : 'failed'}`); }
           }
           if (newIds.length) {
-            hh = await api<PickHistory>('/api/pick/history?day=' + day + (mine && me ? '&user=' + encodeURIComponent(me) : ''));
-            setH(hh);
+            hh = await api<PickHistory>('/api/pick/history?day=' + day + (mine && me && !opts ? '&user=' + encodeURIComponent(me) : ''));
+            if (!opts) setH(hh);
             const want = new Set([...target.map((r) => r.id), ...newIds]);
             target = hh.requests.filter((r) => !r.cancelled_at && want.has(r.id));
-            if (marked.length) setSel(new Set(target.map((r) => r.id)));
+            if (marked.length && !opts) setSel(new Set(target.map((r) => r.id)));
           }
         } catch (e) { tallyFail.push(e instanceof Error ? e.message : 'Could not read the cut rolls.'); }
         setPlProg('');
@@ -1655,11 +1677,25 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
       const tallyMsg = tallied ? ` · ${tallied} cut roll balance${tallied === 1 ? '' : 's'} tallied (${fmtQty(tallyQty)})` : '';
       if (tallyFail.length) toast(`Cut roll tally: ${tallyFail.length} not saved — ${tallyFail[0]}`);
       if (untallied.length) toast(`Cut roll balance not tallied (stays on the roll): ${untallied.length} roll${untallied.length === 1 ? '' : 's'} — ${untallied.slice(0, 3).join(' · ')}${untallied.length > 3 ? ' …' : ''}`);
+      if (opts) { opts.capture({ wb, file, issues: issues.length, picks: target.length, tallied }); return; }
       if (issues.length) { setPlCheck({ wb, file, issues }); if (tallied) toast(`${tallied} cut roll balance${tallied === 1 ? '' : 's'} tallied (${fmtQty(tallyQty)}) — on this Packing List`); }
       else { saveWorkbook(wb, file); toast(`Packing List checked ✓${tallyMsg} — ${target.length} pick${target.length === 1 ? '' : 's'}: SAP lines and Korber rows are right${notPicked.length ? ` · ${notPicked.length} line${notPicked.length === 1 ? '' : 's'} not picked (sheet “Not Picked”)` : ''}`); }
     } finally { setPlBusy(false); setPlProg(''); task.end(); }
   };
   const [plProg, setPlProg] = useState('');
+  // v155: Day end asks for the day's Packing List (all picks of that day, cut roll balances tallied) without saving it
+  const dlRef = useRef(downloadPL); dlRef.current = downloadPL;
+  useEffect(() => {
+    if (!plApi) return;
+    plApi.current = { run: async (d: string) => {
+      const hist = await api<PickHistory>('/api/pick/history?day=' + d);
+      if (!hist.requests.some((r) => !r.cancelled_at)) return null;
+      let out: Parameters<NonNullable<Parameters<typeof downloadPL>[0]>['capture']>[0] | null = null;
+      await dlRef.current({ hist, day: d, capture: (x) => { out = x; } });
+      return out;
+    } };
+    return () => { if (plApi) plApi.current = null; };
+  }, [plApi]);
   const [tallyOpen, setTallyOpen] = useState(false);
   const [plCheck, setPlCheck] = useState<{ wb: ReturnType<typeof packingListWorkbook>; file: string; issues: PLIssue[] } | null>(null);
   const downloadKorber = () => saveWorkbook(korberWorkbook(h!, new Set(target.map((r) => r.id))), `Korber_Picked_${day}${ptag}${tag}.xlsx`);
@@ -1725,7 +1761,7 @@ function PickHistoryCard({ canEdit, toast, onChanged }: { canEdit: boolean; toas
           </div>
           {canEdit && <label className="small" style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }} title="When the Packing List is made, each cut roll's balance is first tallied to another SO line that can take it (same Material and LI, UR in ZMMBE, a ZINSR lot with the roll's Vendor Batch) and goes on the Packing List with that line's SAP details">
             <input type="checkbox" checked={autoTally} onChange={(e) => setAutoTally(e.target.checked)} /> Tally cut roll balances</label>}
-          <button className="btn primary" disabled={plBusy} aria-busy={plBusy || undefined} onClick={downloadPL}>{plBusy ? `Preparing…${plProg ? (/^\d/.test(plProg) ? ` checking lines ${plProg}` : ` ${plProg}`) : ''}` : `Download Packing List${marked.length ? ` (${marked.length})` : ''}`}</button>
+          <button className="btn primary" disabled={plBusy} aria-busy={plBusy || undefined} onClick={() => void downloadPL()}>{plBusy ? `Preparing…${plProg ? (/^\d/.test(plProg) ? ` checking lines ${plProg}` : ` ${plProg}`) : ''}` : `Download Packing List${marked.length ? ` (${marked.length})` : ''}`}</button>
           <button className="btn" disabled={!h.korberHeader} onClick={downloadKorber} title="The picked rolls in the Korber Inventory format (cut rolls with the cut QTY)">Korber Inventory{marked.length ? ` (${marked.length})` : ''}</button>
           {canEdit && <button className="btn" onClick={() => setTallyOpen(true)} title="A cut roll's balance to another SO line of the same Material and LI (ZMMBE UR, ZINSR lot with the roll's Vendor Batch) — saved as a pick of that SO line, on the Packing List with its SAP details">✂ Tally cut rolls{marked.length ? ` (${marked.length})` : ''}</button>}
           {canEdit && marked.length > 0 && <button className="btn danger" disabled={!cancelable.length || !!bulkBusy} aria-busy={!!bulkBusy || undefined} onClick={cancelMarked}

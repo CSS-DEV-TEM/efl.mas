@@ -623,7 +623,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 99; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 101; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -2066,8 +2066,8 @@ async function handleFiles(env: Env, req: Request, p: string) {
     if (Number(got?.n) !== Number(f.parts) || Math.abs(bytes - Number(f.size)) > 0) throw new HttpError(400, `The file did not arrive in full (${got?.n} of ${f.parts} parts) — upload it again.`);
     await env.DB.prepare('UPDATE upload_file SET complete = 1, uploaded_at = ? WHERE id = ?').bind(now(), f.id).run();
     // keep the newest files of each report + scope, and the total under the limit (the oldest go first)
-    const old = (await env.DB.prepare(`SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY srcs, COALESCE(rid, '') ORDER BY uploaded_at DESC, id DESC) rn FROM upload_file WHERE complete = 1) WHERE rn > ?`).bind(FILE_KEEP).all<Row>()).results.map((x) => Number(x.id));
-    const byAge = (await env.DB.prepare('SELECT id, size FROM upload_file WHERE complete = 1 ORDER BY uploaded_at DESC, id DESC').all<Row>()).results;
+    const old = (await env.DB.prepare(`SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY srcs, COALESCE(rid, '') ORDER BY uploaded_at DESC, id DESC) rn FROM upload_file WHERE complete = 1 AND srcs <> 'dayend') WHERE rn > ?`).bind(FILE_KEEP).all<Row>()).results.map((x) => Number(x.id));
+    const byAge = (await env.DB.prepare("SELECT id, size FROM upload_file WHERE complete = 1 AND srcs <> 'dayend' ORDER BY uploaded_at DESC, id DESC").all<Row>()).results; // v155: Day end reports are kept
     let t = 0; for (const x of byAge) { t += Number(x.size) || 0; if (t > FILES_TOTAL && Number(x.id) !== Number(f.id)) old.push(Number(x.id)); }
     if (old.length) {
       const J = JSON.stringify(Array.from(new Set(old)));
@@ -2340,6 +2340,61 @@ async function handlePick(env: Env, req: Request, p: string) {
   // GET /api/pick/status?rid= — each report of a Pick: its own upload (rows, file, who, when) or the shared one it falls back to
   // v152: Korber ↔ SAP tally of a Pick — for each Material of the plan: SAP UR (ZMMBE) by batch, the rolls SAP has in
   // ZROLLMGT and the rolls on the shelf in Korber, matched roll by roll; what differs and why. Counts only, nothing is changed.
+  // v155 Day end: GET ?day → its Picks with their report rows (and whether the day was ended); POST {day, rids, summary} (Admin /
+  // Head) → the Picks' report uploads (ZMMBE, KFC/PFC, ZINR, ZCOMENT VIEW, Korber, ZROLLMGT, ZMM_TRR) and their kept original
+  // files are deleted. The plan, the picks, the pick history and the shared reports stay; the Day end report (saved first) stays.
+  if (part === 'dayend') {
+    const s = await requireUser(env, req);
+    await env.DB.prepare('CREATE TABLE IF NOT EXISTS day_end (day TEXT PRIMARY KEY, by_user TEXT, at TEXT, rids TEXT, summary TEXT, deleted TEXT)').run();
+    const TABLES = ['stock', 'stock_sent', 'zinr', 'zcoment', 'korber', 'zroll', 'ztrr'];
+    if (req.method === 'GET') {
+      const day = String(url.searchParams.get('day') || '').slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new HttpError(400, 'Choose a day.');
+      const done = await env.DB.prepare('SELECT * FROM day_end WHERE day = ?').bind(day).first<Row>();
+      if (url.searchParams.get('brief')) return json({ day, done: done ? { day: done.day, by_user: done.by_user, at: done.at, rids: JSON.parse(String(done.rids || '[]')) } : null });
+      const rids = Array.from(new Set([
+        ...(await env.DB.prepare('SELECT rid FROM pick_round WHERE day = ?').bind(day).all<Row>()).results.map((x) => String(x.rid)),
+        ...(await env.DB.prepare("SELECT DISTINCT week FROM plan WHERE plan_type = 'day' AND substr(week, 1, 10) = ?").bind(day).all<Row>()).results.map((x) => String(x.week)),
+      ].filter((r) => !!parseRound(r)))).sort();
+      const out: Row[] = [];
+      for (const rid of rids) {
+        const n: Record<string, number> = {};
+        for (const t of TABLES) n[t] = Number((await env.DB.prepare(`SELECT COUNT(*) n FROM ${t} WHERE rid = ?`).bind(rid).first<{ n: number }>())?.n ?? 0);
+        const files = (await env.DB.prepare("SELECT COUNT(*) n, COALESCE(SUM(size), 0) size FROM upload_file WHERE rid = ? AND srcs <> 'dayend'").bind(rid).first<Row>());
+        out.push({ rid, rows: n, total: Object.values(n).reduce((a, b) => a + b, 0), files: Number(files?.n ?? 0), fileSize: Number(files?.size ?? 0) });
+      }
+      return json({ day, done: done ? { ...done, summary: JSON.parse(String(done.summary || '{}')), deleted: JSON.parse(String(done.deleted || '{}')), rids: JSON.parse(String(done.rids || '[]')) } : null, picks: out });
+    }
+    if (req.method === 'POST') {
+      if (!isBoss(s)) throw new HttpError(403, 'Only Admin or Head can end the day.');
+      const b = (await req.json()) as { day?: string; rids?: string[]; summary?: Row };
+      const day = String(b.day || '').slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new HttpError(400, 'Choose a day.');
+      const rids = Array.from(new Set((b.rids || []).map(String))).filter((r) => { const pr = parseRound(r); return !!pr && pr.day === day; });
+      if (!rids.length) throw new HttpError(400, 'No Pick of this day was chosen.');
+      // the Day end report must be saved in the system first
+      const rep0 = await env.DB.prepare("SELECT id FROM upload_file WHERE complete = 1 AND srcs = 'dayend' AND rid = ? ORDER BY id DESC LIMIT 1").bind(day).first<Row>();
+      if (!rep0) throw new HttpError(409, 'The Day end report is not saved yet — nothing was deleted.');
+      const deleted: Record<string, number> = {};
+      for (const rid of rids) for (const t of TABLES) {
+        const r = await env.DB.prepare(`DELETE FROM ${t} WHERE rid = ?`).bind(rid).run();
+        deleted[t] = (deleted[t] ?? 0) + Number(r.meta?.changes ?? 0);
+      }
+      const J = JSON.stringify(rids);
+      const fr = await env.DB.batch([
+        env.DB.prepare("DELETE FROM upload_file_part WHERE file_id IN (SELECT id FROM upload_file WHERE rid IN (SELECT value FROM json_each(?)) AND srcs <> 'dayend')").bind(J),
+        env.DB.prepare("DELETE FROM upload_file WHERE rid IN (SELECT value FROM json_each(?)) AND srcs <> 'dayend'").bind(J),
+        env.DB.prepare('DELETE FROM cand_cache'),
+      ]);
+      deleted.files = Number(fr[1].meta?.changes ?? 0);
+      await env.DB.prepare('INSERT INTO day_end (day, by_user, at, rids, summary, deleted) VALUES (?,?,?,?,?,?) ON CONFLICT(day) DO UPDATE SET by_user = excluded.by_user, at = excluded.at, rids = excluded.rids, summary = excluded.summary, deleted = excluded.deleted')
+        .bind(day, s.u, now(), J, JSON.stringify(b.summary ?? {}), JSON.stringify(deleted)).run();
+      await logActivity(env, s.u, 'dayend', `Day end ${day}: ${rids.length} Pick(s) — ${Object.entries(deleted).map(([k, v]) => `${k} ${v}`).join(', ')}`);
+      await broadcast(env, { type: 'data', src: 'clear', by: s.u, rows: 0, weeks: rids });
+      return json({ ok: true, day, rids, deleted });
+    }
+  }
+
   if (part === 'recon' && req.method === 'GET') {
     await requireUser(env, req);
     const rid = scopeRid(url.searchParams.get('rid'));
@@ -3657,14 +3712,16 @@ async function zcomentShade(env: Env, k: { pallet: unknown; item: unknown; lot: 
 
 /** Korber Po Number (older uploads have it only in the raw row). */
 const poIxBy = new Map<string, number>();
+const hdrAt = new Map<string, number>(); // v156: the Korber header positions are read again every 5 minutes (a new Korber upload may move columns)
 async function korberPo(env: Env, k: Row): Promise<string | null> {
   if (k.po) return String(k.po);
   const dk = env.DIV || 'active';
+  if (Date.now() - (hdrAt.get('po|' + dk) ?? 0) > 5 * 60e3) { poIxBy.delete(dk); hdrAt.set('po|' + dk, Date.now()); }
   let poIx = poIxBy.get(dk);
   if (poIx === undefined) {
     const h = (await env.DB.prepare("SELECT v FROM config WHERE k = 'korber_header'").first<{ v: string }>())?.v;
     poIx = h ? (JSON.parse(h) as unknown[]).map(hnorm).indexOf('ponumber') : -1;
-    poIxBy.set(dk, poIx);
+    if (h) poIxBy.set(dk, poIx); // v156: no Korber uploaded yet (a new system): asked again next time
   }
   if (poIx < 0 || !k.raw) return null;
   try { const v = (JSON.parse(String(k.raw)) as unknown[])[poIx]; return v === null || v === undefined || v === '' ? null : up(v); } catch { return null; }
@@ -3970,7 +4027,8 @@ async function batchLotQty(env: Env, so: unknown, li: unknown, item: unknown) {
  * moves "rev", and the settings are part of the key — so the same line asked again (another user opening the Pick, the
  * "Needs manual" check) is read back instead of worked out again. Kept 15 minutes at most.
  */
-let candCacheReady = false;
+/** v156: the cache table is made once per system (MAS Active / MAS Kreeda each have their own database) */
+const candCacheReady = new Set<string>();
 /**
  * v147: a result kept until something it reads changes. It depends on
  *   - "c_drev": every change that is not a pick of known Materials (an upload, the plan, the settings, a hold …);
@@ -3982,7 +4040,7 @@ let candCacheReady = false;
 const ITEM_RE = /"item":"([^"]*)"/g;
 async function revCached<T>(env: Env, id: string, base: string[], make: () => Promise<T>): Promise<T> {
   try {
-    if (!candCacheReady) { await env.DB.prepare('CREATE TABLE IF NOT EXISTS cand_cache (k TEXT PRIMARY KEY, rev TEXT NOT NULL, at TEXT NOT NULL, v TEXT NOT NULL)').run(); candCacheReady = true; }
+    if (!candCacheReady.has(env.DIV || 'active')) { await env.DB.prepare('CREATE TABLE IF NOT EXISTS cand_cache (k TEXT PRIMARY KEY, rev TEXT NOT NULL, at TEXT NOT NULL, v TEXT NOT NULL)').run(); candCacheReady.add(env.DIV || 'active'); }
     const [r1, r2] = await env.DB.batch([
       env.DB.prepare("SELECT k, v FROM config WHERE k IN ('c_drev', 'settings')"),
       env.DB.prepare('SELECT rev, at, v FROM cand_cache WHERE k = ?').bind(id),
@@ -4035,7 +4093,7 @@ async function kavCached(env: Env, id: string, keys: string[], run: (sub: string
   const out = new Map<string, { key: string; avail: number; rolls: number }>();
   let drev = '', entries: Record<string, E> = {}, ok = false;
   try {
-    if (!candCacheReady) { await env.DB.prepare('CREATE TABLE IF NOT EXISTS cand_cache (k TEXT PRIMARY KEY, rev TEXT NOT NULL, at TEXT NOT NULL, v TEXT NOT NULL)').run(); candCacheReady = true; }
+    if (!candCacheReady.has(env.DIV || 'active')) { await env.DB.prepare('CREATE TABLE IF NOT EXISTS cand_cache (k TEXT PRIMARY KEY, rev TEXT NOT NULL, at TEXT NOT NULL, v TEXT NOT NULL)').run(); candCacheReady.add(env.DIV || 'active'); }
     const [r1, r2] = await env.DB.batch([
       env.DB.prepare("SELECT v FROM config WHERE k = 'c_drev'"),
       env.DB.prepare('SELECT rev, at, v FROM cand_cache WHERE k = ?').bind(id),
@@ -4090,7 +4148,7 @@ async function kavCached(env: Env, id: string, keys: string[], run: (sub: string
 /** v154: kept until any change ("rev" moves on every change) — 10 minutes at most */
 async function revKeep<T>(env: Env, id: string, make: () => Promise<T>): Promise<T> {
   try {
-    if (!candCacheReady) { await env.DB.prepare('CREATE TABLE IF NOT EXISTS cand_cache (k TEXT PRIMARY KEY, rev TEXT NOT NULL, at TEXT NOT NULL, v TEXT NOT NULL)').run(); candCacheReady = true; }
+    if (!candCacheReady.has(env.DIV || 'active')) { await env.DB.prepare('CREATE TABLE IF NOT EXISTS cand_cache (k TEXT PRIMARY KEY, rev TEXT NOT NULL, at TEXT NOT NULL, v TEXT NOT NULL)').run(); candCacheReady.add(env.DIV || 'active'); }
     const [r1, r2] = await env.DB.batch([
       env.DB.prepare("SELECT v FROM config WHERE k = 'rev'"),
       env.DB.prepare('SELECT rev, at, v FROM cand_cache WHERE k = ?').bind(id),
@@ -4347,11 +4405,12 @@ async function trimItem(env: Env, item: string, stock: Row[]): Promise<string> {
   if (stock.some((x) => String(x.descr ?? '').trim())) return ''; // the ZMMBE has a description and it is not one of these
   // an older ZMMBE upload (no description kept): the Korber Description of the item
   const dk = env.DIV || 'active';
+  if (Date.now() - (hdrAt.get('tr|' + dk) ?? 0) > 5 * 60e3) { trimHdr.delete(dk); hdrAt.set('tr|' + dk, Date.now()); }
   let ix = trimHdr.get(dk);
   if (ix === undefined) {
     const h = (await env.DB.prepare("SELECT v FROM config WHERE k = 'korber_header'").first<{ v: string }>())?.v;
     ix = h ? (JSON.parse(h) as unknown[]).map(hnorm).findIndex((x) => x === 'description' || x === 'itemdescription') : -1;
-    trimHdr.set(dk, ix);
+    if (h) trimHdr.set(dk, ix); // v156: no Korber uploaded yet: asked again next time
   }
   if (ix < 0) return '';
   const k = await env.DB.prepare('SELECT /*exact*/ raw FROM korber WHERE item = ? LIMIT 1').bind(item).first<{ raw: string | null }>();

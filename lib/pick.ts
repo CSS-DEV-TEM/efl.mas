@@ -698,6 +698,32 @@ export function planPickWorkbook(lines: PPLine[], rolls: PPRoll[], title: string
 export function saveWorkbook(wb: XLSX.WorkBook, file: string) {
   XLSXS.writeFile(wb, file, { cellStyles: true });
 }
+/** v155: the bytes of a workbook (to keep it in the system) */
+export function workbookBytes(wb: XLSX.WorkBook): Uint8Array {
+  return new Uint8Array(XLSXS.write(wb, { type: 'array', bookType: 'xlsx', cellStyles: true }) as ArrayBuffer);
+}
+/** v155: one workbook from several (their sheets in order; a name used twice gets a short prefix) */
+export function mergeWorkbooks(parts: { wb: XLSX.WorkBook; prefix: string }[]): XLSX.WorkBook {
+  const out = XLSXS.utils.book_new();
+  const used = new Set<string>();
+  for (const { wb, prefix } of parts) for (const n of wb.SheetNames) {
+    let name = used.has(n) ? `${prefix} ${n}` : n;
+    name = name.replace(/[\\/?*[\]:]/g, ' ').slice(0, 31);
+    let k = 2; while (used.has(name)) name = `${name.slice(0, 28)} ${k++}`;
+    used.add(name);
+    XLSXS.utils.book_append_sheet(out, wb.Sheets[n], name);
+  }
+  return out;
+}
+/** v155: a plain sheet (title row, header, rows) with widths */
+export function simpleSheet(title: string, header: string[], rows: (string | number | null)[][], widths?: number[]) {
+  const ws = XLSXS.utils.aoa_to_sheet([[title], [], header, ...rows]);
+  ws['!cols'] = (widths ?? header.map(() => 16)).map((w) => ({ wch: w }));
+  const bold = { font: { bold: true } };
+  if (ws.A1) ws.A1.s = { font: { bold: true, sz: 14 } };
+  header.forEach((_, c) => { const ref = XLSXS.utils.encode_cell({ r: 2, c }); if (ws[ref]) ws[ref].s = { ...bold, fill: { fgColor: { rgb: 'FFE8D5' } } }; });
+  return ws;
+}
 
 /**
  * The Korber row as picked: a cut roll's Actual Qty becomes the QTY taken from it (a full roll keeps its own).
