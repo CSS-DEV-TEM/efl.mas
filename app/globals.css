@@ -1357,3 +1357,43 @@ p.si, .si { font-family: "Noto Sans Sinhala", "Iskoola Pota", var(--font-sans); 
 .de-done h3 { margin: 0; font-family: var(--font-cond); font-size: 22px; }
 .de-del { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 6px; width: 100%; }
 .de-del li { display: flex; justify-content: space-between; gap: 8px; padding: 8px 10px; border-radius: 12px; background: var(--glass); border: 1px solid var(--glass-rim); font-size: 12.5px; }
+
+/* ================================================ v157 · alignment fixes */
+/* theme switch: three equal 32px slots, the thumb moves exactly one slot */
+.theme-toggle { grid-template-columns: repeat(3, 32px); height: 32px; padding: 0; }
+.theme-toggle button { width: 32px; height: 32px; }
+.theme-toggle .tt-thumb { top: 3px; left: 3px; width: 26px; height: 26px; }
+.theme-toggle button svg { display: block; }
+/* Sinhala on its own line under the English (never mixed in one wrapped line) */
+.si-line { display: block; margin-top: 3px; }
+p.si-line { margin: 2px 0 0; }
+/* Day end window */
+.dayend .modal-head > div { min-width: 0; }
+.dayend .modal-head p { margin: 4px 0 0; max-width: 70ch; }
+.de-tbl { max-height: 260px; border-radius: 12px; border: 1px solid var(--line); }
+.de-tbl table.mini { width: 100%; }
+.de-tbl td .muted { white-space: normal; line-height: 1.45; }
+.de-tbl td:first-child, .de-tbl th:first-child { width: 34px; text-align: center; }
+.dayend .notice { line-height: 1.5; }
+.de-ok { align-items: flex-start; }
+.de-ok input { margin-top: 3px; flex: none; }
+.dayend > div:last-child { flex-wrap: wrap; }
+/* the top status line on a phone: one flowing line of text, not narrow columns */
+@media (max-width: 640px) {
+  .top-status .ts-live { display: block; line-height: 1.5; }
+  .top-status .ts-live i { display: inline-block; margin-right: 6px; vertical-align: 1px; }
+  .top-status .ts-live .muted { display: block; }
+}
+/* a segmented control that wraps onto two lines (phone): rounded corners, not a long pill */
+@media (max-width: 640px) {
+  .seg { border-radius: 16px; flex-wrap: wrap; }
+  .seg button { border-radius: 12px; }
+  .coach-orb { width: 46px; height: 46px; }
+}
+/* Data manager: the feature names wrap on a narrow screen */
+.dm table.mini td:first-child { white-space: normal; min-width: 170px; }
+.dm table.mini td:first-child .si { display: block; }
+/* the Smart Coach orb sits over the page less: a little smaller and softer until the pointer comes */
+.coach-orb { width: 48px; height: 48px; opacity: .88; }
+.coach-orb:hover, .coach-orb:focus-visible, .coach-orb.open { opacity: 1; }
+.site-foot { padding-bottom: 72px; }

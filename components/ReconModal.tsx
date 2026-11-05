@@ -43,7 +43,7 @@ export default function ReconModal({ rid, label, onClose }: { rid: string; label
         <div className="modal-head">
           <div>
             <h2 id="recon-t">🔄 Korber ↔ SAP tally · {label}</h2>
-            <p className="muted small">Each Material of this Pick: SAP UR (ZMMBE), the rolls SAP has (ZROLLMGT{r ? ` at ${r.bin}` : ''}) and the rolls on the shelf (Korber), matched roll by roll. <span className="si" lang="si">මේ Pick එකේ හැම Material එකකටම SAP UR, SAP rolls (ZROLLMGT) සහ shelf එකේ rolls (Korber) roll එකින් එක match කරලා.</span></p>
+            <p className="muted small">Each Material of this Pick: SAP UR (ZMMBE), the rolls SAP has (ZROLLMGT{r ? ` at ${r.bin}` : ''}) and the rolls on the shelf (Korber), matched roll by roll.<span className="si si-line" lang="si">මේ Pick එකේ හැම Material එකකටම SAP UR, SAP rolls (ZROLLMGT) සහ shelf එකේ rolls (Korber) roll එකින් එක match කරලා.</span></p>
           </div>
           <button className="btn sm" onClick={onClose} aria-label="Close">✕</button>
         </div>
@@ -61,7 +61,7 @@ export default function ReconModal({ rid, label, onClose }: { rid: string; label
                 <button type="button" className={filter === 'all' ? 'on' : ''} aria-checked={filter === 'all'} role="radio" onClick={() => setFilter('all')}>All</button>
               </span>
             </div>
-            {!r.zroll && <div className="notice warn">No ZROLLMGT for this Pick — upload it to tally the rolls with SAP. <span className="si" lang="si">මේ Pick එකට ZROLLMGT upload කරලා නැහැ — SAP එක්ක tally කරන්න ඒක upload කරන්න.</span></div>}
+            {!r.zroll && <div className="notice warn">No ZROLLMGT for this Pick — upload it to tally the rolls with SAP.<span className="si si-line" lang="si">මේ Pick එකට ZROLLMGT upload කරලා නැහැ — SAP එක්ක tally කරන්න ඒක upload කරන්න.</span></div>}
             {!items.length && <div className="empty">Everything matches ✓ <span className="si" lang="si">සේරම match වෙනවා ✓</span></div>}
             <div className="recon-list">
               {items.map((it, i) => {

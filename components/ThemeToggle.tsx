@@ -27,14 +27,16 @@ export default function ThemeToggle() {
         { duration: 520, easing: 'cubic-bezier(.2,.8,.2,1)', pseudoElement: '::view-transition-new(root)' });
     }).catch(() => {});
   };
-  const opts: { m: Mode; icon: string; label: string }[] = [
-    { m: 'light', icon: '☀', label: 'Light' },
-    { m: 'auto', icon: '◐', label: 'Auto (this device)' },
-    { m: 'dark', icon: '☾', label: 'Dark' },
+  // v157: the same-size line icons (text glyphs render at different sizes on each device)
+  const I = (d: React.ReactNode) => <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>{d}</svg>;
+  const opts: { m: Mode; icon: React.ReactNode; label: string }[] = [
+    { m: 'light', icon: I(<><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></>), label: 'Light' },
+    { m: 'auto', icon: I(<><circle cx="12" cy="12" r="8.5" /><path d="M12 3.5v17a8.5 8.5 0 0 0 0-17z" fill="currentColor" stroke="none" /></>), label: 'Auto (this device)' },
+    { m: 'dark', icon: I(<path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" />), label: 'Dark' },
   ];
   return (
     <div className="theme-toggle" role="radiogroup" aria-label="Theme">
-      <span className="tt-thumb" style={{ transform: `translateX(${opts.findIndex((o) => o.m === mode) * 100}%)` }} aria-hidden />
+      <span className="tt-thumb" style={{ transform: `translateX(${opts.findIndex((o) => o.m === mode) * 32}px)` }} aria-hidden />
       {opts.map((o) => (
         <button key={o.m} type="button" role="radio" aria-checked={mode === o.m} title={o.label} aria-label={o.label} className={mode === o.m ? 'on' : ''} onClick={(e) => pick(o.m, e)}>{o.icon}</button>
       ))}

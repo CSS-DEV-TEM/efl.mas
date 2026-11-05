@@ -100,7 +100,8 @@ export default function DayEndModal({ day, rows, autoLeft, openLines, buildPL, b
       <div className="modal dayend" role="dialog" aria-labelledby="de-t" style={{ width: 'min(760px, 100%)' }}>
         <div className="modal-head">
           <div><h2 id="de-t">🌙 Day end · {day}</h2>
-            <p className="muted small">Makes the day&apos;s full report and keeps it in the system, then deletes the day&apos;s Pick reports. The plan, the picks and the history stay. <span className="si" lang="si">දවසේ full report එක හදලා system එකේ තියාගන්නවා, ඊට පස්සේ දවසේ Pick reports delete කරනවා. Plan, picks, history එහෙමම තියෙනවා.</span></p></div>
+            <p className="muted small">Makes the day&apos;s full report and keeps it in the system, then deletes the day&apos;s Pick reports. The plan, the picks and the history stay.</p>
+            <p className="muted small si-line" lang="si"><span className="si">දවසේ full report එක හදලා system එකේ තියාගන්නවා, ඊට පස්සේ දවසේ Pick reports delete කරනවා. Plan, picks, history එහෙමම තියෙනවා.</span></p></div>
           <button className="btn sm" disabled={!!busy} onClick={() => onClose(!!result)} aria-label="Close">✕</button>
         </div>
         {err && <div className="notice bad">{err}</div>}
@@ -123,20 +124,20 @@ export default function DayEndModal({ day, rows, autoLeft, openLines, buildPL, b
         ) : info && (
           <>
             <div className={`notice ${autoLeft > 0 ? 'warn' : openLines > 0 ? 'info' : 'ok'}`}>
-              {autoLeft > 0 ? <><b>{autoLeft} line{autoLeft === 1 ? '' : 's'} can still be picked</b> by ⚡ Pick all matched — pick them first. <span className="si" lang="si">තව lines {autoLeft}ක් ⚡ Pick all matched එකෙන් pick කරන්න පුළුවන් — මුලින් ඒවා pick කරන්න.</span></>
-                : openLines > 0 ? <>{openLines} line{openLines === 1 ? ' is' : 's are'} still open (needs manual / no stock). <span className="si" lang="si">Lines {openLines}ක් තාම open (manual / stock නැහැ).</span></>
-                : <>Everything that can be picked is picked ✓ <span className="si" lang="si">Pick කරන්න පුළුවන් සේරම pick කරලා ඉවරයි ✓</span></>}
+              {autoLeft > 0 ? <><b>{autoLeft} line{autoLeft === 1 ? '' : 's'} can still be picked</b> by ⚡ Pick all matched — pick them first.<span className="si si-line" lang="si">තව lines {autoLeft}ක් ⚡ Pick all matched එකෙන් pick කරන්න පුළුවන් — මුලින් ඒවා pick කරන්න.</span></>
+                : openLines > 0 ? <>{openLines} line{openLines === 1 ? ' is' : 's are'} still open (needs manual / no stock).<span className="si si-line" lang="si">Lines {openLines}ක් තාම open (manual / stock නැහැ).</span></>
+                : <>Everything that can be picked is picked ✓<span className="si si-line" lang="si">Pick කරන්න පුළුවන් සේරම pick කරලා ඉවරයි ✓</span></>}
             </div>
             <h3 className="dm-h">The day&apos;s Picks — their reports are deleted</h3>
             {!info.picks.length ? <p className="muted">No Pick of this day has its own reports.</p> : (
-              <table className="mini">
+              <div className="table-wrap de-tbl"><table className="mini" data-nofilter="" data-noexport="">
                 <thead><tr><th /><th>Pick</th><th className="n">Report rows</th><th className="n">Kept files</th></tr></thead>
                 <tbody>{info.picks.map((x) => (
                   <tr key={x.rid}><td><input type="checkbox" checked={pick.has(x.rid)} onChange={(e) => setPick((s) => { const n = new Set(s); if (e.target.checked) n.add(x.rid); else n.delete(x.rid); return n; })} aria-label={`Include ${pickName(x.rid)}`} /></td>
                     <td><b>{pickName(x.rid)}</b><div className="muted small">{Object.entries(x.rows).filter(([, v]) => v > 0).map(([k, v]) => `${LBL[k] ?? k} ${v.toLocaleString()}`).join(' · ') || 'no report rows'}</div></td>
                     <td className="n">{x.total.toLocaleString()}</td><td className="n">{x.files}{x.fileSize ? ` · ${fmtSize(x.fileSize)}` : ''}</td></tr>
                 ))}</tbody>
-              </table>
+              </table></div>
             )}
             <p className="small">The report has: <b>Day Summary</b>, the <b>Packing List</b> (all picks of {day}, cut roll balances tallied), the <b>Plan → Pick report</b> and the <b>Korber ↔ SAP tally</b>.</p>
             <label className="de-ok"><input type="checkbox" checked={ok1} onChange={(e) => setOk1(e.target.checked)} />
