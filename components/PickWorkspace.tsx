@@ -813,11 +813,20 @@ export function autoPlan(c: Candidates, withPool = false): { sel: Sel; last: Las
   };
   const need = c.batchNeed?.length ? new Map(c.batchNeed.map((b) => [b.batch, b.need])) : null;
   if (need) {
-    const order = Array.from(need.entries()).filter(([, n]) => n > 1e-9).sort((a, b) => a[1] - b[1]).map(([b]) => b);
+    // v162: a TRANSFER NOTE batch first (its TN rolls before any other roll), then the smallest need first
+    const tnB = new Set(avail.filter((r) => r.tn).flatMap((r) => rollParts(r).map((p) => p.batch)));
+    const order = Array.from(need.entries()).filter(([, n]) => n > 1e-9).sort((a, b) => Number(tnB.has(b[0])) - Number(tnB.has(a[0])) || a[1] - b[1]).map(([b]) => b);
     for (const batch of order) {
       const partOf = (r: Candidate) => rollParts(r).find((p) => p.batch === batch)?.qty ?? 0;
       // fewer cuts: a cut roll's balance first (it leaves the shelf), then the others in their order
       const rs = () => avail.filter((r) => !sel[r.pallet] && r.available > 1e-9 && partOf(r) > 1e-9).sort((a, b) => Number(b.picked_before > 0) - Number(a.picked_before > 0));
+      // the TRANSFER NOTE rolls of the batch: taken first, each up to its TN QTY (Available)
+      for (const r of rs().filter((x) => x.tn)) {
+        const nb = Math.min(need.get(batch) ?? 0, left);
+        if (nb <= 1e-9) break;
+        const q = r3(Math.min(r.available, nb, room(r)));
+        if (q > 1e-9) { if (q < r.available - 1e-9) last = { pallet: r.pallet, hu: r.supplier_hu, full: r3(r.available), cut: q }; take(r, q, need); }
+      }
       // rolls whose QTY adds up to exactly what the batch needs: no cut at all
       {
         const nb0 = Math.min(need.get(batch) ?? 0, left);
@@ -844,7 +853,7 @@ export function autoPlan(c: Candidates, withPool = false): { sel: Sel; last: Las
     const exact = exactSubset(rest.map((r) => ({ id: r.pallet, q: r.available })), left);
     if (exact && fitsLots(rest.filter((r) => exact.has(r.pallet)))) for (const r of rest) if (exact.has(r.pallet)) take(r, r.available, null);
   }
-  for (const r of [...avail].sort((a, b) => Number(b.picked_before > 0) - Number(a.picked_before > 0))) {
+  for (const r of [...avail].sort((a, b) => Number(!!b.tn) - Number(!!a.tn) || Number(b.picked_before > 0) - Number(a.picked_before > 0))) {
     if (left <= 1e-9) break;
     if (!sel[r.pallet] && r.available > 1e-9 && r.available <= left + 1e-9 && r.available <= room(r) + 1e-9) take(r, r.available, null);
   }
@@ -1020,7 +1029,17 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
     }
     return Math.max(0, r3(room));
   };
-  const toggle = (r: Candidate) => setSel((s) => {
+  // v159: a roll whose lot gives this SO line nothing more (ZINSR Insp. Lot Quantity of the line used up) — it cannot be ticked
+  const lotFull = (r: Candidate) => lotRoom(r, {}) <= 1e-9;
+  const lotFullWhy = (r: Candidate) => {
+    const ls = Array.from(new Set((r.parts?.length ? r.parts.map((p) => p.lot) : r.insp_lots).map(String)));
+    const li = (c?.lots || []).filter((l) => ls.includes(String(l.lot)));
+    return `ZINSR lot ${li.map((l) => `${l.lot} (batch ${l.batch})`).join(', ') || ls.join(', ')} gives ${line.so} / ${line.li} ${fmtQty(li.reduce((t, l) => t + Number(l.qty || 0), 0))} — all of it is picked. This roll cannot be picked for this SO line (the SAP batch QTY would go over). · `
+      + 'ZINSR lot එකෙන් මේ SO line එකට තියෙන QTY එක pick කරලා ඉවරයි — මේ roll එක මේ line එකට pick කරන්න බැහැ.';
+  };
+  const [hint, setHint] = useState('');
+  const toggle = (r: Candidate) => { if (!sel[r.pallet] && lotFull(r)) { setHint(lotFullWhy(r)); return; } toggle0(r); };
+  const toggle0 = (r: Candidate) => setSel((s) => {
     const n = { ...s };
     if (n[r.pallet]) delete n[r.pallet];
     else {
@@ -1160,7 +1179,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
         </div>
 
         <div className="pk-stats">
-          <div><span>Plan QTY</span><b>{fmtQty(line.qty)}</b>{c?.ur !== undefined && <small title="UR = Total stock − SO QI − SO Blocked stock − Assigned Qty (ZMMBE)">UR {fmtQty(c.ur)}{c.sent != null && c.sent > 1e-9 ? ` · sent ${fmtQty(c.sent)}` : c.planQty !== undefined && c.planQty > c.ur + 1e-9 ? ' → UR is picked' : ''}</small>}</div>
+          <div><span>Plan QTY</span><b>{fmtQty(line.qty)}</b>{c?.ur !== undefined && <small title="UR = Total stock − SO QI − SO Blocked stock − Assigned Qty (ZMMBE)">UR {fmtQty(c.ur)}{c.tnUr != null && c.tnUr > 1e-9 ? <span title="TN-UR = the UR of the TRANSFER NOTE batch (ZMM_TRR), picked first · UR = the rest"> (UR {fmt(c.urNormal ?? 0, 2)} + TN-UR {fmt(c.tnUr, 2)})</span> : null}{c.sent != null && c.sent > 1e-9 ? ` · sent ${fmtQty(c.sent)}` : c.planQty !== undefined && c.planQty > c.ur + 1e-9 ? ' → UR is picked' : ''}</small>}</div>
           <div><span>Already picked</span><b>{c ? fmtQty(c.picked) : '…'}</b></div>
           <div className="em"><span>To pick</span><b>{c ? fmtQty(remaining) : '…'}</b></div>
           <div><span>Selected</span><b>{fmt(total, 2)}</b><small>{nSel} roll{nSel === 1 ? '' : 's'}</small></div>
@@ -1183,6 +1202,12 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
               {c.steps.length > 0 && <button type="button" className="linkish" onClick={() => setShowNotes((v) => !v)}>{showNotes ? 'Hide' : 'Show'} {c.steps.length} note{c.steps.length === 1 ? '' : 's'}</button>}
             </div>
             {showNotes && <div className="notice warn" style={{ fontSize: 12.5 }}>{c.steps.map((s, i) => <div key={i}>{s}</div>)}</div>}
+            {!!c.tn?.length && <div className="pk-tn" role="note">
+              <b className="pk-tn-h">TRANSFER NOTE</b>
+              {c.tn.map((t) => <span key={t.tn} className={`pk-tn-c ${t.ok ? 'ok' : t.qty - t.picked <= 1e-9 ? 'done' : 'bad'}`} title={`ZMM_TRR ${t.tn}${t.date ? ' · ' + t.date : ''} · from ${t.from_so ?? '–'} / ${t.from_li ?? '–'} · batch ${t.batch ?? '–'} · Status ${t.status ?? '–'}${t.why ? '\n' + t.why : ''}`}>
+                TN <b>{t.tn}</b> · batch {t.batch ?? '–'} · QTY {fmtQty(t.qty)}{t.picked > 0 ? ` · ${fmtQty(t.picked)} picked` : ''} · {t.ok ? `${t.ok} roll${t.ok === 1 ? '' : 's'} ✓ picked first` : t.qty - t.picked <= 1e-9 ? 'done ✓' : t.why}
+              </span>)}
+            </div>}
             <LineCoach c={c} best={best} />
             {c.gate?.on && !c.gate.loaded && <div className="notice bad">No ZROLLMGT uploaded for this Pick — upload it on the Data tab (or the Pick card). Only rolls at StorageBin {c.gate.bin} can be picked.</div>}
 
@@ -1192,22 +1217,23 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
                 {c.gate?.on ? <span className="muted small">Only rolls in ZROLLMGT at StorageBin <b>{c.gate.bin}</b> whose System Batch is this line&apos;s ZMMBE batch: ZMMBE batch + ZINSR (Sales Order, Line Item, Material, Batch = this line) → ZROLLMGT System Batch → Barcode Number = Korber Pallet, or the ZCOMENT VIEW Barcode Number (of this line&apos;s ZMMBE batch) = Korber Pallet = ZROLLMGT Barcode Number. A roll with no ZCOMENT barcode is matched on Invoice, Item, Lot (Po, Supplier Hu) and its Korber Pallet must be in ZROLLMGT at {c.gate.bin}. QTY = Korber Actual Qty.</span> :
                 <span className="muted small">Barcode = Pallet (or Supplier Hu = Vendor Roll No) with Lot, Invoice and Po (ZCOMENT), or straight from ZINR: Item, Lot Number, Invoice and Po — a Supplier Hu that is this lot's Vendor Roll No makes it this line's roll. QTY = Korber Actual Qty. The system selects them for the plan QTY — rolls of a PO shared by several SO lines you tick yourself.</span>}
                 <span style={{ flex: 1 }} />
-                {open.length > 0 && <button type="button" className="btn sm" onClick={() => applyAuto(c, Object.fromEntries([...manualSel, ...nbSel]))}>Auto select</button>}
-                {open.some((r) => r.pool) && <button type="button" className="btn sm primary" title="The Lot Number is shared by several SO lines: select the suggested rolls (their Actual Qty adds up to this line's lot QTY) — check them" onClick={() => applyAuto(c, Object.fromEntries([...manualSel, ...nbSel]), true)}>{open.some((r) => r.suggested) ? `Select suggested rolls (${open.filter((r) => r.suggested && r.available > 1e-9).length})` : 'Select shared-lot rolls too'}</button>}
+                {open.length > 0 && <button type="button" className="btn sm" onClick={() => { applyAuto(c, Object.fromEntries([...manualSel, ...nbSel])); setTimeout(() => setSel((x) => { if (!Object.keys(x).length) setHint(open.every((r) => r.pool || lotFull(r)) ? 'Auto select picks no shared-lot roll on its own, and these rolls\' lot QTY for this SO line is used up — nothing to select. · Auto select එකට තෝරන්න roll එකක් නැහැ (lot QTY එක ඉවරයි).' : 'Auto select found no roll to pick for this line.'); return x; }), 0); }}>Auto select</button>}
+                {open.some((r) => r.pool) && <button type="button" className="btn sm primary" disabled={open.filter((r) => r.pool).every(lotFull)} title={open.filter((r) => r.pool).every(lotFull) ? 'The shared lot gives this SO line nothing more: its ZINSR Insp. Lot Quantity is picked in full' : 'The Lot Number is shared by several SO lines: select the suggested rolls (their Actual Qty adds up to this line\'s lot QTY) — check them'} onClick={() => { const before = Object.keys(sel).length; applyAuto(c, Object.fromEntries([...manualSel, ...nbSel]), true); setTimeout(() => setSel((x) => { if (Object.keys(x).length <= before) setHint('No shared-lot roll could be selected: this SO line\'s ZINSR lot QTY is already picked, or the rolls are taken. · මේ SO line එකේ ZINSR lot QTY එක pick කරලා ඉවරයි, නැත්නම් rolls අරගෙන ඉවරයි.'); return x; }), 0); }}>{open.some((r) => r.suggested) ? `Select suggested rolls (${open.filter((r) => r.suggested && r.available > 1e-9).length})` : 'Select shared-lot rolls too'}</button>}
                 {nSel > 0 && <button type="button" className="btn sm" onClick={() => { setSel({}); setLast(null); }}>Clear</button>}
                 <button type="button" className="btn sm" disabled={short <= 1e-9} onClick={() => setFreeOpen(true)} title={short <= 1e-9 ? 'No shortage: the selected rolls cover the QTY to pick' : `Add a Korber pallet by hand for the shortage of ${fmtQty(short)}`}>+ Manual pallet{short > 1e-9 ? ` (${fmtQty(short)} short)` : ''}</button>
               </div>
               {smart?.best && open.length > 1 && <SmartPanel smart={smart} rolls={c.rolls} sel={sel} lotCaps={lotCaps} onUse={useSmart} />}
+              {hint && <div className="notice warn pk-hint" role="status"><span>{hint.split(' · ')[0]}</span>{hint.includes(' · ') && <span className="si si-line" lang="si">{hint.split(' · ').slice(1).join(' · ')}</span>}<button type="button" className="btn sm" onClick={() => setHint('')} aria-label="Close">✕</button></div>}
               <BatchCompletePanel week={week} line={line} />
               {!c.rolls.length ? <p className="muted">No Korber roll matched on Barcode for this line.{c.nobarcode?.some((m) => m.invChoice) ? ' Choose rolls under “Invoice + Item match” below.' : c.nobarcode?.length ? ' Rolls without a barcode: choose them under “No Barcode” below.' : c.manual?.length ? ' See “Not matched” below.' : ' Check that ZINR, ZCOMENT VIEW and Korber are uploaded and current.'}</p> : (
                 <div className="table-wrap" style={{ maxHeight: 360 }}>
                   <table className="mini pk-table">
                     <thead><tr><th /><th>Supplier HU</th><th>Pallet</th><th>Location</th><th title="Korber Fifo Date — oldest first">FIFO</th><th>Shade</th><th className="n">Available</th><th className="n">Pick qty</th><th>Match</th></tr></thead>
-                    <tbody>{(() => { const best = new Set((smart?.best?.picks || []).map((p) => p.pallet).filter((p) => !sel[p])); return [...[...open].sort((a, b) => Number(!!b.suggested) - Number(!!a.suggested) || byFit(a, b)), ...gone].map((r) => {
+                    <tbody>{(() => { const best = new Set((smart?.best?.picks || []).map((p) => p.pallet).filter((p) => !sel[p])); return [...[...open].sort((a, b) => Number(!!b.tn) - Number(!!a.tn) || Number(!!b.suggested) - Number(!!a.suggested) || byFit(a, b)), ...gone].map((r) => {
                       const s = sel[r.pallet], isGone = r.available <= 1e-9, isLast = lastOn && last!.pallet === r.pallet;
                       return (
                         <tr key={r.pallet} className={`${s ? 'picked' : ''} ${isGone ? 'gone' : ''}`} onClick={(e) => { if (!isGone && (e.target as HTMLElement).tagName !== 'INPUT') toggle(r); }}>
-                          <td><input type="checkbox" disabled={isGone} checked={!!s} onChange={() => toggle(r)} aria-label={`Pick ${r.pallet}`} /></td>
+                          <td><input type="checkbox" disabled={isGone || (!s && lotFull(r))} checked={!!s} onChange={() => toggle(r)} aria-label={`Pick ${r.pallet}`} title={!s && lotFull(r) ? lotFullWhy(r) : undefined} /></td>
                           <td><b>{r.supplier_hu}</b></td>
                           <td className="mono">{r.pallet}{r.borrowed && <span className="pill info" style={{ marginLeft: 4 }} title={r.qtyNote || ''}>barcode from same roll</span>}{r.via && <span className="pill accent" style={{ marginLeft: 4 }} title={r.byHu ? `ZCOMENT Barcode Number ${r.barcode} is not a Korber pallet — found by Supplier Hu ${r.supplier_hu} = Vendor Roll No, with the same Lot, Invoice and Po` : `ZCOMENT Barcode Number ${r.barcode} — the same roll number in Korber under pallet ${r.via}`}>{r.byHu ? `roll no ${r.supplier_hu} · barcode ${r.barcode}` : `barcode ${r.barcode}`}</span>}
                             {r.picks.length > 0 && <div className="pk-prev">{isGone ? 'Picked in full' : `Cut roll · ${fmtQty(r.available)} left of ${fmtQty(r.base_qty)}`} — {r.picks.map(pickNote).join(' | ')}</div>}<SapFitLine f={r.sap} best={best.has(r.pallet)} /></td><td>{r.location}</td><td className="small">{fifoText(r.fifo)}</td><td><b>{r.shade}</b></td>
@@ -1218,7 +1244,9 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
                             <input className="as-search" type="number" step="0.001" min="0.001" max={r.available} value={s.qty} onClick={(e) => e.stopPropagation()}
                               onChange={(e) => setSel((x) => ({ ...x, [r.pallet]: { ...x[r.pallet], qty: e.target.value } }))} aria-label="Pick qty" />
                           </span> : ''}</td>
-                          <td>{r.needsConfirm ? <span className="pill warn" title={`${r.warnings.join('\n')}\n\n${checkText(r.checks)}`}>Check: {r.warnings[0]}</span>
+                          <td>{!isGone && !s && lotFull(r) ? <span className="pill bad" title={lotFullWhy(r)}>Lot QTY used up for this SO line</span>
+                            : r.needsConfirm ? <span className="pill warn" title={`${r.warnings.join('\n')}\n\n${checkText(r.checks)}`}>Check: {r.warnings[0]}</span>
+                            : r.tn ? <span className="pill tn" title={r.qtyNote || ''}>TRANSFER NOTE {r.tn.tn} ✓</span>
                             : r.pool ? <span className={`pill ${r.suggested ? 'ok' : 'info'}`} title={r.qtyNote || ''}>{r.suggested ? 'Suggested · ' : ''}Lot shared by {r.pool} SO lines — tick</span>
                             : r.zroll && !r.barcode ? <span className="pill ok" title={r.qtyNote || ''}>ZROLLMGT batch ✓ (ZMMBE + ZINSR SO / LI / Batch = System Batch)</span>
                             : r.direct ? <span className="pill ok" title={r.qtyNote || ''}>ZINR → Korber ✓ (Item, Lot, Invoice, Po{r.checks.hu ? ', Roll no' : ''})</span>

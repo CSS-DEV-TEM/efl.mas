@@ -17,7 +17,11 @@ export const PICK_SRCS: { src: PickSrc; title: string; hint: string; needs: stri
   { src: 'korber', title: 'Korber Inventory', hint: 'Only rolls of items in the plan are uploaded: Pallet, Item Number, Lot Number, Actual Qty, Supplier Hu', needs: ['pallet', 'item number', 'actual qty'] },
 ];
 
+/** v162: a TRANSFER NOTE (ZMM_TRR) roll's details, kept with its pick */
+export interface TnRoll { tn: string; date?: string | null; from_so?: string | null; from_li?: string | null; to_plant?: string | null; batch?: string | null; qty?: number; status?: string | null; barcode?: string | null; vendor_batch?: string | null; vendor_roll?: string | null; zavail?: number; bin?: string | null; zplant?: string | null; shade?: string | null; roll_no?: string | null; orig?: number | null }
 export interface Candidate {
+  /** v162: a TRANSFER NOTE roll (picked first) */
+  tn?: TnRoll;
   /** SAP fit to the SO line (manual selection) */
   sap?: SapFit | null;
   /** Korber Fifo Date (yyyy-mm-dd): rolls chosen by hand are listed oldest first */
@@ -84,14 +88,19 @@ export interface Candidates {
   blocked?: BlockedRoll[]; gate?: { on: boolean; bin: string; loaded: boolean };
   /** v143: INTERLINING / FUSIBLE line */
   trim?: boolean;
+  /** v162: the line's TRANSFER NOTEs (ZMM_TRR); TN-UR = their batch's UR (picked first), urNormal = the rest */
+  tn?: { tn: string; date: string | null; from_so: string | null; from_li: string | null; batch: string | null; qty: number; picked: number; status: string | null; ur: number; rolls: number; ok: number; why: string | null }[];
+  tnUr?: number; urNormal?: number;
 }
 export interface BlockedRoll { lot: string; batch: string | null; roll_no: string | null; barcode: string | null; shade: string | null; pallet: string | null; qty: number | null; why: string }
 export interface PickReq { id: number; day: string; seq: number; pick_no: string | null; week: string; line: string; so: string; li: string; item: string; plant: string | null; need: number; qty: number; rolls: number; by_user: string; at: string; cancelled_at: string | null; cancelled_by: string | null; match?: string | null; kind?: string | null; closed?: number | null; short?: number | null;
   /** the Pick's ZMMBE rows of the line (batch, storage location) when the pick did not keep them */
   zstock?: { batch: string; sloc: string | null; ur: number }[] }
-export interface PickRoll { id: number; req_id: number; day: string; week: string; line: string; so: string; li: string; item: string; pallet: string; qty: number; roll_qty: number; partial: number; shade: string | null; lot: string | null; insp_lot: string | null; batch: string | null; note: string | null; by_user: string; at: string; cancelled_at: string | null; korber: string | null; /** picked from the pallet before this pick */ prior?: number; /** ZROLLMGT QM Comment 1 (the inspection Report Number) */ qm1?: string | null }
+export interface PickRoll { id: number; req_id: number; day: string; week: string; line: string; so: string; li: string; item: string; pallet: string; qty: number; roll_qty: number; partial: number; shade: string | null; lot: string | null; insp_lot: string | null; batch: string | null; note: string | null; by_user: string; at: string; cancelled_at: string | null; korber: string | null; /** v162: TRANSFER NOTE (JSON of TnRoll) */ tn?: string | null; /** picked from the pallet before this pick */ prior?: number; /** ZROLLMGT QM Comment 1 (the inspection Report Number) */ qm1?: string | null }
 export interface PickHistory { day: string | null; requests: PickReq[]; picks: PickRoll[]; days: { day: string; n: number; open: number }[]; korberHeader: unknown[] | null }
 
+/** v162: a pick's TRANSFER NOTE (null = not a TN roll) */
+export const tnOf = (p: { tn?: string | null }): TnRoll | null => { if (!p.tn) return null; try { const t = JSON.parse(p.tn) as TnRoll; return t && t.tn ? t : null; } catch { return null; } };
 export const ordinal = (n: number) => { const v = n % 100, s = ['th', 'st', 'nd', 'rd']; return n + (s[(v - 20) % 10] || s[v] || s[0]); };
 const hn = (v: unknown) => String(v ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 /** Korber item: Display Item Number, else the Item Number without the client code (MASKRE-1000240167 → 1000240167). */
@@ -392,7 +401,9 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
     const list = mergeByPallet(list0);
     // v141: an Offsite pick's rolls carry their inspection Report Number (ZROLLMGT QM Comment 1) in a column of their own
     const hasOff = list0.some((e) => e.r.kind === 'offsite');
-    const HEAD = hasOff ? [...PL_HEAD2, 'Report Number'] : PL_HEAD2;
+    // v162: a TRANSFER NOTE roll carries its remark (Transfer Request Number) in a column of its own
+    const hasTn = list0.some((e) => !!tnOf(e.p));
+    const HEAD = [...PL_HEAD2, ...(hasOff ? ['Report Number'] : []), ...(hasTn ? ['Remark'] : [])];
     const aoa: (string | number | null)[][] = [
       ['TOTAL QTY', 'TOTAL ROLLS', 'HJ PICK', null, null, 'TOTAL PICK', 'CUT ROLLS'],
       [null, null, null, null, null, null, null],
@@ -414,6 +425,7 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
         const nos = m.parts.filter((x) => !seen.has(x.r.id)).map((x) => { seen.add(x.r.id); return pickNoOf(x.r); }).filter((x) => x !== '');
         row[PICKNO_COL] = nos.length ? (nos.length === 1 ? nos[0] : Array.from(new Set(nos)).join(', ')) : null;
         if (hasOff) row.push(m.parts.some((x) => x.r.kind === 'offsite') ? (Array.from(new Set(m.parts.map((x) => String(x.p.qm1 ?? '').trim()).filter(Boolean))).join(', ') || null) : null);
+        if (hasTn) { const tns = Array.from(new Set(m.parts.map((x) => tnOf(x.p)?.tn).filter(Boolean))); row.push(tns.length ? `TRANSFER NOTE · Transfer Request Number ${tns.join(', ')}` : null); }
         if (isCut(m.e.p.pallet)) cutRows.push(aoa.length);
         rollRows.push(aoa.length); aoa.push(row);
       }
@@ -466,7 +478,7 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
     for (const r0 of cutRows) for (const i of [0, QTY_COL]) style(U.encode_col(i) + (r0 + 1), ST.cut);
     for (const r0 of sapRows) for (let i = 0; i < 5; i++) style(U.encode_col(i) + (r0 + 1), ST.match);
     for (const r0 of badRows) style('A' + (r0 + 1), ST.cut);
-    ws['!cols'] = [17.5, 14, 19, 26, 12, 9, 12, 12, 24, 22, 22, 11, 10, 7, 12, ...(hasOff ? [24] : [])].map((w) => ({ wch: w }));
+    ws['!cols'] = [17.5, 14, 19, 26, 12, 9, 12, 12, 24, 22, 22, 11, 10, 7, 12, ...(hasOff ? [24] : []), ...(hasTn ? [40] : [])].map((w) => ({ wch: w }));
     return ws;
   };
   const usedNames = new Set<string>();
@@ -551,6 +563,42 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
       U.book_append_sheet(wb, ws, 'Cut Roll Balance');
     }
   }
+  // v162: Transfer Notes — every TRANSFER NOTE roll picked: the ZMM_TRR transfer (Transfer Request Number, From → To SO), the
+  // ZROLLMGT roll (comment TN#, Vendor Batch / Roll, StorageBin, Available), its Korber roll and the SAP lines of the pick
+  {
+    const tnE = entries.filter((e) => !!tnOf(e.p));
+    if (tnE.length) {
+      const tq3 = (x: number) => Math.round(x * 1000) / 1000;
+      const head = ['Transfer Request Number', 'TN Date', 'TN Status', 'From SO', 'From LI', 'To SO', 'To LI', 'Material', 'To Plant', 'TN Batch', 'TN Qty',
+        'ZROLLMGT Barcode', 'Korber Pallet', 'Vendor Batch', 'Korber Lot Number', 'Vendor Roll', 'Korber Supplier Hu', 'StorageBin', 'ZROLLMGT Available', 'Korber Actual Qty',
+        'Picked Qty', 'Cut Roll Balance', 'SAP Batch', 'St Loc', 'ZINSR Lot', 'Shade', 'Sheet', 'Pick No', 'Picked on', 'By', 'Check'];
+      const aoa: (string | number | null)[][] = [['TRANSFER NOTE DETAILS', null, `${new Set(tnE.map((e) => tnOf(e.p)!.tn)).size} transfer note(s) · ${tnE.length} roll(s)`], [], head];
+      const bad: number[] = [];
+      for (const e of tnE) {
+        const t = tnOf(e.p)!;
+        const v = (c: string) => { const i = col(PL_SRC[c] ?? []); return i >= 0 ? e.raw[i] : null; };
+        const m = parseMatch(e.r);
+        const zrows = [...(m.zmmbe || []), ...(e.r.zstock || [])] as Record<string, unknown>[];
+        const bs = e.batches.filter((b) => b.qty > 1e-9);
+        const z = zrows.find((x) => bs.some((b) => bkey(b.batch) === bkey(x.batch)));
+        const full = palFull.get(e.p.pallet) ?? 0;
+        const kLot = String(v('Lot Number') ?? e.p.lot ?? ''), kHu = String(v('Supplier Hu') ?? '');
+        const miss = [t.vendor_batch && kLot && kLot.toUpperCase() !== String(t.vendor_batch).toUpperCase() ? 'Lot ≠ Vendor Batch' : '', t.vendor_roll && kHu && kHu.toUpperCase() !== String(t.vendor_roll).toUpperCase() ? 'Supplier Hu ≠ Vendor Roll' : '',
+          t.batch && bs.length && !bs.some((b) => bkey(b.batch) === bkey(t.batch)) ? 'SAP batch ≠ TN batch' : '', Number(e.p.qty) > Number(t.qty ?? Infinity) + 0.0005 ? 'Picked > TN Qty' : ''].filter(Boolean);
+        if (miss.length) bad.push(aoa.length);
+        aoa.push([num(t.tn), t.date ? String(t.date).split('-').reverse().join('-') : '', t.status ?? '', t.from_so ?? '', num(t.from_li ?? ''), String(e.r.so), num(e.r.li), num(e.r.item), t.to_plant ?? '', num(String(t.batch ?? '').replace(/^0+(?=\d)/, '')), Number(t.qty ?? 0),
+          t.barcode ?? '', e.p.pallet, t.vendor_batch ?? '', kLot, t.vendor_roll ?? '', kHu, t.bin ?? '', Number(t.zavail ?? 0), full || null,
+          tq3(Number(e.p.qty)), full ? Math.max(0, tq3(full - (palTotal.get(e.p.pallet) ?? 0))) : null, bs.map((b) => bkey(b.batch)).join(', '), z ? String(z.sloc ?? '') : '', String(e.p.insp_lot ?? ''), e.p.shade ?? t.shade ?? '', e.kind,
+          pickNoOf(e.r), e.p.day ? e.p.day.split('-').reverse().join('-') : '', e.p.by_user, miss.length ? `✗ ${miss.join(' · ')}` : '✓']);
+      }
+      const ws = U.aoa_to_sheet(aoa);
+      for (let i = 0; i < head.length; i++) { const ref = U.encode_cell({ r: 2, c: i }); (ws[ref] as { s?: unknown }).s = ST.head; }
+      for (let i = 0; i < 3; i++) { const ref = U.encode_cell({ r: 0, c: i }); if (ws[ref]) (ws[ref] as { s?: unknown }).s = ST.top; }
+      for (let r = 3; r < aoa.length; r++) for (let c = 0; c < head.length; c++) { const ref = U.encode_cell({ r, c }); if (!ws[ref]) ws[ref] = { t: 's', v: '' }; (ws[ref] as { s?: unknown }).s = bad.includes(r) && c === head.length - 1 ? ST.cut : ST.cell; }
+      ws['!cols'] = [14, 11, 8, 13, 7, 13, 6, 12, 9, 12, 8, 17, 20, 13, 13, 14, 14, 11, 11, 11, 10, 11, 12, 7, 13, 7, 6, 9, 11, 10, 22].map((w) => ({ wch: w }));
+      U.book_append_sheet(wb, ws, sheetName('Transfer Notes'));
+    }
+  }
   // Summary: one line per pick, its KFC and PFC QTY
   const summary: (string | number | null)[][] = [['Req', 'Total Qty', 'KFC Qty', 'PFC Qty', 'Total Rolls', 'Pick No', 'Type', 'Remarks']];
   for (const r of reqs) {
@@ -559,7 +607,7 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
     const pals = Array.from(new Set(es.map((e) => e.p.pallet)));
     const cut = pals.filter(isCut).length;
     summary.push([reqName(r), q(() => true), q((e) => e.kind === 'KFC'), q((e) => e.kind === 'PFC'), pals.length, pickNoOf(r), r.kind === 'offsite' ? 'Offsite' : 'Normal',
-      `${r.so} / ${r.li} / ${r.item}${cut ? ` · ${cut} cut roll${cut > 1 ? 's' : ''}` : ''}${r.closed ? ` · closed ${r.short ?? ''} short` : ''}${multi ? ` · ${r.by_user}` : ''}`]);
+      `${r.so} / ${r.li} / ${r.item}${cut ? ` · ${cut} cut roll${cut > 1 ? 's' : ''}` : ''}${r.closed ? ` · closed ${r.short ?? ''} short` : ''}${(() => { const t = Array.from(new Set(es.map((e) => tnOf(e.p)?.tn).filter(Boolean))); return t.length ? ` · TRANSFER NOTE ${t.join(', ')}` : ''; })()}${multi ? ` · ${r.by_user}` : ''}`]);
   }
   const n = summary.length;
   summary.push(['Total', null, null, null, null]);
