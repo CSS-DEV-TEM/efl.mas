@@ -812,6 +812,11 @@ export function autoPlan(c: Candidates, withPool = false): { sel: Sel; last: Las
     }
   };
   const need = c.batchNeed?.length ? new Map(c.batchNeed.map((b) => [b.batch, b.need])) : null;
+  // v162: a TRANSFER NOTE gives exactly its QTY (less what was picked for it) — its rolls together, the last one cut
+  const tnK = (t: { tn: string; batch?: string | null }) => `${t.tn}|${String(t.batch ?? '').replace(/^0+(?=\d)/, '')}`;
+  const tnLeft = new Map((c.tn || []).map((t) => [tnK(t), Math.max(0, r3(t.qty - t.picked))]));
+  const tnRoom = (r: Candidate) => (r.tn ? tnLeft.get(tnK(r.tn)) ?? r.available : Infinity);
+  const takeTn = (r: Candidate, q: number, nd: Map<string, number> | null) => { take(r, q, nd); if (r.tn) tnLeft.set(tnK(r.tn), Math.max(0, r3((tnLeft.get(tnK(r.tn)) ?? 0) - q))); };
   if (need) {
     // v162: a TRANSFER NOTE batch first (its TN rolls before any other roll), then the smallest need first
     const tnB = new Set(avail.filter((r) => r.tn).flatMap((r) => rollParts(r).map((p) => p.batch)));
@@ -819,13 +824,14 @@ export function autoPlan(c: Candidates, withPool = false): { sel: Sel; last: Las
     for (const batch of order) {
       const partOf = (r: Candidate) => rollParts(r).find((p) => p.batch === batch)?.qty ?? 0;
       // fewer cuts: a cut roll's balance first (it leaves the shelf), then the others in their order
-      const rs = () => avail.filter((r) => !sel[r.pallet] && r.available > 1e-9 && partOf(r) > 1e-9).sort((a, b) => Number(b.picked_before > 0) - Number(a.picked_before > 0));
-      // the TRANSFER NOTE rolls of the batch: taken first, each up to its TN QTY (Available)
-      for (const r of rs().filter((x) => x.tn)) {
+      const rs = () => avail.filter((r) => !r.tn && !sel[r.pallet] && r.available > 1e-9 && partOf(r) > 1e-9).sort((a, b) => Number(b.picked_before > 0) - Number(a.picked_before > 0));
+      // the TRANSFER NOTE rolls of the batch: taken first, all its rolls up to the TN QTY (the last one cut); a TN roll is
+      // never taken by the other steps (more than its TN QTY)
+      for (const r of avail.filter((x) => x.tn && !sel[x.pallet] && x.available > 1e-9 && partOf(x) > 1e-9).sort((a, b) => b.available - a.available)) {
         const nb = Math.min(need.get(batch) ?? 0, left);
         if (nb <= 1e-9) break;
-        const q = r3(Math.min(r.available, nb, room(r)));
-        if (q > 1e-9) { if (q < r.available - 1e-9) last = { pallet: r.pallet, hu: r.supplier_hu, full: r3(r.available), cut: q }; take(r, q, need); }
+        const q = r3(Math.min(r.available, nb, room(r), tnRoom(r)));
+        if (q > 1e-9) { if (q < r.available - 1e-9) last = { pallet: r.pallet, hu: r.supplier_hu, full: r3(r.available), cut: q }; takeTn(r, q, need); }
       }
       // rolls whose QTY adds up to exactly what the batch needs: no cut at all
       {
@@ -847,22 +853,28 @@ export function autoPlan(c: Candidates, withPool = false): { sel: Sel; last: Las
       }
     }
   }
+  // no batch split: the TRANSFER NOTE rolls first, up to their TN QTY
+  if (!need) for (const r of avail.filter((x) => x.tn && x.available > 1e-9).sort((a, b) => b.available - a.available)) {
+    if (left <= 1e-9) break;
+    const q = r3(Math.min(r.available, left, room(r), tnRoom(r)));
+    if (q > 1e-9) { if (q < r.available - 1e-9) last = { pallet: r.pallet, hu: r.supplier_hu, full: r3(r.available), cut: q }; takeTn(r, q, null); }
+  }
   // whatever the batches do not explain: any matched roll, full rolls first (an exact set first: no cut), then the best fit
   if (left > 1e-9) {
-    const rest = avail.filter((r) => !sel[r.pallet] && r.available > 1e-9 && r.available <= left + 1e-9 && r.available <= room(r) + 1e-9);
+    const rest = avail.filter((r) => !r.tn && !sel[r.pallet] && r.available > 1e-9 && r.available <= left + 1e-9 && r.available <= room(r) + 1e-9);
     const exact = exactSubset(rest.map((r) => ({ id: r.pallet, q: r.available })), left);
     if (exact && fitsLots(rest.filter((r) => exact.has(r.pallet)))) for (const r of rest) if (exact.has(r.pallet)) take(r, r.available, null);
   }
-  for (const r of [...avail].sort((a, b) => Number(!!b.tn) - Number(!!a.tn) || Number(b.picked_before > 0) - Number(a.picked_before > 0))) {
+  for (const r of avail.filter((x) => !x.tn).sort((a, b) => Number(b.picked_before > 0) - Number(a.picked_before > 0))) {
     if (left <= 1e-9) break;
     if (!sel[r.pallet] && r.available > 1e-9 && r.available <= left + 1e-9 && r.available <= room(r) + 1e-9) take(r, r.available, null);
   }
   if (left > 1e-9) {
-    const fit = avail.filter((r) => !sel[r.pallet] && r.available >= left && room(r) >= left - 1e-9).sort((a, b) => Number(b.picked_before > 0) - Number(a.picked_before > 0) || a.available - b.available)[0];
+    const fit = avail.filter((r) => !r.tn && !sel[r.pallet] && r.available >= left && room(r) >= left - 1e-9).sort((a, b) => Number(b.picked_before > 0) - Number(a.picked_before > 0) || a.available - b.available)[0];
     if (fit) { last = { pallet: fit.pallet, hu: fit.supplier_hu, full: r3(fit.available), cut: left }; take(fit, left, null); }
     else {
       // no roll covers the rest inside its lot: cut the one with the most room in its lot (only what that lot still gives)
-      const f2 = avail.filter((r) => !sel[r.pallet] && r.available > 1e-9 && room(r) > 1e-9).sort((a, b) => room(b) - room(a))[0];
+      const f2 = avail.filter((r) => !r.tn && !sel[r.pallet] && r.available > 1e-9 && room(r) > 1e-9).sort((a, b) => room(b) - room(a))[0];
       if (f2) { const q = r3(Math.min(left, room(f2), f2.available)); if (q > 1e-9) { if (q < f2.available - 1e-9) last = { pallet: f2.pallet, hu: f2.supplier_hu, full: r3(f2.available), cut: q }; take(f2, q, null); } }
     }
   }
@@ -1204,7 +1216,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
             {showNotes && <div className="notice warn" style={{ fontSize: 12.5 }}>{c.steps.map((s, i) => <div key={i}>{s}</div>)}</div>}
             {!!c.tn?.length && <div className="pk-tn" role="note">
               <b className="pk-tn-h">TRANSFER NOTE</b>
-              {c.tn.map((t) => <span key={t.tn} className={`pk-tn-c ${t.ok ? 'ok' : t.qty - t.picked <= 1e-9 ? 'done' : 'bad'}`} title={`ZMM_TRR ${t.tn}${t.date ? ' · ' + t.date : ''} · from ${t.from_so ?? '–'} / ${t.from_li ?? '–'} · batch ${t.batch ?? '–'} · Status ${t.status ?? '–'}${t.why ? '\n' + t.why : ''}`}>
+              {c.tn.map((t) => <span key={`${t.tn}|${t.batch}`} className={`pk-tn-c ${t.ok ? 'ok' : t.qty - t.picked <= 1e-9 ? 'done' : 'bad'}`} title={`ZMM_TRR ${t.tn}${t.date ? ' · ' + t.date : ''} · from ${t.from_so ?? '–'} / ${t.from_li ?? '–'} · batch ${t.batch ?? '–'} · Status ${t.status ?? '–'}${t.why ? '\n' + t.why : ''}`}>
                 TN <b>{t.tn}</b> · batch {t.batch ?? '–'} · QTY {fmtQty(t.qty)}{t.picked > 0 ? ` · ${fmtQty(t.picked)} picked` : ''} · {t.ok ? `${t.ok} roll${t.ok === 1 ? '' : 's'} ✓ picked first` : t.qty - t.picked <= 1e-9 ? 'done ✓' : t.why}
               </span>)}
             </div>}

@@ -196,7 +196,7 @@ const BASE_SCHEMA = [
   'CREATE TABLE IF NOT EXISTS upload_file (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, mime TEXT, size INTEGER, sha TEXT, srcs TEXT, rid TEXT, uploaded_by TEXT, uploaded_at TEXT, parts INTEGER, complete INTEGER DEFAULT 0)',
   'CREATE TABLE IF NOT EXISTS upload_file_part (file_id INTEGER NOT NULL, n INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (file_id, n))',
   `CREATE TABLE IF NOT EXISTS uploads ( id INTEGER PRIMARY KEY AUTOINCREMENT, src TEXT NOT NULL, file_name TEXT, sheet_name TEXT, row_count INTEGER NOT NULL, uploaded_by TEXT NOT NULL, uploaded_at TEXT NOT NULL , mode TEXT, rid TEXT NOT NULL DEFAULT '')`,
-  `CREATE TABLE IF NOT EXISTS zcoment (lot TEXT NOT NULL, material TEXT, batch TEXT, vendor_batch TEXT, roll_qty REAL, roll_no TEXT, barcode TEXT, shade TEXT, sys_roll TEXT, accept TEXT, description TEXT, rid TEXT NOT NULL DEFAULT '')`,
+  `CREATE TABLE IF NOT EXISTS zcoment (lot TEXT NOT NULL, material TEXT, batch TEXT, vendor_batch TEXT, roll_qty REAL, roll_no TEXT, barcode TEXT, shade TEXT, sys_roll TEXT, accept TEXT, description TEXT, rid TEXT NOT NULL DEFAULT '', tn TEXT)`,
   `CREATE TABLE IF NOT EXISTS zinr (lot TEXT NOT NULL, plant TEXT, sloc TEXT, batch TEXT, material TEXT, qty REAL, uom TEXT, so TEXT, li TEXT, vendor_batch TEXT, invoice TEXT, created TEXT, style TEXT, po TEXT, rid TEXT NOT NULL DEFAULT '')`,
   `CREATE TABLE IF NOT EXISTS zroll (barcode TEXT NOT NULL, bin TEXT, material TEXT, batch TEXT, qty REAL, uom TEXT, sloc TEXT, plant TEXT, so TEXT, li TEXT, status TEXT, raw TEXT, rid TEXT NOT NULL DEFAULT '', pcore TEXT, tn TEXT)`,
   `CREATE TABLE IF NOT EXISTS ztrr (tn TEXT, tn_date TEXT, to_so TEXT, to_li TEXT, material TEXT, to_plant TEXT, from_so TEXT, from_li TEXT, batch TEXT, qty REAL, approved REAL, tqty REAL, status TEXT, raw TEXT, rid TEXT NOT NULL DEFAULT '')`,
@@ -254,6 +254,7 @@ const BASE_SCHEMA = [
   'CREATE INDEX IF NOT EXISTS zroll_tn ON zroll(tn, rid)',
   'CREATE INDEX IF NOT EXISTS picks_tn ON picks(tn)',
   'CREATE INDEX IF NOT EXISTS ztrr_tn ON ztrr(tn, rid)',
+  'CREATE INDEX IF NOT EXISTS zcoment_tn ON zcoment(tn, rid)',
   'CREATE INDEX IF NOT EXISTS stock_sent_rid ON stock_sent(rid, key)',
 ];
 /** per system (each has its own database) */
@@ -497,10 +498,11 @@ async function ensureSchema(env: Env) {
   try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS zinr_lot_rid ON zinr(lot, rid)').run(); } catch { /* */ }
   // v38 (v162): TRANSFER NOTE — the ZROLLMGT comment's "TN#<Transfer Request Number>" of each roll (|1768292|…), and a
   // pick's TRANSFER NOTE (JSON: the ZMM_TRR / ZROLLMGT details for the packing list)
-  for (const sql of ['ALTER TABLE zroll ADD COLUMN tn TEXT', 'ALTER TABLE picks ADD COLUMN tn TEXT']) { try { await env.DB.prepare(sql).run(); } catch { /* already there */ } }
+  for (const sql of ['ALTER TABLE zroll ADD COLUMN tn TEXT', 'ALTER TABLE picks ADD COLUMN tn TEXT', 'ALTER TABLE zcoment ADD COLUMN tn TEXT']) { try { await env.DB.prepare(sql).run(); } catch { /* already there */ } }
   try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS zroll_tn ON zroll(tn, rid)').run(); } catch { /* */ }
   try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS picks_tn ON picks(tn)').run(); } catch { /* */ }
   try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS ztrr_tn ON ztrr(tn, rid)').run(); } catch { /* */ }
+  try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS zcoment_tn ON zcoment(tn, rid)').run(); } catch { /* */ }
   try {
     // the ZROLLMGT rows already uploaded: their TN# from the comments kept in raw
     const old = (await env.DB.prepare("SELECT rowid id, raw FROM zroll WHERE tn IS NULL AND raw LIKE '%TN#%'").all<{ id: number; raw: string }>()).results;
@@ -676,7 +678,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 105; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 106; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -2206,7 +2208,23 @@ const PICK_SCHEMA = [
 
 const hnorm = (v: unknown) => String(v ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '');
 /** v162: the ZROLLMGT comment columns that carry a TRANSFER NOTE ("12354/TN#1768292") */
-const TN_COMMENTS = ['qmcomment1', 'qmcomment2', 'recomment1', 'qmcomment3', 'recomment3', 'recomment2'];
+const TN_COMMENTS = ['qmcomment1', 'qmcomment2', 'recomment1', 'qmcomment3', 'recomment3', 'recomment2', 'reinspectioncomment1', 'reinspectioncomment2', 'reinspectioncomment3'];
+/**
+ * v162: where each TRANSFER NOTE goes (SO / Line Item): ZMM_TRR To Sales Order + Item, else (no ZMM_TRR row) the ZINSR lot of
+ * the transfer whose ZCOMENT VIEW comment has the TN#
+ */
+async function tnDest(env: Env, tns: string[]): Promise<Map<string, { so: string; li: string }[]>> {
+  const out = new Map<string, { so: string; li: string }[]>();
+  const k = (v: unknown) => String(v ?? '').trim().replace(/^0+(?=\d)/, '');
+  const add = (t: unknown, so: unknown, li: unknown) => { const x = { so: normId(so), li: normId(li) }; const a = out.get(k(t)) ?? []; if (!a.some((y) => y.so === x.so && y.li === x.li)) a.push(x); out.set(k(t), a); };
+  if (!tns.length) return out;
+  for (const t of (await env.DB.prepare('SELECT tn, to_so, to_li FROM ztrr WHERE tn IN (SELECT value FROM json_each(?))').bind(JSON.stringify(tns)).all<Row>()).results) add(t.tn, t.to_so, t.to_li);
+  for (const t of tns.filter((x) => !out.has(k(x)))) {
+    const ls = (await env.DB.prepare("SELECT DISTINCT lot FROM zcoment WHERE tn >= '|' AND instr(tn, ?) > 0").bind(`|${k(t)}|`).all<Row>()).results.map((x) => String(x.lot));
+    if (ls.length) for (const z of (await env.DB.prepare('SELECT DISTINCT so, li FROM zinr WHERE lot IN (SELECT value FROM json_each(?))').bind(JSON.stringify(ls)).all<Row>()).results) add(t, z.so, z.li);
+  }
+  return out;
+}
 /** the Transfer Request Numbers in a ZROLLMGT row's comment columns → "|1768292|" (null = none) */
 function tnTags(header: unknown[], row: unknown[]): string | null {
   const out = new Set<string>();
@@ -2573,7 +2591,7 @@ async function handlePick(env: Env, req: Request, p: string) {
         const lot = normId(g(r, 'lot'));
         if (!lot) { skipped++; continue; }
         rows.push({ lot, material: normId(g(r, 'material')), batch: normId(g(r, 'batch')), vendor_batch: txt(g(r, 'vendor_batch')), roll_qty: num(g(r, 'roll_qty')),
-          roll_no: txt(up(g(r, 'roll_no'))), barcode: txt(up(g(r, 'barcode'))), shade: txt(g(r, 'shade')), sys_roll: txt(g(r, 'sys_roll')), accept: txt(g(r, 'accept')), description: txt(g(r, 'description')) });
+          roll_no: txt(up(g(r, 'roll_no'))), barcode: txt(up(g(r, 'barcode'))), shade: txt(g(r, 'shade')), sys_roll: txt(g(r, 'sys_roll')), accept: txt(g(r, 'accept')), description: txt(g(r, 'description')), tn: tnTags(b.header, r) });
       }
     } else {
       const seen = new Map<string, Row>();
@@ -3127,10 +3145,10 @@ async function handlePick(env: Env, req: Request, p: string) {
     }
     // v162: a TRANSFER NOTE never gives more than its QTY (less what was picked for it) — its rolls together
     {
-      const tnL = new Map(((cand as { tn?: Row[] }).tn || []).map((t) => [String(t.tn), r3(Number(t.qty) - Number(t.picked))]));
+      const tnL = new Map(((cand as { tn?: Row[] }).tn || []).map((t) => [`${t.tn}|${normId(t.batch)}`, r3(Number(t.qty) - Number(t.picked))]));
       const byTn = new Map<string, number>();
-      for (const p0 of picks) if (p0.tn) { const t = String(JSON.parse(String(p0.tn)).tn); byTn.set(t, r3((byTn.get(t) ?? 0) + Number(p0.qty))); }
-      for (const [t, q] of byTn) { const l0 = tnL.get(t); if (l0 !== undefined && q > l0 + 1e-6) throw new HttpError(409, `TRANSFER NOTE ${t}: ${l0} left to pick — this pick takes ${q} from its rolls.`); }
+      for (const p0 of picks) if (p0.tn) { const j = JSON.parse(String(p0.tn)); const t = `${j.tn}|${normId(j.batch)}`; byTn.set(t, r3((byTn.get(t) ?? 0) + Number(p0.qty))); }
+      for (const [t, q] of byTn) { const l0 = tnL.get(t); if (l0 !== undefined && q > l0 + 1e-6) throw new HttpError(409, `TRANSFER NOTE ${t.split('|')[0]} (batch ${t.split('|')[1]}): ${l0} left to pick — this pick takes ${q} from its rolls.`); }
     }
     // v129: the SO line's batch total is complete (ZINSR Insp. Lot Quantity of the roll's batch used up): what the roll has
     // over it goes to another SO line — same Material and LI, the roll's System Batch with UR in ZMMBE, SO Plant = the Pick
@@ -4586,18 +4604,25 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
   // the ZMMBE batches of this line that have UR: a ZCOMENT VIEW roll of another batch is not picked
   const urBatches = new Set(stock.filter((x) => Number(x.ur) > 0).map((x) => normId(x.batch)));
   // v162: TRANSFER NOTE — the ZMM_TRR transfer requests to this SO + Line Item + Material. Its batch's UR (ZMMBE) is the
-  // TN-UR: picked first (the TN rolls: ZROLLMGT comment "TN#<number>"), the rest of the UR as before. No ZMM_TRR row = no change.
-  const trRows = trims ? [] : (await env.DB.prepare('SELECT tn, tn_date, from_so, from_li, to_plant, batch, qty, approved, tqty, status FROM ztrr WHERE to_so = ? AND to_li = ? AND material = ?').bind(normId(line.so), normId(line.li), normId(line.item)).all<Row>()).results
-    .filter((t, i, a) => a.findIndex((u) => String(u.tn) === String(t.tn)) === i);
+  // TN-UR: picked first (the TN rolls: ZROLLMGT comment "TN#<number>"), the rest of the UR as before. No TN = no change.
+  const tnKey = (v: unknown) => String(v ?? '').trim().replace(/^0+(?=\d)/, '');
+  // one Transfer Request Number can have several ZMM_TRR rows (batches / vendor batches): one TN unit per TN + batch, its QTY the
+  // rows' Transfer Quantity together
+  const trRows: Row[] = [];
+  if (!trims) for (const t of (await env.DB.prepare('SELECT tn, tn_date, from_so, from_li, to_plant, batch, qty, approved, tqty, status FROM ztrr WHERE to_so = ? AND to_li = ? AND material = ?').bind(normId(line.so), normId(line.li), normId(line.item)).all<Row>()).results) {
+    const k0 = `${tnKey(t.tn)}|${normId(t.batch)}`;
+    const q0 = r3(Number(t.tqty) > 0 ? Number(t.tqty) : Number(t.approved) > 0 ? Number(t.approved) : Number(t.qty) || 0);
+    const u = trRows.find((x) => x.k === k0);
+    if (u) { u.tqty = r3(Number(u.tqty) + q0); u.n = Number(u.n) + 1; if (t.status && !String(u.status ?? '').split(', ').includes(String(t.status))) u.status = [u.status, t.status].filter(Boolean).join(', '); if (t.from_so && !String(u.from_so ?? '').split(', ').includes(String(t.from_so))) u.from_so = [u.from_so, t.from_so].filter(Boolean).join(', '); }
+    else trRows.push({ ...t, tn: tnKey(t.tn), batch: normId(t.batch) || null, tqty: q0, approved: 0, qty: 0, k: k0, n: 1 });
+  }
   const tnBatches = new Set(trRows.map((t) => normId(t.batch)).filter(Boolean));
   const tnPicked = new Map<string, number>();
-  const tnKey = (v: unknown) => String(v ?? '').trim().replace(/^0+(?=\d)/, '');
-  if (trRows.length) for (const p of (await env.DB.prepare("SELECT json_extract(tn, '$.tn') t, SUM(qty) q FROM picks WHERE tn >= '{' AND so = ? AND li = ? AND item = ? AND cancelled_at IS NULL GROUP BY 1").bind(line.so, line.li, line.item).all<Row>()).results) tnPicked.set(String(p.t), r3(Number(p.q)));
   const tnQtyOf = (t: Row) => r3(Number(t.tqty) > 0 ? Number(t.tqty) : Number(t.approved) > 0 ? Number(t.approved) : Number(t.qty) || 0);
   const urOfBatch = (bt: string) => r3(stock.filter((x) => normId(x.batch) === bt).reduce((t, x) => t + Math.max(0, Number(x.ur) || 0), 0));
   /** what the TRANSFER NOTEs of a batch still give this line: their QTY less what was picked for them, at most the batch's UR */
-  const tnLeftOf = (bt: string) => Math.min(urOfBatch(bt), r3(trRows.filter((t) => normId(t.batch) === bt).reduce((q, t) => q + Math.max(0, r3(tnQtyOf(t) - (tnPicked.get(tnKey(t.tn)) ?? 0))), 0)));
-  const tnUr = r3(Array.from(tnBatches).reduce((q, bt) => q + Math.min(urOfBatch(bt), r3(trRows.filter((t) => normId(t.batch) === bt).reduce((x, t) => x + tnQtyOf(t), 0))), 0));
+  const tnLeftOf = (bt: string) => Math.min(urOfBatch(bt), r3(trRows.filter((t) => normId(t.batch) === bt).reduce((q, t) => q + Math.max(0, r3(tnQtyOf(t) - (tnPicked.get(String(t.k)) ?? 0))), 0)));
+  let tnUr = 0;
   let tnNoLot = 0;
   const tnNoLotB = new Map<string, number>();
   const blocked: Row[] = [];
@@ -4605,11 +4630,39 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
   const lots: Row[] = [];
   let left = Math.max(0, r3(need - pickedLine));
   const lotsByBatch: { st: Row; z: Row[] }[] = [];
-  for (const st of trims ? [] : [...stock].sort((a, b) => Number(tnBatches.has(normId(b.batch))) - Number(tnBatches.has(normId(a.batch))) || Number(b.ur) - Number(a.ur))) {
+  for (const st of trims ? [] : [...stock].sort((a, b) => Number(b.ur) - Number(a.ur))) {
     if (!(Number(st.ur) > 0)) continue;
     const z = (await env.DB.prepare('SELECT * FROM zinr WHERE so = ? AND li = ? AND material = ? AND batch = ? ORDER BY lot').bind(st.so, st.li, st.material, st.batch).all<Row>()).results;
     if (!z.length) steps.push(`Batch ${st.batch}: not in ZINSR for this SO / LI / Material.`);
     lotsByBatch.push({ st, z });
+  }
+  // v162: no ZMM_TRR row for it — the TRANSFER NOTE from SAP's own inspection lot of the transfer: a ZINSR lot of this SO line
+  // whose ZCOMENT VIEW rows carry "TN#<number>" (Re-inspection / QM Comment) — QTY = that lot's Insp. Lot Quantity
+  if (!trims) {
+    const lotRows = lotsByBatch.flatMap((x) => x.z);
+    const ids = Array.from(new Set(lotRows.map((l) => String(l.lot))));
+    if (ids.length) {
+      const zt = (await env.DB.prepare('SELECT DISTINCT lot, tn FROM zcoment WHERE lot IN (SELECT value FROM json_each(?)) AND tn IS NOT NULL').bind(JSON.stringify(ids)).all<Row>()).results;
+      // a TN already in ZMM_TRR is taken from there (its Transfer Quantity); else each TN + batch: its lots' Insp. Lot Quantity
+      const have = new Set(trRows.map((t) => String(t.tn)));
+      const byTn = new Map<string, Set<string>>();
+      for (const z of zt) for (const t of String(z.tn).split('|').filter(Boolean)) { if (have.has(t)) continue; if (!byTn.has(t)) byTn.set(t, new Set()); byTn.get(t)!.add(String(z.lot)); }
+      for (const [t, ls] of byTn) {
+        const lr = lotRows.filter((l) => ls.has(String(l.lot)));
+        for (const bt of Array.from(new Set(lr.map((l) => normId(l.batch))))) {
+          const lb = lr.filter((l) => normId(l.batch) === bt);
+          trRows.push({ tn: t, tn_date: null, from_so: null, from_li: null, to_plant: null, batch: bt || null, qty: 0, approved: 0, tqty: r3(lb.reduce((q, l) => q + (Number(l.qty) || 0), 0)), status: null, src: 'zcoment', lots: lb.map((l) => l.lot).join(', '), k: `${t}|${bt}`, n: lb.length });
+          if (bt) tnBatches.add(bt);
+        }
+      }
+      if (byTn.size) steps.push(`TRANSFER NOTE not in ZMM_TRR — taken from ZINSR lot + ZCOMENT VIEW comment (QTY = Insp. Lot Quantity): ${Array.from(byTn).map(([t, ls]) => `TN ${t} (lot ${Array.from(ls).join(', ')})`).join(', ')}.`);
+    }
+  }
+  // the TRANSFER NOTE batch first (its UR is the TN-UR), then the bigger UR first as before
+  if (tnBatches.size) lotsByBatch.sort((a, b) => Number(tnBatches.has(normId(b.st.batch))) - Number(tnBatches.has(normId(a.st.batch))));
+  if (trRows.length) {
+    for (const p of (await env.DB.prepare("SELECT json_extract(tn, '$.tn') t, json_extract(tn, '$.batch') b, SUM(qty) q FROM picks WHERE tn >= '{' AND so = ? AND li = ? AND item = ? AND cancelled_at IS NULL GROUP BY 1, 2").bind(line.so, line.li, line.item).all<Row>()).results) { const k0 = `${tnKey(p.t)}|${normId(p.b)}`; tnPicked.set(k0, r3((tnPicked.get(k0) ?? 0) + Number(p.q))); }
+    tnUr = r3(Array.from(tnBatches).reduce((q, bt) => q + Math.min(urOfBatch(bt), r3(trRows.filter((t) => normId(t.batch) === bt).reduce((x, t) => x + tnQtyOf(t), 0))), 0));
   }
   // what ZINSR has for this Sales Order: its Line Items (only this one is taken) and this Line Item's batches and lots
   {
@@ -4671,7 +4724,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
   const tnInfo: Row[] = [];
   const tnSeen = new Set<string>();
   for (const tr of trRows) {
-    const tnNo = String(tr.tn).replace(/^0+(?=\d)/, ''), bt = normId(tr.batch), tq = tnQtyOf(tr), done = tnPicked.get(tnKey(tr.tn)) ?? 0;
+    const tnNo = String(tr.tn).replace(/^0+(?=\d)/, ''), bt = normId(tr.batch), tq = tnQtyOf(tr), done = tnPicked.get(String(tr.k)) ?? 0;
     const urB = bt ? urOfBatch(bt) : 0;
     const info: Row = { tn: tnNo, date: tr.tn_date ?? null, from_so: tr.from_so ?? null, from_li: tr.from_li ?? null, batch: bt || null, qty: tq, picked: r3(done), status: tr.status ?? null, ur: urB, rolls: 0, ok: 0, why: null };
     tnInfo.push(info);
@@ -4687,7 +4740,11 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
       const bc = up(z.barcode), vb = txt(rv('vendorbatch')), vr = txt(up(rv('vendorroll', 'vendorrollno'))), zq = r3(Number(z.qty) || 0);
       const blk = (why: string, k?: Row | null) => { why0.push(why); tnSeen.add(bc); if (k) tnSeen.add(up(k.pallet)); blocked.push({ lot: `TN ${tnNo}`, batch: z.batch ?? bt, roll_no: vr, barcode: bc, shade: txt(rv('shadegrp', 'shade')), pallet: k ? k.pallet : null, qty: zq || null, why: `TRANSFER NOTE ${tnNo}: ${why}` }); };
       if (z.material && normId(z.material) !== normId(line.item)) { blk(`ZROLLMGT Material ${z.material} ≠ ${line.item}`); continue; }
-      if (bt && z.batch && normId(z.batch) !== bt) { blk(`ZROLLMGT System Batch ${z.batch} ≠ ZMM_TRR batch ${bt}`); continue; }
+      if (bt && z.batch && normId(z.batch) !== bt) {
+        // the same TN's other batch: that TN unit takes it
+        if (trRows.some((u) => String(u.tn) === tnNo && normId(u.batch) === normId(z.batch))) { info.rolls = Math.max(0, Number(info.rolls) - 1); continue; }
+        blk(`ZROLLMGT System Batch ${z.batch} ≠ TN batch ${bt}`); continue;
+      }
       const rw = gate.on ? gate.rowWhy(z) : null;
       if (rw) { blk(rw); continue; }
       if (!(zq > 1e-9)) { blk('ZROLLMGT Available Quantity 0'); continue; }
@@ -4917,8 +4974,8 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
         // v162: a TRANSFER NOTE roll (ZROLLMGT comment TN#) of a ZMM_TRR transfer to another SO line is that line's roll
         if (z.tn && !tnSeen.has(pal)) {
           const tns = String(z.tn).split('|').filter(Boolean);
-          const to = tns.length ? (await env.DB.prepare('SELECT to_so, to_li FROM ztrr WHERE tn IN (SELECT value FROM json_each(?))').bind(JSON.stringify(tns)).all<Row>()).results : [];
-          if (to.length && !to.some((t) => normId(t.to_so) === normId(line.so) && normId(t.to_li) === normId(line.li))) { otherLine++; tnOther++; continue; }
+          const to = Array.from((await tnDest(env, tns)).values()).flat();
+          if (to.length && !to.some((t) => t.so === normId(line.so) && t.li === normId(line.li))) { otherLine++; tnOther++; continue; }
         }
         // its Korber pallet: the Barcode Number, else the same roll number (CP… / COMPCP…) of the same item
         let k = await env.DB.prepare('SELECT * FROM korber WHERE pallet = ?').bind(pal).first<Row>();
@@ -5040,16 +5097,15 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
       const zt = [...(await env.DB.prepare('SELECT barcode, pcore, tn FROM zroll WHERE barcode IN (SELECT value FROM json_each(?)) AND tn IS NOT NULL').bind(JSON.stringify(pals)).all<Row>()).results,
         ...(cores.length ? (await env.DB.prepare('SELECT barcode, pcore, tn FROM zroll WHERE pcore IN (SELECT value FROM json_each(?)) AND tn IS NOT NULL').bind(JSON.stringify(cores)).all<Row>()).results : [])];
       if (zt.length) {
-        const mine = new Set(trRows.map((t) => tnKey(t.tn)));
+        const mine = new Set(trRows.map((t) => String(t.tn)));
         const tns = Array.from(new Set(zt.flatMap((z) => String(z.tn).split('|').filter(Boolean))));
-        const to = new Map<string, Row[]>();
-        for (const t of (await env.DB.prepare('SELECT tn, to_so, to_li FROM ztrr WHERE tn IN (SELECT value FROM json_each(?))').bind(JSON.stringify(tns)).all<Row>()).results) { const k0 = tnKey(t.tn); to.set(k0, [...(to.get(k0) ?? []), t]); }
+        const to = await tnDest(env, tns);
         const otherOf = (pal: string) => {
           const pc = palletCore(pal);
           const zs = zt.filter((z) => up(z.barcode) === pal || (pc && String(z.pcore ?? '') === pc));
           const ts = Array.from(new Set(zs.flatMap((z) => String(z.tn).split('|').filter(Boolean))));
           if (!ts.length || ts.some((t) => mine.has(t))) return null;
-          const dest = ts.flatMap((t) => (to.get(t) ?? []).map((x) => ({ t, so: normId(x.to_so), li: normId(x.to_li) })));
+          const dest = ts.flatMap((t) => (to.get(t) ?? []).map((x) => ({ t, so: x.so, li: x.li })));
           if (!dest.length || dest.some((d) => d.so === normId(line.so) && d.li === normId(line.li))) return null;
           return dest[0];
         };
