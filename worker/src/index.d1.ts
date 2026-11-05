@@ -255,7 +255,7 @@ const BASE_SCHEMA = [
 ];
 /** per system (each has its own database) */
 const schemaDone = new Set<string>();
-const SCHEMA_V = '36';
+const SCHEMA_V = '37';
 async function ensureSchema(env: Env) {
   const dk = env.DIV || 'active';
   if (schemaDone.has(dk) || !env.DB) return;
@@ -490,6 +490,8 @@ async function ensureSchema(env: Env) {
   ]);
   // v36 (v143): the ZMMBE Material Description (INTERLINING / FUSIBLE: picked from Korber without ZINR, ZCOMENT VIEW, ZROLLMGT)
   for (const t of ['stock', 'stock_sent']) { try { await env.DB.prepare(`ALTER TABLE ${t} ADD COLUMN descr TEXT`).run(); } catch { /* already there */ } }
+  // v37 (v154): ZINR by lot (which Materials list a roll through its ZCOMENT VIEW lot — for the kept results)
+  try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS zinr_lot_rid ON zinr(lot, rid)').run(); } catch { /* */ }
   await env.DB.prepare("INSERT INTO config (k, v) VALUES ('schema_v', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(SCHEMA_V).run();
   schemaDone.add(dk);
 }
@@ -592,7 +594,7 @@ async function broadcast(env: Env, msg: Record<string, unknown>) {
     try {
       const ks = (await env.DB.prepare('SELECT DISTINCT item FROM korber WHERE pallet IN (SELECT value FROM json_each(?))').bind(JSON.stringify((msg.pallets as unknown[]).map((x) => up(x)))).all<{ item: string }>()).results;
       // and the Material of the ZINR lots whose ZCOMENT VIEW barcode is that roll (a line may list it through its Shade Report)
-      const zs = (await env.DB.prepare('SELECT DISTINCT z.material item FROM zcoment c JOIN zinr z ON z.rid = c.rid AND z.lot = c.lot WHERE c.barcode IN (SELECT value FROM json_each(?))').bind(JSON.stringify((msg.pallets as unknown[]).map((x) => up(x)))).all<{ item: string }>()).results;
+      const zs = (await env.DB.prepare('SELECT DISTINCT z.material item FROM zinr z WHERE z.lot IN (SELECT c.lot FROM zcoment c WHERE c.barcode IN (SELECT value FROM json_each(?)))').bind(JSON.stringify((msg.pallets as unknown[]).map((x) => up(x)))).all<{ item: string }>()).results;
       items = Array.from(new Set([...items, ...ks.map((x) => normId(x.item)), ...zs.map((x) => normId(x.item))].filter(Boolean)));
     } catch { items = null; } // not known: every kept result is worked out again
   } else if (items && !Array.isArray(msg.pallets)) items = null; // v147: no rolls named → every kept result goes (safe)
@@ -621,7 +623,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 97; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 99; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1643,7 +1645,9 @@ async function handlePullPlan(env: Env, req: Request) {
   const counts = { results: await cached(env, 'c_counts', async () => (await env.DB.prepare(`SELECT 'plan' src, COUNT(*) n FROM plan UNION ALL SELECT src, COUNT(*) FROM stock GROUP BY src UNION ALL SELECT 'trr', COUNT(*) FROM trr`).all()).results) };
   const plan: Row[] = [];
   for (const g of groups) {
-    let rs = (await g.env.DB.prepare(PULL_PLAN_SQL).bind(g.period, prevWeek, owner, ptype, ptype === 'day' ? day ?? '~none~' : day).all<Row>()).results;
+    // v154: the plan lines with their stock and pick totals, kept until the next change anywhere ("rev"): every open page
+    // reloading after the same change reads them once
+    let rs = await revKeep(env, `pp|${hashStr(JSON.stringify([g.sc, g.period, prevWeek, owner, ptype, day]))}`, async () => (await g.env.DB.prepare(PULL_PLAN_SQL).bind(g.period, prevWeek, owner, ptype, ptype === 'day' ? day ?? '~none~' : day).all<Row>()).results);
     if (g.plant !== undefined) rs = rs.filter((r) => pnorm(r.plant) === g.plant);
     for (const r of rs) r._zat = g.zAt ?? null;
     // Korber: what is on the shelf for each line — rolls of its ZINR lots (Item + Lot Number = Vendor Batch, same invoice) or
@@ -2475,7 +2479,7 @@ async function handlePick(env: Env, req: Request, p: string) {
     const senv0 = await envFor(env, lrid);
     // ?slow=1: without the read-ahead and the kept answer (to compare)
     if (url.searchParams.get('slow')) return json(await pickCandidates(senv0, week, key, date, line, lrid));
-    return json(await candCached(env, `${week}|${key}|${date}|${lrid}`, async () => pickCandidates(await fastEnv(senv0, normId(line.item)), week, key, date, line, lrid)));
+    return json(await candCached(env, `${week}|${key}|${date}|${lrid}`, async () => pickCandidates(await fastEnv(senv0, normId(line.item), lrid, true), week, key, date, line, lrid)));
   }
 
   // v133: the SO line's batch is complete (its ZINSR Insp. Lot Quantity used up) — the other SO lines that can take the rolls
@@ -2501,7 +2505,7 @@ async function handlePick(env: Env, req: Request, p: string) {
     const gate = await makeGate(senv);
     if (req.method === 'GET') {
       if (!doneB.size) return json({ complete, lines: [] });
-      const cand = await candCached(env, `${week}|${key}|${date}|${lrid}`, async () => pickCandidates(await fastEnv(senv, normId(line.item)), week, key, date, line, lrid));
+      const cand = await candCached(env, `${week}|${key}|${date}|${lrid}`, async () => pickCandidates(await fastEnv(senv, normId(line.item), lrid), week, key, date, line, lrid));
       // the rolls of the complete batches (by their ZROLLMGT System Batch, else their ZINSR batches) still on the shelf
       const rolls: { r: Candidate; b: string }[] = [];
       for (const r of cand.rolls as Candidate[]) {
@@ -2885,7 +2889,7 @@ async function handlePick(env: Env, req: Request, p: string) {
     }
     const lrid = weekPlantRid(b.week, line.plant);
     const senv = await envFor(env, lrid); // this Pick's reports (a week plan line: its week + plant's)
-    const cand = await pickCandidates(await fastEnv(senv, normId(line.item)), b.week, b.key, b.date ?? '', line, lrid);
+    const cand = await pickCandidates(await fastEnv(senv, normId(line.item), lrid), b.week, b.key, b.date ?? '', line, lrid);
     const gate = await makeGate(senv);
     const byPallet = new Map(cand.rolls.map((r) => [r.pallet, r]));
     const lineId = `${b.key}|${b.date ?? ''}`;
@@ -3815,7 +3819,16 @@ interface PalletPick { day: string; by_user: string; qty: number; plan: string; 
  * read is answered from them when the answer is certain (one row); anything else goes to the database as before. A read
  * made twice in one request is read once. Only for reads (GET): the copies handed out are never shared.
  */
-async function fastEnv(env: Env, material: string): Promise<Env> {
+/**
+ * v154: the report rows a Material's read-ahead takes (Korber / ZROLLMGT / ZCOMENT — not the picks) are kept in this Worker's
+ * memory for the next lines of the same Material, until any upload / clear / plan change ("c_drev") or 10 minutes. The
+ * picks are always read again. Same answers, fewer reads: a Pick's lines of one Material read the reports once.
+ */
+type RaBase = { U: Set<string>; kAll: Row[]; zr: Row[]; zc: Row[]; at: number };
+const raCache = new Map<string, RaBase>();
+/** v154: the picks of the read-ahead rolls, kept for GETs (never for a save) until a pick of the Material or of one of its rolls ("c_mrev:<Material>") */
+const ppCache = new Map<string, { rows: Row[]; at: number }>();
+async function fastEnv(env: Env, material: string, ck?: string, keepPicks = false): Promise<Env> {
   const db = env.DB;
   const norm = (sql: string) => sql.replace(/\s+/g, ' ').trim();
   const Q_KP = norm('SELECT * FROM korber WHERE pallet = ?');
@@ -3825,25 +3838,47 @@ async function fastEnv(env: Env, material: string): Promise<Env> {
   const Q_ZC = norm('SELECT 1 FROM zcoment WHERE barcode IN (SELECT value FROM json_each(?)) LIMIT 1');
   const Q_PP = norm(`SELECT p.day, p.by_user, p.qty, p.roll_qty, p.week, p.so, p.li, p.at, p.req_id, r.pick_no FROM picks p LEFT JOIN pick_req r ON r.id = p.req_id
     WHERE p.pallet = ? AND p.cancelled_at IS NULL ORDER BY p.id`);
+  let drev = '', mrev = '';
+  if (ck && material) {
+    try {
+      for (const x of (await db.prepare("SELECT k, v FROM config WHERE k IN ('c_drev', ?)").bind('c_mrev:' + material).all<Row>()).results) { if (x.k === 'c_drev') drev = String(x.v ?? ''); else mrev = String(x.v ?? ''); }
+    } catch { /* */ }
+  }
+  const rk = ck && material ? `${env.DIV || 'active'}|${ck}|${material}|${drev}` : '';
+  const pk = rk && keepPicks ? `${rk}|${mrev}` : '';
+  const keptP = pk ? ppCache.get(pk) : undefined;
+  const freshP = keptP && Date.now() - keptP.at < 10 * 60e3 ? keptP : undefined;
+  const kept = rk ? raCache.get(rk) : undefined;
+  const fresh = kept && Date.now() - kept.at < 10 * 60e3 ? kept : undefined;
   // the rolls read up front: the Material's Korber pallets and the ZCOMENT barcodes of the Material's inspection lots
-  const [u1, u2] = material ? await db.batch([
+  const [u1, u2] = fresh ? [{ results: [] }, { results: [] }] : material ? await db.batch([
     db.prepare('SELECT /*exact*/ DISTINCT pallet b FROM korber WHERE item = ?').bind(material),
     db.prepare('SELECT /*exact*/ DISTINCT c.barcode b FROM zinr z CROSS JOIN zcoment c WHERE c.lot = z.lot AND z.material = ?').bind(material),
   ]) : [{ results: [] }, { results: [] }];
-  const U0 = new Set([...(u1.results as Row[]), ...(u2.results as Row[])].map((x) => String(x.b ?? '')).filter(Boolean));
+  const U0 = fresh ? fresh.U : new Set([...(u1.results as Row[]), ...(u2.results as Row[])].map((x) => String(x.b ?? '')).filter(Boolean));
   // a very large Material: no read-ahead (every read goes to the database, as before)
   const U = U0.size > 4000 ? new Set<string>() : U0;
   const pals = Array.from(U);
   const J = JSON.stringify(pals);
-  const kAll = pals.length ? (await db.prepare('SELECT /*exact*/ * FROM korber WHERE pallet IN (SELECT value FROM json_each(?))').bind(J).all<Row>()).results : [];
+  const kAll = fresh ? fresh.kAll : pals.length ? (await db.prepare('SELECT /*exact*/ * FROM korber WHERE pallet IN (SELECT value FROM json_each(?))').bind(J).all<Row>()).results : [];
   const byPal = new Map<string, Row[]>();
   for (const k of kAll) { const p = String(k.pallet); const a = byPal.get(p); if (a) a.push(k); else byPal.set(p, [k]); }
-  const [zr, zc, pp] = pals.length ? await db.batch([
+  const [zr, zc, pp] = fresh ? [{ results: fresh.zr }, { results: fresh.zc }, freshP ? { results: freshP.rows } : pals.length ? await db.prepare(`SELECT p.pallet _pal, p.day, p.by_user, p.qty, p.roll_qty, p.week, p.so, p.li, p.at, p.req_id, r.pick_no FROM picks p LEFT JOIN pick_req r ON r.id = p.req_id
+      WHERE p.pallet IN (SELECT value FROM json_each(?)) AND p.cancelled_at IS NULL ORDER BY p.id`).bind(J).all<Row>() : { results: [] }] : pals.length ? await db.batch([
     db.prepare('SELECT /*exact*/ * FROM zroll WHERE barcode IN (SELECT value FROM json_each(?))').bind(J),
     db.prepare('SELECT /*exact*/ DISTINCT barcode FROM zcoment WHERE barcode IN (SELECT value FROM json_each(?))').bind(J),
     db.prepare(`SELECT p.pallet _pal, p.day, p.by_user, p.qty, p.roll_qty, p.week, p.so, p.li, p.at, p.req_id, r.pick_no FROM picks p LEFT JOIN pick_req r ON r.id = p.req_id
       WHERE p.pallet IN (SELECT value FROM json_each(?)) AND p.cancelled_at IS NULL ORDER BY p.id`).bind(J),
   ]) : [{ results: [] }, { results: [] }, { results: [] }];
+  if (rk && !fresh && kAll.length + (zr.results as Row[]).length < 20000) {
+    raCache.set(rk, { U: U0, kAll, zr: zr.results as Row[], zc: zc.results as Row[], at: Date.now() });
+    // a few Materials at most (memory): the oldest goes
+    while (raCache.size > 16) raCache.delete(raCache.keys().next().value as string);
+  }
+  if (pk && !freshP) {
+    ppCache.set(pk, { rows: pp.results as Row[], at: Date.now() });
+    while (ppCache.size > 16) ppCache.delete(ppCache.keys().next().value as string);
+  }
   const zrBy = new Map<string, Row[]>();
   for (const z of zr.results as Row[]) { const b = String(z.barcode); const a = zrBy.get(b); if (a) a.push(z); else zrBy.set(b, [z]); }
   const zcHas = new Set((zc.results as Row[]).map((z) => String(z.barcode)));
@@ -4051,6 +4086,25 @@ async function kavCached(env: Env, id: string, keys: string[], run: (sub: string
     }
   }
   return Array.from(out.values());
+}
+/** v154: kept until any change ("rev" moves on every change) — 10 minutes at most */
+async function revKeep<T>(env: Env, id: string, make: () => Promise<T>): Promise<T> {
+  try {
+    if (!candCacheReady) { await env.DB.prepare('CREATE TABLE IF NOT EXISTS cand_cache (k TEXT PRIMARY KEY, rev TEXT NOT NULL, at TEXT NOT NULL, v TEXT NOT NULL)').run(); candCacheReady = true; }
+    const [r1, r2] = await env.DB.batch([
+      env.DB.prepare("SELECT v FROM config WHERE k = 'rev'"),
+      env.DB.prepare('SELECT rev, at, v FROM cand_cache WHERE k = ?').bind(id),
+    ]);
+    const tag = `${API_VERSION}|${String((r1.results as Row[])[0]?.v ?? '')}`;
+    const hit = (r2.results as Row[])[0];
+    if (hit && hit.rev === tag && Date.now() - Date.parse(String(hit.at)) < 10 * 60e3) return JSON.parse(String(hit.v)) as T;
+    const v = await make();
+    try {
+      const txt = JSON.stringify(v);
+      if (txt.length < 1_500_000) await env.DB.prepare('INSERT OR REPLACE INTO cand_cache (k, rev, at, v) VALUES (?,?,?,?)').bind(id, tag, now(), txt).run();
+    } catch { /* only a cache */ }
+    return v;
+  } catch { return make(); }
 }
 /** The candidate rolls of a plan line (id = week|so|li|item|date|rid), kept until anything they read changes. */
 async function candCached<T>(env: Env, id: string, make: () => Promise<T>): Promise<T> {
