@@ -583,7 +583,11 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
         const z = zrows.find((x) => bs.some((b) => bkey(b.batch) === bkey(x.batch)));
         const full = palFull.get(e.p.pallet) ?? 0;
         const kLot = String(v('Lot Number') ?? e.p.lot ?? ''), kHu = String(v('Supplier Hu') ?? '');
-        const miss = [t.vendor_batch && kLot && kLot.toUpperCase() !== String(t.vendor_batch).toUpperCase() ? 'Lot ≠ Vendor Batch' : '', t.vendor_roll && kHu && kHu.toUpperCase() !== String(t.vendor_roll).toUpperCase() ? 'Supplier Hu ≠ Vendor Roll' : '',
+        // Korber Lot Number = Vendor Batch (MAS Active) or = Vendor Roll (MAS Kreeda)
+        const U0 = (x: unknown) => String(x ?? '').trim().toUpperCase();
+        const lotOk = !kLot || !(t.vendor_batch || t.vendor_roll) || [U0(t.vendor_batch), U0(t.vendor_roll)].includes(U0(kLot));
+        const huOk = !kHu || !t.vendor_roll || [U0(t.vendor_roll), U0(t.vendor_batch)].includes(U0(kHu));
+        const miss = [lotOk ? '' : 'Lot ≠ Vendor Batch / Roll', huOk ? '' : 'Supplier Hu ≠ Vendor Roll',
           t.batch && bs.length && !bs.some((b) => bkey(b.batch) === bkey(t.batch)) ? 'SAP batch ≠ TN batch' : '', Number(e.p.qty) > Number(t.qty ?? Infinity) + 0.0005 ? 'Picked > TN Qty' : ''].filter(Boolean);
         if (miss.length) bad.push(aoa.length);
         aoa.push([num(t.tn), t.date ? String(t.date).split('-').reverse().join('-') : '', t.status ?? '', t.from_so ?? '', num(t.from_li ?? ''), String(e.r.so), num(e.r.li), num(e.r.item), t.to_plant ?? '', num(String(t.batch ?? '').replace(/^0+(?=\d)/, '')), Number(t.qty ?? 0),

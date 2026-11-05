@@ -259,7 +259,7 @@ const BASE_SCHEMA = [
 ];
 /** per system (each has its own database) */
 const schemaDone = new Set<string>();
-const SCHEMA_V = '38';
+const SCHEMA_V = '39';
 async function ensureSchema(env: Env) {
   const dk = env.DIV || 'active';
   if (schemaDone.has(dk) || !env.DB) return;
@@ -496,7 +496,7 @@ async function ensureSchema(env: Env) {
   for (const t of ['stock', 'stock_sent']) { try { await env.DB.prepare(`ALTER TABLE ${t} ADD COLUMN descr TEXT`).run(); } catch { /* already there */ } }
   // v37 (v154): ZINR by lot (which Materials list a roll through its ZCOMENT VIEW lot — for the kept results)
   try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS zinr_lot_rid ON zinr(lot, rid)').run(); } catch { /* */ }
-  // v38 (v162): TRANSFER NOTE — the ZROLLMGT comment's "TN#<Transfer Request Number>" of each roll (|1768292|…), and a
+  // v38 (v162) + v39 (v163: zcoment.tn — v163 added it under v38, so a database already at v38 missed it): TRANSFER NOTE — the ZROLLMGT comment's "TN#<Transfer Request Number>" of each roll (|1768292|…), and a
   // pick's TRANSFER NOTE (JSON: the ZMM_TRR / ZROLLMGT details for the packing list)
   for (const sql of ['ALTER TABLE zroll ADD COLUMN tn TEXT', 'ALTER TABLE picks ADD COLUMN tn TEXT', 'ALTER TABLE zcoment ADD COLUMN tn TEXT']) { try { await env.DB.prepare(sql).run(); } catch { /* already there */ } }
   try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS zroll_tn ON zroll(tn, rid)').run(); } catch { /* */ }
@@ -678,7 +678,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 107; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 109; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1476,7 +1476,8 @@ async function tnUrOf(env: Env, senv: Env, rid: string, keys: string[]): Promise
   }
   const inTrr = new Set(Array.from(units).flatMap(([key, m]) => Array.from(m.keys()).map((u) => `${key}|${u.split('|')[0]}`)));
   // no ZMM_TRR row: the TN of the ZINSR lot (ZCOMENT VIEW comment)
-  const fromZ = (await senv.DB.prepare("SELECT DISTINCT c.lot, c.tn, z.so, z.li, z.material, z.batch, z.qty FROM zcoment c JOIN zinr z ON z.lot = c.lot WHERE c.tn >= '|'").all<Row>()).results;
+  let fromZ: Row[] = [];
+  try { fromZ = (await senv.DB.prepare("SELECT DISTINCT c.lot, c.tn, z.so, z.li, z.material, z.batch, z.qty FROM zcoment c JOIN zinr z ON z.lot = c.lot WHERE c.tn >= '|'").all<Row>()).results; } catch { /* no zcoment.tn yet */ }
   const seenZ = new Set<string>();
   for (const z of fromZ) {
     const key = lineKey(z.so, z.li, z.material);
@@ -2270,7 +2271,8 @@ async function tnDest(env: Env, tns: string[]): Promise<Map<string, { so: string
   if (!tns.length) return out;
   for (const t of (await env.DB.prepare('SELECT tn, to_so, to_li FROM ztrr WHERE tn IN (SELECT value FROM json_each(?))').bind(JSON.stringify(tns)).all<Row>()).results) add(t.tn, t.to_so, t.to_li);
   for (const t of tns.filter((x) => !out.has(k(x)))) {
-    const ls = (await env.DB.prepare("SELECT DISTINCT lot FROM zcoment WHERE tn >= '|' AND instr(tn, ?) > 0").bind(`|${k(t)}|`).all<Row>()).results.map((x) => String(x.lot));
+    let ls: string[] = [];
+    try { ls = (await env.DB.prepare("SELECT DISTINCT lot FROM zcoment WHERE tn >= '|' AND instr(tn, ?) > 0").bind(`|${k(t)}|`).all<Row>()).results.map((x) => String(x.lot)); } catch { /* no zcoment.tn yet */ }
     if (ls.length) for (const z of (await env.DB.prepare('SELECT DISTINCT so, li FROM zinr WHERE lot IN (SELECT value FROM json_each(?))').bind(JSON.stringify(ls)).all<Row>()).results) add(t, z.so, z.li);
   }
   return out;
@@ -4692,7 +4694,8 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
     const lotRows = lotsByBatch.flatMap((x) => x.z);
     const ids = Array.from(new Set(lotRows.map((l) => String(l.lot))));
     if (ids.length) {
-      const zt = (await env.DB.prepare('SELECT DISTINCT lot, tn FROM zcoment WHERE lot IN (SELECT value FROM json_each(?)) AND tn IS NOT NULL').bind(JSON.stringify(ids)).all<Row>()).results;
+      let zt: Row[] = [];
+      try { zt = (await env.DB.prepare('SELECT DISTINCT lot, tn FROM zcoment WHERE lot IN (SELECT value FROM json_each(?)) AND tn IS NOT NULL').bind(JSON.stringify(ids)).all<Row>()).results; } catch { /* no zcoment.tn yet */ }
       // a TN already in ZMM_TRR is taken from there (its Transfer Quantity); else each TN + batch: its lots' Insp. Lot Quantity
       const have = new Set(trRows.map((t) => String(t.tn)));
       const byTn = new Map<string, Set<string>>();
@@ -4800,18 +4803,21 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
       if (!(zq > 1e-9)) { blk('ZROLLMGT Available Quantity 0'); continue; }
       // the Korber roll: the Barcode Number, else the same roll number with a prefix (XLLFHP… / COMPCP…) of the same item —
       // of several, the one with Lot Number = Vendor Batch and Supplier Hu = Vendor Roll
+      // Korber Lot Number = Vendor Batch (MAS Active) — or = Vendor Roll (MAS Kreeda's Korber); Supplier Hu = Vendor Roll when Korber has it
+      const tnLotOk = (x: Row) => !vb || up(x.lot) === up(vb) || (!!vr && up(x.lot) === vr);
+      const tnHuOk = (x: Row) => !vr || !x.supplier_hu || up(x.supplier_hu) === vr || (!!vb && up(x.supplier_hu) === up(vb));
       let k = await env.DB.prepare('SELECT * FROM korber WHERE pallet = ?').bind(bc).first<Row>();
       if (!k && z.pcore) {
         const ks = (await env.DB.prepare('SELECT * FROM korber WHERE pcore = ? AND item = ?').bind(z.pcore, normId(line.item)).all<Row>()).results;
-        k = ks.length === 1 ? ks[0] : ks.find((x) => up(x.lot) === up(vb) && (!vr || up(x.supplier_hu) === vr)) ?? null;
+        k = ks.length === 1 ? ks[0] : ks.find((x) => tnLotOk(x) && tnHuOk(x)) ?? null;
         if (!k && ks.length > 1) { blk(`${ks.length} Korber pallets carry roll ${bc} (${ks.map((x) => x.pallet).join(', ')}) — none with Lot ${vb ?? '–'} / Supplier Hu ${vr ?? '–'}`); continue; }
       }
       if (!k) { blk(`Barcode ${bc} is not in Korber Inventory`); continue; }
       const kp = up(k.pallet);
       if (rejected.has(kp)) { rejectedSkip++; blk('rejected roll', k); continue; }
       if (String(k.pick_id ?? '0') !== '0' && String(k.pick_id ?? '') !== '') { notPickable++; blk(`Korber Pick Id ${k.pick_id} (on a WMS pick)`, k); continue; }
-      const checks = { item: normId(k.item) === normId(line.item), lot: vb ? up(k.lot) === up(vb) : null, hu: vr && k.supplier_hu ? up(k.supplier_hu) === vr : null, tn: true, bin: true };
-      const warns = [checks.item ? '' : `Korber Item ${k.item} ≠ ${line.item}`, checks.lot === false ? `Korber Lot Number ${k.lot ?? '–'} ≠ ZROLLMGT Vendor Batch ${vb}` : '', checks.hu === false ? `Korber Supplier Hu ${k.supplier_hu ?? '–'} ≠ ZROLLMGT Vendor Roll ${vr}` : ''].filter(Boolean);
+      const checks = { item: normId(k.item) === normId(line.item), lot: vb || vr ? tnLotOk(k) : null, hu: vr && k.supplier_hu ? tnHuOk(k) : null, tn: true, bin: true };
+      const warns = [checks.item ? '' : `Korber Item ${k.item} ≠ ${line.item}`, checks.lot === false ? `Korber Lot Number ${k.lot ?? '–'} ≠ ZROLLMGT Vendor Batch ${vb ?? '–'} / Vendor Roll ${vr ?? '–'}` : '', checks.hu === false ? `Korber Supplier Hu ${k.supplier_hu ?? '–'} ≠ ZROLLMGT Vendor Roll ${vr}` : ''].filter(Boolean);
       // its ZINSR lots: this SO line's lots of the TN batch (the Vendor Batch's first) — the lot checks of a pick apply to them
       const myL = lots.filter((l) => normId(l.batch) === bt);
       const lsel = myL.filter((l) => up(l.vendor_batch) === up(vb));
