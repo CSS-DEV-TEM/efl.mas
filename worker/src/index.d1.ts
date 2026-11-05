@@ -621,7 +621,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 93; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 97; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -2334,6 +2334,16 @@ async function handlePick(env: Env, req: Request, p: string) {
 
   // what is loaded
   // GET /api/pick/status?rid= — each report of a Pick: its own upload (rows, file, who, when) or the shared one it falls back to
+  // v152: Korber ↔ SAP tally of a Pick — for each Material of the plan: SAP UR (ZMMBE) by batch, the rolls SAP has in
+  // ZROLLMGT and the rolls on the shelf in Korber, matched roll by roll; what differs and why. Counts only, nothing is changed.
+  if (part === 'recon' && req.method === 'GET') {
+    await requireUser(env, req);
+    const rid = scopeRid(url.searchParams.get('rid'));
+    if (!rid) throw new HttpError(400, 'Choose a Pick first.');
+    const out = await revCached(env, 'recon|' + rid, [], () => reconOf(env, rid));
+    return json(out);
+  }
+
   if (part === 'status' && req.method === 'GET') {
     const rid = scopeRid(url.searchParams.get('rid'));
     const reports = await reportStatus(env, rid);
@@ -3952,7 +3962,7 @@ async function revCached<T>(env: Env, id: string, base: string[], make: () => Pr
       return m;
     };
     const hit = (r2.results as Row[])[0];
-    if (hit && Date.now() - Date.parse(String(hit.at)) < 15 * 60e3) {
+    if (hit && Date.now() - Date.parse(String(hit.at)) < keepMs()) {
       try {
         const tag = JSON.parse(String(hit.rev)) as { h: string; m: Record<string, string> };
         if (tag.h === head) {
@@ -3973,7 +3983,7 @@ async function revCached<T>(env: Env, id: string, base: string[], make: () => Pr
       // a pick of one of these Materials while it was worked out: not kept (the next ask works it out again)
       if (Object.values(tag).some((x) => x && x > t0) || txt.length > 1_500_000) return v;
       await env.DB.batch([
-        env.DB.prepare('DELETE FROM cand_cache WHERE at < ?').bind(new Date(Date.now() - 15 * 60e3).toISOString()),
+        env.DB.prepare('DELETE FROM cand_cache WHERE at < ?').bind(new Date(Date.now() - Math.max(keepMs(), 15 * 60e3)).toISOString()),
         env.DB.prepare('INSERT OR REPLACE INTO cand_cache (k, rev, at, v) VALUES (?,?,?,?)').bind(id, JSON.stringify({ h: head, m: tag }), now(), txt),
       ]);
     } catch { /* only a cache */ }
@@ -3998,7 +4008,7 @@ async function kavCached(env: Env, id: string, keys: string[], run: (sub: string
     drev = String((r1.results as Row[])[0]?.v ?? '');
     const hit = (r2.results as Row[])[0];
     if (hit && hit.rev === `${API_VERSION}|${drev}`) entries = JSON.parse(String(hit.v)) as Record<string, E>;
-    for (const k of Object.keys(entries)) if (!(Date.now() - Number(entries[k].t) < 15 * 60e3)) delete entries[k]; // each line 15 minutes at most
+    for (const k of Object.keys(entries)) if (!(Date.now() - Number(entries[k].t) < keepMs())) delete entries[k]; // each line 15 minutes at most
     ok = true;
   } catch { /* no cache: all worked out */ }
   const itemOf = (k: string) => normId(k.split('|')[2] ?? '');
@@ -4034,7 +4044,7 @@ async function kavCached(env: Env, id: string, keys: string[], run: (sub: string
       for (const k of keys) if (entries[k]) keep[k] = entries[k];
       try {
         await env.DB.batch([
-          env.DB.prepare('DELETE FROM cand_cache WHERE at < ?').bind(new Date(Date.now() - 15 * 60e3).toISOString()),
+          env.DB.prepare('DELETE FROM cand_cache WHERE at < ?').bind(new Date(Date.now() - Math.max(keepMs(), 15 * 60e3)).toISOString()),
           env.DB.prepare('INSERT OR REPLACE INTO cand_cache (k, rev, at, v) VALUES (?,?,?,?)').bind(id, `${API_VERSION}|${drev}`, now(), JSON.stringify(keep)),
         ]);
       } catch { /* only a cache */ }
@@ -5151,6 +5161,105 @@ async function handleAdminPlans(env: Env, req: Request) {
   throw new HttpError(400, 'Unknown action.');
 }
 
+// ---------------------------------------------------------------- v152 Korber ↔ SAP tally
+type ReconRoll = { pallet: string; batch: string | null; korber: number | null; sap: number | null; bin: string | null; location: string | null; kind: string; why: string };
+async function reconOf(env: Env, rid: string) {
+  const kenv = await envFor(env, rid);
+  const st0 = await getSettings(env);
+  const plantLocs = new Set((st0.plantSlocs || []).map((x) => up(normId(x))));
+  const plan = (/^\d{4}-W\d{2}@/.test(rid)
+    ? await env.DB.prepare("SELECT key, so, li, item, qty FROM plan WHERE week = ? AND upper(replace(trim(COALESCE(plant, '')), ' ', '')) = ?").bind(rid.split('@')[0], up(rid.split('@')[1])).all<Row>()
+    : await env.DB.prepare('SELECT key, so, li, item, qty FROM plan WHERE week = ?').bind(rid).all<Row>()).results;
+  const keys = Array.from(new Set(plan.map((x) => String(x.key))));
+  const items = Array.from(new Set(plan.map((x) => normId(x.item)).filter(Boolean)));
+  if (!items.length) return { rid, items: [], totals: {} };
+  const gate = await makeGate(kenv);
+  const stock = (await kenv.DB.prepare("SELECT /*exact*/ key, material, batch, sloc, ur, qi, block, descr FROM stock WHERE src = 'zmmbe' AND key IN (SELECT value FROM json_each(?))").bind(JSON.stringify(keys)).all<Row>()).results.filter((x) => !plantLocs.has(up(normId(x.sloc))));
+  const korber = (await kenv.DB.prepare('SELECT /*exact*/ pallet, item, lot, qty, location, wh, pick_id FROM korber WHERE item IN (SELECT value FROM json_each(?))').bind(JSON.stringify(items)).all<Row>()).results;
+  const pals = Array.from(new Set(korber.map((k) => up(k.pallet))));
+  const zByPal = new Map<string, Row>();
+  if (pals.length) {
+    for (const z of (await kenv.DB.prepare('SELECT /*exact*/ barcode, bin, batch, status, qty FROM zroll WHERE barcode IN (SELECT value FROM json_each(?))').bind(JSON.stringify(pals)).all<Row>()).results) {
+      const k = up(z.barcode); const e = zByPal.get(k); if (!e || (gate.rowWhy(e) && !gate.rowWhy(z))) zByPal.set(k, z);
+    }
+    const rest = pals.filter((x) => !zByPal.has(x));
+    const cores = new Map(rest.map((x) => [palletCore(x), x]).filter(([c0]) => !!c0) as [string, string][]);
+    if (cores.size) for (const z of (await kenv.DB.prepare('SELECT barcode, bin, batch, status, qty, pcore FROM zroll WHERE pcore IN (SELECT value FROM json_each(?))').bind(JSON.stringify(Array.from(cores.keys()))).all<Row>()).results) {
+      const p0 = cores.get(String(z.pcore)); if (p0 && !zByPal.has(p0)) zByPal.set(p0, z);
+    }
+  }
+  const batches = Array.from(new Set(stock.filter((x) => Number(x.ur) > 0).map((x) => normId(x.batch)).filter(Boolean)));
+  // picks saved after the ZMMBE upload are not out of its UR yet: taken off here, by SO line and batch (as the pick window does)
+  const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(rid).first<{ at: string | null }>())?.at ?? '';
+  const after = new Map<string, number>(); // item|batch → qty
+  if (zAt) for (const x of (await env.DB.prepare("SELECT p.line, p.item, p.batch, p.qty FROM picks p WHERE p.at > ?1 AND p.cancelled_at IS NULL AND EXISTS (SELECT 1 FROM json_each(?2) j WHERE substr(p.line, 1, length(j.value) + 1) = j.value || '|')").bind(zAt, JSON.stringify(keys)).all<Row>()).results) {
+    const k = normId(x.item) + '|' + normId(String(x.batch ?? '').split(',')[0]); after.set(k, r3((after.get(k) ?? 0) + Number(x.qty || 0)));
+  }
+  const pickedPlan = new Map<string, number>();
+  for (const x of (await env.DB.prepare('SELECT item, SUM(qty) q FROM picks WHERE week = ? AND cancelled_at IS NULL GROUP BY item').bind(rid).all<Row>()).results) pickedPlan.set(normId(x.item), Number(x.q) || 0);
+  const zBatch = batches.length ? (await kenv.DB.prepare('SELECT /*exact*/ barcode, bin, batch, status, qty, material FROM zroll WHERE batch IN (SELECT value FROM json_each(?))').bind(JSON.stringify(batches)).all<Row>()).results : [];
+  const picked = new Map<string, { q: number; base: number | null }>();
+  if (pals.length) for (const x of (await env.DB.prepare('SELECT pallet, SUM(qty) q, MAX(roll_qty) base FROM picks WHERE pallet IN (SELECT value FROM json_each(?)) AND cancelled_at IS NULL GROUP BY pallet').bind(JSON.stringify(pals)).all<Row>()).results) picked.set(up(x.pallet), { q: Number(x.q) || 0, base: x.base === null ? null : Number(x.base) });
+  const rej = new Set((await env.DB.prepare('SELECT pallet FROM pick_reject WHERE pallet IN (SELECT value FROM json_each(?))').bind(JSON.stringify(pals.length ? pals : [''])).all<Row>()).results.map((x) => up(x.pallet)));
+  const res: Row[] = [];
+  const tot: Record<string, number> = {};
+  for (const item of items) {
+    const lines = plan.filter((x) => normId(x.item) === item);
+    const sk = stock.filter((x) => normId(x.material) === item);
+    const trim = !!(await trimItem(kenv, item, sk));
+    const planQty = r3(lines.reduce((t, x) => t + Number(x.qty || 0), 0));
+    const urBy = new Map<string, number>();
+    for (const x of sk) { const b = normId(x.batch); urBy.set(b, r3((urBy.get(b) ?? 0) + Math.max(0, Number(x.ur) || 0))); }
+    for (const [b, v] of urBy) urBy.set(b, Math.max(0, r3(v - (after.get(item + '|' + b) ?? 0))));
+    const itemB = new Set(Array.from(urBy.entries()).filter(([, v]) => v > 1e-9).map(([b]) => b));
+    const rolls: ReconRoll[] = [];
+    const kBy = new Map<string, number>(), zBy = new Map<string, number>(), nBy = new Map<string, number>();
+    const seenZ = new Set<string>(), doneZ = new Set<string>();
+    let kOk = 0;
+    for (const k of korber.filter((x) => normId(x.item) === item)) {
+      const pal = up(k.pallet), z = zByPal.get(pal) ?? null;
+      if (z) seenZ.add(up(z.barcode));
+      const pk = picked.get(pal);
+      const left = Math.max(0, r3((pk?.base ?? Number(k.qty || 0)) - (pk?.q ?? 0)));
+      if (left <= 1e-9) { if (z) doneZ.add(up(z.barcode)); continue; } // picked in full already (not counted on either side)
+      const b = z?.batch ? normId(z.batch) : null;
+      const base = { pallet: pal, batch: b, korber: left, sap: z && z.qty !== null ? Number(z.qty) : null, bin: z ? String(z.bin ?? '') : null, location: k.location ? String(k.location) : null };
+      const wms = String(k.pick_id ?? '0') !== '0' && String(k.pick_id ?? '') !== '';
+      const lw = gate.locWhy(k);
+      let kind = 'ok', why = '';
+      if (wms) { kind = 'wms'; why = `Korber Pick Id ${k.pick_id}`; }
+      else if (rej.has(pal)) { kind = 'rejected'; why = 'Rejected before'; }
+      else if (lw) { kind = 'location'; why = lw; }
+      else if (trim) { kind = 'ok'; }
+      else if (!z) { kind = gate.loaded ? 'notInSap' : 'noZroll'; why = gate.loaded ? 'Not in ZROLLMGT' : 'No ZROLLMGT uploaded'; }
+      else if (gate.rowWhy(z)) { kind = 'bin'; why = String(gate.rowWhy(z)); }
+      else if (b && itemB.size && !itemB.has(b)) { kind = 'otherBatch'; why = `SAP batch ${b} is not a batch of the plan's SO lines (${Array.from(itemB).join(', ')})`; }
+      else if (base.sap !== null && Math.abs(base.sap - Number(k.qty || 0)) > 0.01 && Math.abs(base.sap - left) > 0.01) { kind = 'qtyDiff'; why = `Korber Actual Qty ${r3(Number(k.qty || 0))}${left + 1e-6 < Number(k.qty || 0) ? ` (${left} left after picks)` : ''} · ZROLLMGT ${r3(base.sap)}`; }
+      if (kind === 'ok' || kind === 'qtyDiff') { kOk = r3(kOk + left); const bb = b ?? '–'; kBy.set(bb, r3((kBy.get(bb) ?? 0) + left)); nBy.set(bb, (nBy.get(bb) ?? 0) + 1); }
+      if (kind !== 'ok') rolls.push({ ...base, kind, why });
+      tot[kind] = (tot[kind] ?? 0) + 1;
+    }
+    // rolls SAP has (ZROLLMGT, a batch of the plan's SO lines, at the pick bin) that Korber does not
+    if (!trim) for (const z of zBatch.filter((x) => itemB.has(normId(x.batch)) && (!x.material || normId(x.material) === item))) {
+      if (gate.rowWhy(z) || doneZ.has(up(z.barcode))) continue;
+      const b = normId(z.batch); zBy.set(b, r3((zBy.get(b) ?? 0) + Math.max(0, Number(z.qty) || 0)));
+      if (seenZ.has(up(z.barcode))) continue;
+      rolls.push({ pallet: up(z.barcode), batch: b, korber: null, sap: z.qty === null ? null : Number(z.qty), bin: String(z.bin ?? ''), location: null, kind: 'notInKorber', why: 'In ZROLLMGT, not in Korber Inventory' });
+      tot.notInKorber = (tot.notInKorber ?? 0) + 1;
+    }
+    const urAll = r3(Array.from(urBy.values()).reduce((t, v) => t + v, 0));
+    const done = r3(pickedPlan.get(item) ?? 0);
+    const need = Math.max(0, r3(Math.min(planQty - done, urAll)));
+    const bRows = Array.from(new Set([...itemB, ...kBy.keys()])).sort().map((b) => ({ batch: b, ur: urBy.get(b) ?? 0, zroll: zBy.get(b) ?? null, korber: kBy.get(b) ?? 0, rolls: nBy.get(b) ?? 0 }));
+    const state = need <= 1e-9 && done + 1e-6 >= planQty ? 'ok' : !urAll ? 'noUr' : kOk + 1e-6 >= need ? (rolls.some((r) => r.kind === 'qtyDiff' || r.kind === 'notInKorber' || r.kind === 'notInSap') ? 'okCheck' : 'ok') : kOk > 1e-9 ? 'short' : 'none';
+    tot['state_' + state] = (tot['state_' + state] ?? 0) + 1;
+    res.push({ item, trim, lines: lines.length, plan: planQty, picked: done, ur: urAll, need, korber: kOk, state, batches: bRows, rolls: rolls.slice(0, 60), more: Math.max(0, rolls.length - 60) });
+  }
+  const order: Record<string, number> = { none: 0, short: 1, noUr: 2, okCheck: 3, ok: 4 };
+  res.sort((a, b) => order[String(a.state)] - order[String(b.state)] || Number(b.need) - Number(a.need));
+  return { rid, zroll: gate.loaded, bin: gate.bin, items: res, totals: tot };
+}
+
 // ---------------------------------------------------------------- v148 Smart Coach
 /**
  * Advice learned from the system's own history (last 30 days of picks, rejects and uploads) — counts only, nothing is
@@ -5290,19 +5399,30 @@ function meterDb(db: D1Database, m: Meter): D1Database {
  * its requests and writes them to the users database at most every 10 s (one small write, not one per request).
  */
 const lkDay = (ms = Date.now()) => new Date(ms + 330 * 60000).toISOString().slice(0, 10);
-const liveAcc = { day: '', read: 0, written: 0, reqs: 0, last: 0, made: false };
+const liveAcc = { day: '', read: 0, written: 0, reqs: 0, last: 0, made: false, ep: new Map<string, { r: number; w: number; q: number }>(), epMade: false };
+/** v151: the feature a request belongs to (method + path, ids taken out) — for the Data Manager */
+const epOf = (method: string, path: string) => `${method} ${path.replace(/\/\d+(?=\/|$)/g, '/:id').slice(0, 60)}`;
 async function liveFlush(db: D1Database) {
   if (!liveAcc.reqs && !liveAcc.read && !liveAcc.written) return;
   const d = liveAcc.day, r = liveAcc.read, w = liveAcc.written, q = liveAcc.reqs;
+  const eps = Array.from(liveAcc.ep.entries()); liveAcc.ep = new Map();
   liveAcc.read = 0; liveAcc.written = 0; liveAcc.reqs = 0; liveAcc.last = Date.now();
+  try {
+    if (eps.length) {
+      if (!liveAcc.epMade) { await db.prepare('CREATE TABLE IF NOT EXISTS live_ep (day TEXT NOT NULL, ep TEXT NOT NULL, rows_read INTEGER NOT NULL DEFAULT 0, rows_written INTEGER NOT NULL DEFAULT 0, reqs INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (day, ep))').run(); liveAcc.epMade = true; }
+      await db.batch(eps.map(([ep, x]) => db.prepare('INSERT INTO live_ep (day, ep, rows_read, rows_written, reqs) VALUES (?, ?, ?, ?, ?) ON CONFLICT(day, ep) DO UPDATE SET rows_read = rows_read + excluded.rows_read, rows_written = rows_written + excluded.rows_written, reqs = reqs + excluded.reqs').bind(d, ep, x.r, x.w, x.q)));
+      if (Math.random() < 0.02) await db.prepare('DELETE FROM live_ep WHERE day < ?').bind(lkDay(Date.now() - 40 * 86400000)).run();
+    }
+  } catch { /* only the per-feature split: the day total below still counts */ }
   try {
     if (!liveAcc.made) { await db.prepare('CREATE TABLE IF NOT EXISTS live_day (day TEXT PRIMARY KEY, rows_read INTEGER NOT NULL DEFAULT 0, rows_written INTEGER NOT NULL DEFAULT 0, reqs INTEGER NOT NULL DEFAULT 0, at INTEGER)').run(); liveAcc.made = true; }
     await db.prepare('INSERT INTO live_day (day, rows_read, rows_written, reqs, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(day) DO UPDATE SET rows_read = rows_read + excluded.rows_read, rows_written = rows_written + excluded.rows_written, reqs = reqs + excluded.reqs, at = excluded.at').bind(d, r, w, q, Date.now()).run();
     if (Math.random() < 0.02) await db.prepare('DELETE FROM live_day WHERE day < ?').bind(lkDay(Date.now() - 40 * 86400000)).run();
   } catch { liveAcc.read += r; liveAcc.written += w; liveAcc.reqs += q; } // tried again with the next requests
 }
-function liveAdd(db: D1Database | undefined, m: Meter, ctx?: ExecutionContext) {
+function liveAdd(db: D1Database | undefined, m: Meter, ctx?: ExecutionContext, ep?: string) {
   if (!db) return;
+  if (ep) { const e = liveAcc.ep.get(ep) ?? { r: 0, w: 0, q: 0 }; e.r += m.read; e.w += m.written; e.q++; liveAcc.ep.set(ep, e); }
   const d = lkDay();
   // a new day: what is left of yesterday goes to yesterday, today starts from 0
   if (liveAcc.day && liveAcc.day !== d) { const p = liveFlush(db); if (ctx) ctx.waitUntil(p); }
@@ -5318,6 +5438,51 @@ async function liveToday(db: D1Database) {
   return { day: d, read, written, rows: read + written, reqs: Number(row?.reqs ?? 0) + mine.reqs, resets: 'at 12:00 midnight (Sri Lanka time)' };
 }
 
+// ---------------------------------------------------------------- v151 Data Manager
+/**
+ * Keeps the month's D1 rows read inside the plan (25 billion a month by default). It watches the month so far, works out
+ * where the month will end at this pace and sets a level for the whole system:
+ *   normal  — as now;
+ *   saver   — pages wait a little and reload once for a burst of changes, kept results are kept longer (45 min);
+ *   strict  — pages reload at most once a minute, kept results 90 min, the signed-in check every 3 min.
+ * Pick rules, checks and saves are never changed: a pick is always checked against the database at save time.
+ */
+type BudgetMode = 'auto' | 'normal' | 'saver' | 'strict';
+type Level = 'normal' | 'saver' | 'strict';
+const budgetAcc = { at: 0, level: 'normal' as Level, info: null as null | Record<string, unknown> };
+async function budgetInfo(db: D1Database) {
+  let cfg: { limit?: number; mode?: BudgetMode } = {};
+  try { cfg = JSON.parse(String((await db.prepare("SELECT v FROM config WHERE k = 'data_budget'").first<{ v: string }>())?.v ?? '{}')); } catch { /* defaults */ }
+  const limit = Number(cfg.limit) > 0 ? Number(cfg.limit) : 25e9;
+  const mode: BudgetMode = (['auto', 'normal', 'saver', 'strict'] as const).includes(cfg.mode as BudgetMode) ? cfg.mode as BudgetMode : 'auto';
+  const lk = new Date(Date.now() + 330 * 60000);
+  const month = lk.toISOString().slice(0, 7);
+  const daysIn = new Date(Date.UTC(lk.getUTCFullYear(), lk.getUTCMonth() + 1, 0)).getUTCDate();
+  const elapsed = Math.max(0.25, lk.getUTCDate() - 1 + (lk.getUTCHours() * 60 + lk.getUTCMinutes()) / 1440);
+  let used = 0, written = 0;
+  try {
+    const r = await db.prepare('SELECT COALESCE(SUM(rows_read), 0) r, COALESCE(SUM(rows_written), 0) w FROM live_day WHERE day >= ? AND day <= ?').bind(month + '-01', month + '-31').first<{ r: number; w: number }>();
+    used = Number(r?.r ?? 0); written = Number(r?.w ?? 0);
+  } catch { /* no table yet */ }
+  if (liveAcc.day.startsWith(month)) { used += liveAcc.read; written += liveAcc.written; }
+  const projected = Math.round((used / elapsed) * daysIn);
+  const pct = projected / limit;
+  const auto: Level = used >= limit || pct > 1.15 ? 'strict' : pct > 0.9 ? 'saver' : 'normal';
+  const level: Level = mode === 'auto' ? auto : mode;
+  const daily = Math.max(0, (limit - used) / Math.max(0.5, daysIn - elapsed));
+  return { month, limit, mode, level, auto, used, written, projected, pct, daysIn, elapsed: Math.round(elapsed * 10) / 10, dailyLeft: Math.round(daily) };
+}
+/** the level for this isolate: worked out again at most every 5 minutes (one small read) */
+async function budgetLevel(db: D1Database | undefined): Promise<Level> {
+  if (!db) return 'normal';
+  if (Date.now() - budgetAcc.at < 5 * 60e3) return budgetAcc.level;
+  budgetAcc.at = Date.now();
+  try { const b = await budgetInfo(db); budgetAcc.level = b.level; budgetAcc.info = b; } catch { /* keep the last */ }
+  return budgetAcc.level;
+}
+/** how long a kept result may live at this level (it is still dropped at once by a change it reads) */
+const keepMs = () => (budgetAcc.level === 'strict' ? 90 : budgetAcc.level === 'saver' ? 45 : 15) * 60e3;
+
 // ---------------------------------------------------------------- router
 
 export default {
@@ -5326,6 +5491,7 @@ export default {
     const meter: Meter = { read: 0, written: 0, queries: 0 };
     const rawDb = env.DB; // the users database, not metered: the day's live data is kept there
     QLOG.on = String((env as unknown as { QLOG?: string }).QLOG ?? '') === '1';
+    if (rawDb && Date.now() - budgetAcc.at >= 5 * 60e3) { try { await budgetLevel(rawDb); } catch { /* normal */ } }
     if (env.DB) env = { ...env, DB: meterDb(env.DB, meter) };
     const cors = corsHeaders(env, req);
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
@@ -5481,10 +5647,32 @@ export default {
         res = json({ activity: r.results });
       } else if (p.startsWith('/api/users')) res = await handleUsers(env, req, p);
       else if (p.startsWith('/api/data/') && req.method === 'DELETE') res = await handleClear(env, req, p.split('/').pop() || '');
+      else if (p === '/api/usage') {
+        // v151 Data Manager: the month's D1 use against the plan, by day and by feature; POST {limit, mode} (admin)
+        const s = await requireUser(env, req);
+        if (!isBoss(s)) throw new HttpError(403, 'Only Admin or Head can see the Data Manager.');
+        const U = rawDb!;
+        if (req.method === 'POST') {
+          if (s.role !== 'admin') throw new HttpError(403, 'Only the Admin can change the data plan.');
+          const b = (await req.json()) as { limit?: number; mode?: string };
+          const limit = Math.min(1e13, Math.max(1e8, Number(b.limit) || 25e9));
+          const mode = ['auto', 'normal', 'saver', 'strict'].includes(String(b.mode)) ? String(b.mode) : 'auto';
+          await U.prepare("INSERT INTO config (k, v) VALUES ('data_budget', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(JSON.stringify({ limit, mode })).run();
+          budgetAcc.at = 0;
+        }
+        await liveFlush(U);
+        const info = await budgetInfo(U);
+        budgetAcc.at = Date.now(); budgetAcc.level = info.level; budgetAcc.info = info;
+        const since = lkDay(Date.now() - 29 * 86400000), since7 = lkDay(Date.now() - 6 * 86400000);
+        let days: Row[] = [], eps: Row[] = [];
+        try { days = (await U.prepare('SELECT day, rows_read r, rows_written w, reqs q FROM live_day WHERE day >= ? ORDER BY day').bind(since).all<Row>()).results; } catch { /* */ }
+        try { eps = (await U.prepare('SELECT ep, SUM(rows_read) r, SUM(rows_written) w, SUM(reqs) q FROM live_ep WHERE day >= ? GROUP BY ep ORDER BY r DESC LIMIT 25').bind(since7).all<Row>()).results; } catch { /* */ }
+        res = json({ ...info, days, eps, since7 });
+      }
       else if (p === '/api/advice' && req.method === 'GET') {
         const s = await requireUser(env, req);
         const url0 = new URL(req.url);
-        const st = await revCached(env, 'adv|' + (env.DIV || 'active'), [], () => adviceStats(env));
+        const st = await revCached(env, 'adv|' + (env.DIV || 'active') + '|' + colomboDay(), [], () => adviceStats(env)); // a new day: worked out again
         const it = url0.searchParams.get('item');
         res = json({ tips: it ? [] : adviceFor(st, s.u), learned: { since: st.since, picks: st.total, users: Object.keys(st.users).length }, ...(it ? { item: adviceItem(st, it) } : {}) });
       }
@@ -5501,13 +5689,13 @@ export default {
         if (req.method === 'DELETE' && tab) await U.prepare('DELETE FROM presence WHERE tab = ?').bind(tab).run();
         if (Math.random() < 0.05) await U.prepare('DELETE FROM presence WHERE at < ?').bind(nowMs - 86400000).run();
         const rows = (await U.prepare('SELECT username, COUNT(*) tabs, MAX(at) at FROM presence WHERE at >= ? GROUP BY username ORDER BY username').bind(nowMs - 150000).all<Row>()).results;
-        res = json({ online: rows.map((r) => String(r.username)), users: rows.map((r) => ({ username: r.username, tabs: Number(r.tabs), at: new Date(Number(r.at)).toISOString() })), n: rows.length, today: rawDb ? await liveToday(rawDb) : null });
+        res = json({ online: rows.map((r) => String(r.username)), users: rows.map((r) => ({ username: r.username, tabs: Number(r.tabs), at: new Date(Number(r.at)).toISOString() })), n: rows.length, today: rawDb ? await liveToday(rawDb) : null, budget: { level: budgetAcc.level, pct: budgetAcc.info ? Number(budgetAcc.info.pct) : null } });
       } else throw new HttpError(404, 'Not found.');
 
       const h = new Headers(res.headers);
       Object.entries(cors).forEach(([k, v]) => h.set(k, v));
       h.set('x-d1-rows-read', String(meter.read)); h.set('x-d1-rows-written', String(meter.written)); h.set('x-d1-queries', String(meter.queries));
-      liveAdd(rawDb, meter, ctx);
+      liveAdd(rawDb, meter, ctx, epOf(req.method, p));
       return new Response(res.body, { status: res.status, headers: h });
     } catch (e) {
       const status = e instanceof HttpError ? e.status : 500;

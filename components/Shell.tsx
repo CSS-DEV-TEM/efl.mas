@@ -2,6 +2,7 @@
 import ThemeToggle from './ThemeToggle';
 import SmartCoach from './SmartCoach';
 import Welcome from './Welcome';
+import { gatherMs, getLevel, getPct, onBudget, setBudget, stretch, type Level } from '@/lib/budget';
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
@@ -132,12 +133,15 @@ export default function Shell({ children, admin, allowGuest }: { children: React
     if (!user || guest) return;
     try { tabId.current = sessionStorage.getItem('mas-tab') || ''; if (!tabId.current) { tabId.current = Math.random().toString(36).slice(2, 12); sessionStorage.setItem('mas-tab', tabId.current); } } catch { tabId.current = Math.random().toString(36).slice(2, 12); }
     let stop = false;
-    const beat = () => { if (stop || document.visibilityState === 'hidden') return; api<{ users: { username: string; tabs: number }[]; today?: Today | null }>('/api/online', { method: 'POST', body: { tab: tabId.current } }).then((r) => { if (!stop) { setPresent(r.users || []); if (r.today) setToday(r.today); } }).catch(() => {}); };
+    const beat = () => { if (stop || document.visibilityState === 'hidden') return; api<{ users: { username: string; tabs: number }[]; today?: Today | null; budget?: { level: string; pct: number | null } }>('/api/online', { method: 'POST', body: { tab: tabId.current } }).then((r) => { if (!stop) { setPresent(r.users || []); if (r.today) setToday(r.today); if (r.budget) setBudget(r.budget.level, r.budget.pct); } }).catch(() => {}); };
     beat();
-    const t = setInterval(beat, 30000);
+    // v151: every 30 s (Saver 90 s, Strict 3 min)
+    let t: ReturnType<typeof setTimeout>;
+    const loop = () => { t = setTimeout(() => { beat(); loop(); }, stretch(30000)); };
+    loop();
     const vis = () => { if (document.visibilityState === 'visible') beat(); };
     document.addEventListener('visibilitychange', vis);
-    return () => { stop = true; clearInterval(t); document.removeEventListener('visibilitychange', vis); };
+    return () => { stop = true; clearTimeout(t); document.removeEventListener('visibilitychange', vis); };
   }, [user, guest]);
   const signOut = async () => {
     try { if (tabId.current) await api('/api/online', { method: 'DELETE', body: { tab: tabId.current } }); } catch { /* signed out anyway */ }
@@ -150,8 +154,25 @@ export default function Shell({ children, admin, allowGuest }: { children: React
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 5000);
   }, []);
 
+  // v151 Data Manager: a hidden tab keeps the change messages and reloads once when it is opened again; in Saver / Strict a
+  // burst of changes is gathered into one reload (20 s / 60 s). Line status messages patch the screen and go at once.
+  const held = useRef<LiveMessage | null>(null);
+  const holdT = useRef<ReturnType<typeof setTimeout>>();
+  const sendHeld = useCallback(() => { const m = held.current; held.current = null; clearTimeout(holdT.current); holdT.current = undefined; if (m) subs.current.forEach((fn) => fn(m)); }, []);
+  useEffect(() => {
+    const vis = () => { if (document.visibilityState === 'visible' && held.current && !gatherMs()) sendHeld(); else if (document.visibilityState === 'visible' && held.current) { clearTimeout(holdT.current); holdT.current = setTimeout(sendHeld, 1500); } };
+    document.addEventListener('visibilitychange', vis);
+    return () => document.removeEventListener('visibilitychange', vis);
+  }, [sendHeld]);
+  const [level, setLevelS] = useState<Level>('normal');
+  const [pct, setPctS] = useState<number | null>(null);
+  useEffect(() => onBudget(() => { setLevelS(getLevel()); setPctS(getPct()); }), []);
   const { state, online } = useLive((m) => {
-    subs.current.forEach((fn) => fn(m));
+    if (m.type === 'data' && (document.visibilityState === 'hidden' || gatherMs() > 0)) {
+      // one reload for all of them: the messages are merged (their weeks / items), the page reloads everything anyway
+      held.current = held.current ? { ...m, weeks: Array.from(new Set([...((held.current.weeks as string[]) || []), ...((m.weeks as string[]) || [])])) } : m;
+      if (document.visibilityState !== 'hidden' && !holdT.current) holdT.current = setTimeout(() => { holdT.current = undefined; sendHeld(); }, gatherMs());
+    } else subs.current.forEach((fn) => fn(m));
     const me = getSession()?.user.username;
     if (m.by && m.by !== me) {
       if (m.type === 'data') toast(`${m.by} uploaded ${SRC_NAME[String(m.src)] || m.src} — dashboard updated`);
@@ -231,6 +252,11 @@ export default function Shell({ children, admin, allowGuest }: { children: React
             {today ? <> · Today <b>{fmtN(today.rows)}</b> rows processed <span className="muted">({fmtN(today.read)} read · {fmtN(today.written)} written · {fmtN(today.reqs)} requests · resets 12:00 AM)</span></>
               : meter && <> · {fmtN(meter.read)} rows read · {fmtN(meter.written)} written · {fmtN(meter.requests)} requests · {fmtBytes(meter.bytes)}</>}
           </span>
+          {pct !== null && (user.role === 'admin' || user.role === 'head') && (
+            <a className={`ts-budget lv-${level}`} href="/settings/#data" title={`Data Manager: this month is heading for ${Math.round(pct * 100)}% of the D1 plan${level !== 'normal' ? ` — ${level === 'saver' ? 'Saver' : 'Strict'} mode: pages reload a little less often (pick checks are not changed)` : ''}`}>
+              <i />Data {Math.round(pct * 100)}%{level !== 'normal' ? ` · ${level === 'saver' ? 'Saver' : 'Strict'}` : ''}
+            </a>
+          )}
           <span className="ts-online" title={(present ?? []).length ? 'Signed in now: ' + (present ?? []).map((u) => `${u.username}${u.tabs > 1 ? ` (${u.tabs} tabs)` : ''}`).join(', ') : online.length ? 'Online: ' + online.join(', ') : ''}>
             👥 {present ? present.length : online.length} user{(present ? present.length : online.length) === 1 ? '' : 's'} signed in{present && present.length ? `: ${present.slice(0, 4).map((u) => u.username).join(', ')}${present.length > 4 ? ` +${present.length - 4}` : ''}` : ''}
           </span>

@@ -1,6 +1,7 @@
 'use client';
 import { useCallback, useEffect, useRef } from 'react';
 import { API_URL, getDiv } from './api';
+import { stretch } from './budget';
 
 /** Asks the Worker "has anything changed?" — one tiny read. null = this Worker has no /api/changes. */
 export async function fetchChanges(): Promise<{ rev: string | null; realtime: boolean } | null> {
@@ -22,7 +23,7 @@ export function useRefreshOnActivity(load: () => unknown, shownRev: string | nul
   const busy = useRef(false);
 
   const check = useCallback(async () => {
-    if (busy.current || Date.now() - last.current < 15000 || document.visibilityState !== 'visible') return;
+    if (busy.current || Date.now() - last.current < stretch(15000) || document.visibilityState !== 'visible') return;
     last.current = Date.now();
     busy.current = true;
     try {
@@ -40,7 +41,7 @@ export function useRefreshOnActivity(load: () => unknown, shownRev: string | nul
     window.addEventListener('focus', on);
     document.addEventListener('visibilitychange', on);
     // also every so often while the page is open and visible (one small /api/changes call; a reload only when something changed)
-    const timer = everyMs > 0 ? setInterval(on, everyMs) : undefined;
+    const timer = everyMs > 0 ? setInterval(on, everyMs) : undefined; // (check() itself waits longer in Saver / Strict)
     return () => {
       if (timer) clearInterval(timer);
       window.removeEventListener('pointerdown', on);

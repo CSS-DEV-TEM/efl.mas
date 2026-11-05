@@ -1,6 +1,8 @@
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api';
+import { getLevel } from '@/lib/budget';
+import { SAP_KB } from '@/lib/sapkb';
 
 /**
  * v148: Smart Coach — tips the system learned from its own history (last 30 days of picks, rejects and uploads).
@@ -26,11 +28,13 @@ export default function SmartCoach() {
   const [open, setOpen] = useState(false);
   const [bubble, setBubble] = useState(false);
   const [ix, setIx] = useState(0);
+  const [tab, setTab] = useState<'tips' | 'sap'>('tips');
+  const [kq, setKq] = useState('');
   const panel = useRef<HTMLDivElement>(null);
   const load = useCallback(() => api<Advice>('/api/advice').then(setAdv).catch(() => {}), []);
   useEffect(() => {
     const t0 = setTimeout(() => { void load(); }, 2500);
-    const t1 = setInterval(() => { if (document.visibilityState === 'visible') void load(); }, 20 * 60e3);
+    let n = 0; const t1 = setInterval(() => { n++; if (document.visibilityState === 'visible' && n % (getLevel() === 'normal' ? 1 : 3) === 0) void load(); }, 20 * 60e3);
     return () => { clearTimeout(t0); clearInterval(t1); };
   }, [load]);
   // the first tip once per session, as a bubble beside the orb
@@ -77,7 +81,23 @@ export default function SmartCoach() {
             </div>
             <button type="button" className="btn sm" onClick={() => void load()} title="Look again">↻</button>
           </div>
-          <div className="coach-list">
+          <div className="coach-tabs" role="tablist">
+            <button type="button" role="tab" aria-selected={tab === 'tips'} className={tab === 'tips' ? 'on' : ''} onClick={() => setTab('tips')}>💡 Tips</button>
+            <button type="button" role="tab" aria-selected={tab === 'sap'} className={tab === 'sap' ? 'on' : ''} onClick={() => setTab('sap')}>📘 SAP guide</button>
+          </div>
+          {tab === 'sap' && (
+            <div className="coach-list">
+              <input className="as-search" placeholder="Search: QI, batch, ZROLLMGT, MIGO…" value={kq} onChange={(e) => setKq(e.target.value)} aria-label="Search the SAP guide" />
+              {SAP_KB.filter((k) => !kq.trim() || `${k.name} ${k.tags} ${k.en}`.toLowerCase().includes(kq.trim().toLowerCase())).map((k, i) => (
+                <div key={k.id} className={`coach-tip tone-${k.kind === 'report' ? 'accent' : k.kind === 'tcode' ? 'info' : 'ok'}`} style={{ animationDelay: `${i * 40}ms` }}>
+                  <span className="ct-icon" aria-hidden>{k.kind === 'report' ? '📊' : k.kind === 'tcode' ? '⌨️' : '📖'}</span>
+                  <div><b>{k.name} <span className="muted small">{k.kind === 'tcode' ? 'SAP transaction' : k.kind === 'report' ? 'Report' : 'Term'}</span></b><p>{k.en}</p><p className="si" lang="si">{k.si}</p>{k.fields && <p className="muted small">Fields: {k.fields}</p>}</div>
+                </div>
+              ))}
+              <p className="muted small">Postings (MIGO, usage decisions) are done by the authorised SAP / QA users. Z reports are this company&apos;s own. <span className="si" lang="si">MIGO, usage decision වගේ postings කරන්නේ අවසර තියෙන SAP / QA users විතරයි.</span></p>
+            </div>
+          )}
+          {tab === 'tips' && <div className="coach-list">
             {!adv && [0, 1, 2].map((i) => <div key={i} className="coach-tip skel-tip" />)}
             {tips.map((t, i) => (
               <div key={t.id} className={`coach-tip tone-${t.tone}`} style={{ animationDelay: `${i * 70}ms` }}>
@@ -85,8 +105,8 @@ export default function SmartCoach() {
                 <div><b>{t.title}</b><p>{t.text}</p>{t.si && <p className="si" lang="si">{t.si}</p>}</div>
               </div>
             ))}
-          </div>
-          {tips.length > 1 && <div className="coach-foot"><span className="muted">Counts only — the pick rules are not changed.</span><button type="button" className="btn sm" onClick={() => { setIx((x) => x + 1); setBubble(true); setOpen(false); }}>Show next tip</button></div>}
+          </div>}
+          {tab === 'tips' && tips.length > 1 && <div className="coach-foot"><span className="muted">Counts only — the pick rules are not changed.</span><button type="button" className="btn sm" onClick={() => { setIx((x) => x + 1); setBubble(true); setOpen(false); }}>Show next tip</button></div>}
         </div>
       )}
     </>

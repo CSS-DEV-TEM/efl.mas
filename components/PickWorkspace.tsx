@@ -1,6 +1,8 @@
 'use client';
 import LineCoach from './LineCoach';
+import ReconModal from './ReconModal';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Loader, Skeleton } from '@/components/Loader';
 import { ApiError, api, getSession, isBossRole } from '@/lib/api';
 import CompleteLine from '@/components/CompleteLine';
@@ -46,6 +48,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
   const [picking, setPicking] = useState<LineP | null>(null);
   const [histKey, setHistKey] = useState(0);
   const [importOpen, setImportOpen] = useState(false);
+  const [reconOpen, setReconOpen] = useState(false);
   const inputs = useRef<Record<string, HTMLInputElement | null>>({});
 
   // the reports of the Pick on screen (a day plan round); the whole day / a week: the shared reports
@@ -461,6 +464,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
             )}
             {canEdit && <button className="btn primary run-all" disabled={!!run && !run.finished} onClick={() => void runAll()} title={autoKind === 'offsite' && autoRules.allowOffsite ? 'Offsite: pick every All-match roll, the last roll cut to the exact QTY' : 'Normal: pick every All-match roll, then tally the cut roll balances'}>⚡ Pick all matched{autoRules.allowOffsite ? ` · ${autoKind === 'offsite' ? 'Offsite' : 'Normal'}` : ''}</button>}
             <button className="btn" disabled={repBusy} aria-busy={repBusy || undefined} onClick={() => void downloadReport()} title="Excel: the lines on screen with their State, and every roll of each line — can it be picked, and why not">{repBusy ? 'Preparing…' : '📄 Plan → Pick report'}</button>
+            {rid && <button className="btn" onClick={() => setReconOpen(true)} title="Korber ↔ SAP tally: every Material of this Pick — SAP UR, ZROLLMGT rolls and Korber rolls, and what differs">🔄 Korber ↔ SAP tally</button>}
             {canEdit && <button className="btn" onClick={() => setImportOpen(true)} title="A Packing List file (this system's format) into this Pick: its rolls are saved as picks of the Pick's SO lines">⬆ Import Packing List</button>}
             {importOpen && <ImportPLDialog week={week} label={label || week} toast={toast} onClose={(changed) => { setImportOpen(false); if (changed) { reload(); setHistKey((k) => k + 1); } }} />}
           </div>
@@ -617,6 +621,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
       <RejectedRolls key={`rj${histKey}`} canEdit={canEdit} toast={toast} onChanged={() => { reload(); setHistKey((k) => k + 1); }} />
 
 
+      {reconOpen && rid && <ReconModal rid={rid} label={label || rid} onClose={() => setReconOpen(false)} />}
       {picking && <PickModal week={picking.week || week} line={picking} onClose={() => setPicking(null)}
         onDone={(m) => { setPicking(null); toast(m); reload(); setHistKey((k) => k + 1); }} />}
     </>
@@ -945,6 +950,13 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
   useEffect(() => { const k = (e: KeyboardEvent) => { if (e.key === 'Escape' && !(e.target instanceof HTMLElement && e.target.closest('input, select, textarea'))) onClose(); }; window.addEventListener('keydown', k); return () => window.removeEventListener('keydown', k); }, [onClose]);
 
   const remaining = c ? Math.max(0, r3(c.need - c.picked)) : 0;
+  // v152: the best pick the system finds (the same as Auto select) — for the Smart Coach
+  const best = useMemo(() => {
+    if (!c) return null;
+    const a = autoPlan(autoRolls(c));
+    const rs = Object.values(a.sel);
+    return { qty: r3(rs.reduce((t, x) => t + (Number(x.qty) || 0), 0)), rolls: rs.length, left: Math.max(0, r3(c.need - c.picked)) };
+  }, [c]);
   const total = r3(Object.values(sel).reduce((t, x) => t + (Number(x.qty) || 0), 0));
   const nSel = Object.keys(sel).length;
   const diff = r3(total - remaining);
@@ -1141,7 +1153,7 @@ export function PickModal({ week, line, onClose, onDone }: { week: string; line:
               {c.steps.length > 0 && <button type="button" className="linkish" onClick={() => setShowNotes((v) => !v)}>{showNotes ? 'Hide' : 'Show'} {c.steps.length} note{c.steps.length === 1 ? '' : 's'}</button>}
             </div>
             {showNotes && <div className="notice warn" style={{ fontSize: 12.5 }}>{c.steps.map((s, i) => <div key={i}>{s}</div>)}</div>}
-            <LineCoach c={c} />
+            <LineCoach c={c} best={best} />
             {c.gate?.on && !c.gate.loaded && <div className="notice bad">No ZROLLMGT uploaded for this Pick — upload it on the Data tab (or the Pick card). Only rolls at StorageBin {c.gate.bin} can be picked.</div>}
 
             <div className="pk-sec">
@@ -1433,8 +1445,15 @@ function KorberChooser({ item, rid, batches, lineKey, roll, title, taken, mine =
   }, [item, q, rid, first, batches?.join(','), lineKey]); // eslint-disable-line react-hooks/exhaustive-deps
   // the rolls to suggest for what is still open (best SAP fit first, then FIFO)
   const bestC = useMemo(() => smartBest((rows || []).filter((k) => !mine.includes(k.pallet) && !taken.includes(k.pallet)).map((k) => ({ ...k, shade: k.sap?.shade ?? null })), Math.min(open, rollOpen)), [rows, mine, taken, open, rollOpen]);
-  return (
-    <div className="kchooser">
+  useEffect(() => {
+    const k = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); onClose(); } };
+    window.addEventListener('keydown', k, true);
+    return () => window.removeEventListener('keydown', k, true);
+  }, [onClose]);
+  // v153: opens over the pick window (its own glass panel) instead of below the matched rolls; Esc / outside click closes it
+  return createPortal(
+    <div className="kc-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+    <div className="kchooser kc-float" role="dialog" aria-label={title || 'Choose a Korber roll'}>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
         <b>{title || `Korber rolls for ${roll.roll_no || 'roll'}`}</b><span className="muted small">item {item}{roll.free ? ' · scan or type any pallet' : ` · vendor batch ${roll.vendor_batch} · roll qty ${fmtQty(roll.roll_qty)}`}</span>
         <span className={`pill ${full ? 'ok' : 'accent'}`}>{mine.length} chosen · {fmtQty(chosenQty)}{Number(roll.roll_qty) > 0 ? ` of ${fmtQty(roll.roll_qty)}` : ''}{full ? ' · covered' : Number.isFinite(Math.min(open, rollOpen)) ? ` · ${fmtQty(Math.min(open, rollOpen))} open` : ''}</span>
@@ -1442,7 +1461,7 @@ function KorberChooser({ item, rid, batches, lineKey, roll, title, taken, mine =
         <button className="btn sm primary" onClick={onClose}>{mine.length ? 'Done' : 'Close'}</button>
       </div>
       {wide && rows && <div className="notice warn small" style={{ marginTop: 6 }}>No pickable Korber roll on vendor batch {first} — showing every roll of item {item} ({rows.filter((k) => !k.blocked && k.available > 1e-9).length} pickable). Check the lot / shade before you use one.</div>}
-      <div className="table-wrap" style={{ maxHeight: 300, marginTop: 6 }}>
+      <div className="table-wrap" style={{ maxHeight: 'min(62vh, 620px)', marginTop: 6 }}>
         {rows === null ? <Loader label="Searching Korber…" /> : !rows.length ? <p className="muted">No Korber roll found{q ? ` for “${q}”` : ''}.</p> : (
           <table className="mini">
             <thead><tr><th>Pallet</th><th>Item</th><th>Location</th><th title="Korber Fifo Date — oldest first">FIFO</th><th>Lot</th><th>Supplier HU</th><th>Invoice</th><th>Pick Id</th><th className="n">Actual qty</th><th className="n">Available</th><th /></tr></thead>
@@ -1463,6 +1482,8 @@ function KorberChooser({ item, rid, batches, lineKey, roll, title, taken, mine =
         )}
       </div>
     </div>
+    </div>,
+    document.body,
   );
 }
 

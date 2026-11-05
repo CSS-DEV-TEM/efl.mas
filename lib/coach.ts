@@ -1,13 +1,19 @@
 import type { Candidates } from './pick';
+import { SAP_FIX, type SapStep } from './sapkb';
 
 /** v149: a coach tip — English first, then the same in Sinhala (what the problem is, and what to do). */
-export type CoachTip = { id: string; icon: string; tone: 'ok' | 'warn' | 'bad' | 'info' | 'accent'; title: string; text: string; si?: string };
+export type CoachTip = { id: string; icon: string; tone: 'ok' | 'warn' | 'bad' | 'info' | 'accent'; title: string; text: string; si?: string; sap?: SapStep[] };
 export type ItemHistory = { lines: number; short: number; rejects: number; reason: string | null };
 
 const q = (n: number) => (Math.round(n * 100) / 100).toLocaleString(undefined, { maximumFractionDigits: 2 });
 
 /** What the pick window shows for one plan line: read from the line's matching result (no extra database reads) and its Material's history. */
-export function lineCoach(c: Candidates & { trim?: boolean }, hist?: ItemHistory | null): CoachTip[] {
+export function lineCoach(c: Candidates & { trim?: boolean }, hist?: ItemHistory | null, best?: { qty: number; rolls: number; left: number } | null): CoachTip[] {
+  return withSap(lineCoach0(c, hist, best));
+}
+const SAP_OF: Record<string, string> = { noUr: 'noUr', urUsed: 'ur', ur: 'ur', nolot: 'nolot', zroll: 'bin', lotfull: 'lotfull', blocked: 'bin', confirm: 'confirm', none: 'none' };
+function withSap(t: CoachTip[]): CoachTip[] { return t.map((x) => (SAP_OF[x.id] && SAP_FIX[SAP_OF[x.id]] ? { ...x, sap: SAP_FIX[SAP_OF[x.id]] } : x)); }
+function lineCoach0(c: Candidates & { trim?: boolean }, hist?: ItemHistory | null, best?: { qty: number; rolls: number; left: number } | null): CoachTip[] {
   const t: CoachTip[] = [];
   const left = Math.max(0, c.need - c.picked);
   const avail = c.rolls.filter((r) => r.available > 1e-9);
@@ -71,6 +77,13 @@ export function lineCoach(c: Candidates & { trim?: boolean }, hist?: ItemHistory
   if (hist && hist.rejects >= 2 && hist.reason) t.push({ id: 'hrej', icon: '🔍', tone: 'info', title: 'Rolls of this Material get rejected',
     text: `${hist.rejects} rejected (last 30 days), mostly for “${hist.reason}”. Check that on each roll before you save.`,
     si: `මේ Material එකේ rolls ${hist.rejects}ක් reject උනා (දවස් 30), වැඩියෙන්ම “${hist.reason}” නිසා. Save කරන්න කලින් හැම roll එකකම ඒක check කරන්න.` });
+  if (best && best.rolls > 0) {
+    const diff = best.qty - best.left;
+    const exact = Math.abs(diff) <= 0.0005;
+    t.push({ id: 'best', icon: '🎯', tone: 'accent', title: exact ? `Best pick: ${best.rolls} roll${best.rolls === 1 ? '' : 's'} = ${q(best.qty)} (exact)` : `Best pick: ${best.rolls} roll${best.rolls === 1 ? '' : 's'} = ${q(best.qty)}`,
+      text: `Matched with SAP (ZMMBE batch, ZINSR lot, ZROLLMGT) and Korber, oldest FIFO first${exact ? '' : diff < 0 ? ` — ${q(-diff)} still to pick by hand` : ` — the last roll is cut`}. Press “Auto select” to tick them.`,
+      si: `SAP (ZMMBE batch, ZINSR lot, ZROLLMGT) සහ Korber එක්ක match කරපු හොඳම rolls ${best.rolls} = ${q(best.qty)}${exact ? ' (හරියටම)' : diff < 0 ? ` — ඉතුරු ${q(-diff)} අතින් pick කරන්න` : ' — අන්තිම roll එක cut වෙනවා'}. “Auto select” එබුවාම ඒවා tick වෙනවා.` });
+  }
   const auto = avail.filter((r) => !r.needsConfirm && !r.pool).reduce((n, r) => n + r.available, 0);
   if (!t.some((x) => x.tone === 'bad' || x.tone === 'warn') && auto + 1e-9 >= left) t.push({ id: 'good', icon: '✨', tone: 'ok', title: 'All matched',
     text: `The matched rolls cover the ${q(left)} to pick. Tick them (or use ⚡ Pick all matched) and save.`,

@@ -5,7 +5,7 @@ import { lineCoach, type ItemHistory } from '@/lib/coach';
 import type { Candidates } from '@/lib/pick';
 
 /** v149: Smart Coach in the pick window — the problems of this line and what to do, in English and Sinhala. */
-export default function LineCoach({ c }: { c: Candidates }) {
+export default function LineCoach({ c, best }: { c: Candidates; best?: { qty: number; rolls: number; left: number } | null }) {
   const [hist, setHist] = useState<ItemHistory | null>(null);
   const [open, setOpen] = useState(() => { try { return localStorage.getItem('mas-linecoach') !== '0'; } catch { return true; } });
   const [si, setSi] = useState(() => { try { return localStorage.getItem('mas-coach-si') !== '0'; } catch { return true; } });
@@ -14,7 +14,7 @@ export default function LineCoach({ c }: { c: Candidates }) {
     api<{ item?: ItemHistory }>('/api/advice?item=' + encodeURIComponent(c.line.item)).then((r) => { if (!stop) setHist(r.item ?? null); }).catch(() => {});
     return () => { stop = true; };
   }, [c.line.item]);
-  const tips = useMemo(() => lineCoach(c, hist), [c, hist]);
+  const tips = useMemo(() => lineCoach(c, hist, best), [c, hist, best]);
   if (!tips.length) return null;
   const worst = tips.some((t) => t.tone === 'bad') ? 'bad' : tips.some((t) => t.tone === 'warn') ? 'warn' : 'ok';
   const toggle = () => { setOpen((o) => { try { localStorage.setItem('mas-linecoach', o ? '0' : '1'); } catch { /* */ } return !o; }); };
@@ -35,7 +35,14 @@ export default function LineCoach({ c }: { c: Candidates }) {
           {tips.map((t, i) => (
             <div key={t.id} className={`coach-tip tone-${t.tone}`} style={{ animationDelay: `${i * 60}ms` }}>
               <span className="ct-icon" aria-hidden>{t.icon}</span>
-              <div><b>{t.title}</b><p>{t.text}</p>{si && t.si && <p className="si" lang="si">{t.si}</p>}</div>
+              <div><b>{t.title}</b><p>{t.text}</p>{si && t.si && <p className="si" lang="si">{t.si}</p>}
+                {t.sap && t.sap.length > 0 && (
+                  <details className="sap-steps">
+                    <summary>📘 How to fix it in SAP{si ? ' · SAP එකේ හදන්නේ කොහොමද' : ''}</summary>
+                    <ol>{t.sap.map((x, k) => <li key={k}>{x.en}{si && <span className="si" lang="si">{x.si}</span>}</li>)}</ol>
+                  </details>
+                )}
+              </div>
             </div>
           ))}
         </div>
