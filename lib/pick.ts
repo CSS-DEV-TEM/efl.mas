@@ -639,7 +639,8 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
       ok ? '✓' : Math.abs(picked - sapQ) > 0.0005 ? `✗ ${tq(picked - sapQ)}` : `✗ ${clash.length} roll${clash.length === 1 ? '' : 's'}: Korber client ≠ SAP location`]);
   }
   const tn = tally.length;
-  tally.push(['Total', null, null, null, ...[4, 5, 6, 7, 8].map((i) => tq(tally.slice(1).reduce((t, row) => t + Number(row[i] || 0), 0))), null, null, tally.slice(1).every((row) => row[11] === '✓') ? '✓' : '✗']);
+  // v168: the total rolls — a roll picked for several SO lines counts once (as on the Summary and the Packing List)
+  tally.push(['Total', null, null, null, ...[4, 5, 6, 7, 8].map((i) => (i === 5 ? new Set(entries.map((e) => e.p.pallet)).size : tq(tally.slice(1).reduce((t, row) => t + Number(row[i] || 0), 0)))), null, null, tally.slice(1).every((row) => row[11] === '✓') ? '✓' : '✗']);
   const tws = U.aoa_to_sheet(tally);
   for (let i = 0; i < 12; i++) { const ref = U.encode_cell({ r: 0, c: i }); (tws[ref] as { s?: unknown }).s = ST.head; const t = U.encode_cell({ r: tn, c: i }); if (tws[t]) (tws[t] as { s?: unknown }).s = ST.top; }
   for (let r = 1; r < tn; r++) { const ref = U.encode_cell({ r, c: 11 }); if (tws[ref] && tally[r][11] !== '✓') (tws[ref] as { s?: unknown }).s = ST.cut; }

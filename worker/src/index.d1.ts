@@ -678,7 +678,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 111; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 112; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1540,7 +1540,7 @@ async function handlePlanReport(env: Env, req: Request) {
       tn.set(`${x.to_so}|${x.to_li}|${x.material}`, x);
     // picks after the latest ZMMBE upload are not in its ALRADY SEND yet (the same rule as the pick's "to pick")
     const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(sr).first<{ at: string | null }>())?.at ?? '';
-    const pk = new Map((await env.DB.prepare('SELECT line, ROUND(SUM(qty), 3) q, ROUND(SUM(CASE WHEN at > ?2 THEN qty ELSE 0 END), 3) qa, COUNT(*) n FROM picks WHERE week = ?1 AND cancelled_at IS NULL GROUP BY line').bind(rid, zAt).all<Row>()).results.map((x) => [String(x.line), x]));
+    const pk = new Map((await env.DB.prepare('SELECT line, ROUND(SUM(qty), 3) q, ROUND(SUM(CASE WHEN at > ?2 THEN qty ELSE 0 END), 3) qa, COUNT(DISTINCT pallet) n FROM picks WHERE week = ?1 AND cancelled_at IS NULL GROUP BY line').bind(rid, zAt).all<Row>()).results.map((x) => [String(x.line), x]));
     const tu = await tnUrOf(env, senv, sr, JSON.parse(keys) as string[]);
     scs.set(sr, { tu, st, tn, pk, hasSent: !!(await senv.DB.prepare('SELECT /*exact*/ 1 FROM stock_sent LIMIT 1').first()), zm: !!(await senv.DB.prepare("SELECT /*exact*/ 1 FROM stock WHERE src = 'zmmbe' LIMIT 1").first()) });
   }
