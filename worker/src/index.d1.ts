@@ -740,9 +740,25 @@ function jsonInsert(env: Env, table: string, cols: string[], rows: Row[], chunk 
   const select = cols.map((c) => `json_extract(value, '$.${c}')`).join(', ');
   for (let i = 0; i < rows.length; i += chunk) {
     const part = rows.slice(i, i + chunk).map((r) => Object.fromEntries(cols.map((c) => [c, r[c] ?? null])));
-    stmts.push(env.DB.prepare(`INSERT INTO ${table} (${cols.join(', ')}) SELECT ${select} FROM json_each(?)`).bind(JSON.stringify(part)));
+    const json = JSON.stringify(part);
+    const st = env.DB.prepare(`INSERT INTO ${table} (${cols.join(', ')}) SELECT ${select} FROM json_each(?)`).bind(json);
+    stmtSize.set(st, json.length);
+    stmts.push(st);
   }
   return stmts;
+}
+/** Size (characters) of the big bound value of a statement made by jsonInsert — used to keep a batch under D1's 32 MiB limit. */
+const stmtSize = new WeakMap<object, number>();
+/** env.DB.batch(), split in several batches only when the statements are too big for one (D1 allows 32 MiB per call). */
+async function batchBig(env: Env, stmts: D1PreparedStatement[]) {
+  const LIMIT = 12_000_000;
+  let part: D1PreparedStatement[] = [], size = 0;
+  for (const st of stmts) {
+    const sz = stmtSize.get(st) ?? 0;
+    if (part.length && size + sz > LIMIT) { await env.DB.batch(part); part = []; size = 0; }
+    part.push(st); size += sz;
+  }
+  if (part.length) await env.DB.batch(part);
 }
 
 /**
@@ -752,7 +768,14 @@ function jsonInsert(env: Env, table: string, cols: string[], rows: Row[], chunk 
  */
 async function diffReplace(env: Env, table: string, cols: string[], rows: Row[], where: string, binds: unknown[], chunk = 400) {
   const sig = (r: Row) => cols.map((c) => { const v = r[c]; return v === null || v === undefined ? '' : String(v); }).join('\u0001');
-  const have = (await env.DB.prepare(`SELECT rowid AS _rid, ${cols.join(', ')} FROM ${table} WHERE ${where}`).bind(...binds).all<Row>()).results;
+  // read the existing rows page by page (rowid order): one query returning everything can pass D1's 32 MiB limit
+  const have: Row[] = [];
+  for (let last = 0; ;) {
+    const page = (await env.DB.prepare(`SELECT rowid AS _rid, ${cols.join(', ')} FROM ${table} WHERE (${where}) AND rowid > ? ORDER BY rowid LIMIT 1000`).bind(...binds, last).all<Row>()).results;
+    have.push(...page);
+    if (page.length < 1000) break;
+    last = Number(page[page.length - 1]._rid);
+  }
   const bySig = new Map<string, number[]>();
   for (const h of have) { const k = sig(h); const l = bySig.get(k); if (l) l.push(Number(h._rid)); else bySig.set(k, [Number(h._rid)]); }
   const add: Row[] = [];
@@ -1000,7 +1023,7 @@ async function handleUpload(env: Env, req: Request) {
     .bind(body.src, body.fileName || null, body.sheetName || null, mapped.length, s.u, now(), body.src !== 'plan' && body.mode === 'add' ? 'add' : null, upRid));
   stmts.push(env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)')
     .bind(now(), s.u, 'upload', `${SRC_LABEL[body.src]}${body.mode === 'add' && body.src !== 'plan' ? ' (added to current)' : ''}${weeks.length ? ' ' + weeks.map((w) => periodLabel(w)).join(', ') : ''}${planSummary?.plant && !weeks.some((w) => parseRound(w)) ? ' · ' + planSummary.plant : ''}: ${planSummary ? `${planSummary.added} new, ${planSummary.updated} updated${planSummary.removed ? `, ${planSummary.removed} removed` : ''}` : mapped.length + ' rows'}${body.fileName ? ' from ' + body.fileName : ''}`));
-  await env.DB.batch(stmts); // all or nothing
+  await batchBig(env, stmts); // all or nothing (split only when too big for D1's 32 MiB limit)
 
   await broadcast(env, { type: 'data', src: body.src, by: s.u, rows: mapped.length, weeks });
   return json({ ok: true, src: body.src, accepted: mapped.length, skipped: Math.max(0, body.rows.length - mapped.length - plantOut - setupOut - (Number(planSummary?.inFileDups) || 0) - stockDups), stockDups, ...(notInSetup.length ? { notInSetup, setupOut } : {}), mode: body.src === 'plan' ? undefined : body.mode === 'add' ? 'add' : 'replace', weeks, changes: stockDiff ? { added: stockDiff.added, removed: stockDiff.removed, unchanged: stockDiff.unchanged } : undefined, derived: derived ?? undefined, ...(planSummary || {}) });
@@ -2677,7 +2700,7 @@ async function handlePick(env: Env, req: Request, p: string) {
     stmts.push(env.DB.prepare('INSERT INTO uploads (src, file_name, sheet_name, row_count, uploaded_by, uploaded_at, rid) VALUES (?,?,?,?,?,?,?)').bind(b.src, b.fileName || null, null, rows.length, s.u, now(), rid));
     stmts.push(env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'upload',
       `${PICK_LABEL[b.src]}${rid ? ' · ' + periodLabel(rid) : ''}: ${rows.length} rows${b.total && b.total > rows.length ? ` (of ${b.total} in the file)` : ''}${b.fileName ? ' from ' + b.fileName : ''}`));
-    await env.DB.batch(stmts);
+    await batchBig(env, stmts);
     if (rid === ALL_RID) allKorber.delete(env.DIV || 'active');
     await broadcast(env, { type: 'data', src: b.src, by: s.u, rows: rows.length });
     return json({ ok: true, rows: rows.length, skipped, rid, ...(rid === ALL_RID ? { expires: new Date(Date.now() + KORBER_TTL).toISOString() } : {}) });
