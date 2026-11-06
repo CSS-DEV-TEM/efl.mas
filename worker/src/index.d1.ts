@@ -678,7 +678,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 110; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 111; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1532,6 +1532,7 @@ async function handlePlanReport(env: Env, req: Request) {
     const keys = JSON.stringify(Array.from(new Set(lines.filter((l) => ridOf(l) === sr).map((l) => String(l.key)))));
     const st = new Map((await senv.DB.prepare(`SELECT key, ROUND(SUM(${SO_UR}), 3) avail, ROUND(SUM(CASE WHEN src = 'sent' THEN ${SO_UR} ELSE 0 END), 3) sent,
         ROUND(SUM(COALESCE(qi, 0)), 3) qi, ROUND(SUM(COALESCE(block, 0)), 3) block, ROUND(SUM(CASE WHEN src = 'zmmbe' THEN ur ELSE 0 END), 3) wh_ur,
+        ROUND(SUM(CASE WHEN src = 'sent' THEN COALESCE(qi, 0) ELSE 0 END), 3) qi_sent, ROUND(SUM(CASE WHEN src = 'sent' THEN COALESCE(block, 0) ELSE 0 END), 3) block_sent,
         ROUND(SUM(CASE WHEN src = 'zmmbe' THEN COALESCE(assigned, 0) ELSE 0 END), 3) assigned
       FROM (SELECT src, key, total, qi, block, ur, assigned FROM stock WHERE src = 'zmmbe' UNION ALL SELECT src, key, total, qi, block, ur, assigned FROM stock_sent) WHERE key IN (SELECT value FROM json_each(?)) GROUP BY key`).bind(keys).all<Row>()).results.map((x) => [String(x.key), x]));
     const tn = new Map<string, Row>();
@@ -1556,7 +1557,7 @@ async function handlePlanReport(env: Env, req: Request) {
     const pq = p0 ? Number(p0.q) : 0;
     const left = Math.max(0, r3(qty - pq));
     return { left, unic: `${l.so}${l.li}${l.item}A`, so: l.so, li: l.li, item: l.item, date: l.plan_date, pick_date: l.date, qty, avail: r3(avail), sent: r3(sent), pending, possible,
-      qi: r3(Number(x?.qi ?? 0)), block: r3(Number(x?.block ?? 0)), tn: t?.tn ?? (u0?.tns.length ? u0.tns.join(',') : null), tn_qty: t ? Number(t.tn_qty) : null, tn_status: t?.tn_status ?? null, tn_ur: u0 ? u0.tnUr : 0,
+      qi: r3(Number(x?.qi ?? 0)), block: r3(Number(x?.block ?? 0)), qi_sent: r3(Number(x?.qi_sent ?? 0)), block_sent: r3(Number(x?.block_sent ?? 0)), tn: t?.tn ?? (u0?.tns.length ? u0.tns.join(',') : null), tn_qty: t ? Number(t.tn_qty) : null, tn_status: t?.tn_status ?? null, tn_ur: u0 ? u0.tnUr : 0,
       wh: r3(avail - sent), wh_ur: r3(Number(x?.wh_ur ?? 0)), assigned: r3(Number(x?.assigned ?? 0)), picked: p0 ? Number(p0.q) : 0, rolls: p0 ? Number(p0.n) : 0, key: l.key, plant: l.plant, remarks: l.remarks };
   });
   const sum = (f: (r: typeof rows[number]) => number) => r3(rows.reduce((t0, r) => t0 + f(r), 0));
@@ -1849,7 +1850,7 @@ async function handlePullPlan(env: Env, req: Request) {
     if (!pickBy.has(k)) {
       let rs: PickAgg[] = [];
       try {
-        rs = (await env.DB.prepare(`SELECT p.week, p.line, SUM(p.qty) qty, SUM(CASE WHEN ?1 IS NULL OR p.at > ?1 THEN p.qty ELSE 0 END) qty_after, COUNT(*) rolls,
+        rs = (await env.DB.prepare(`SELECT p.week, p.line, SUM(p.qty) qty, SUM(CASE WHEN ?1 IS NULL OR p.at > ?1 THEN p.qty ELSE 0 END) qty_after, COUNT(DISTINCT p.pallet) rolls,
           MAX(COALESCE(r.closed, 0)) closed, MAX(p.at) last_at, COUNT(DISTINCT p.req_id) reqs, SUM(CASE WHEN COALESCE(r.auto, 0) = 1 THEN p.qty ELSE 0 END) auto_qty FROM picks p LEFT JOIN pick_req r ON r.id = p.req_id WHERE p.cancelled_at IS NULL GROUP BY p.week, p.line`).bind(z ?? null).all<PickAgg>()).results;
       } catch { /* pick tables not created yet */ }
       pickBy.set(k, rs);

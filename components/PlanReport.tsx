@@ -7,7 +7,8 @@ import { fmt, fmtDate, fmtQty } from '@/lib/calc';
 
 export interface PlanReportRow {
   unic: string; so: string; li: string; item: string; date: string | null; pick_date: string | null; qty: number; avail: number; sent: number; pending: number; possible: number | null;
-  qi: number; block: number; tn: string | null; tn_qty: number | null; tn_status: string | null; /** v164: UR of the TRANSFER NOTE batch (picked first), at most the TN QTY */ tn_ur?: number; wh: number; wh_ur: number; /** ZMMBE Assigned Qty (not free to send) */ assigned?: number; picked: number; /** QTY − ALRADY SEND − picks after the ZMMBE upload */ left?: number; rolls: number; key: string; plant: string | null; remarks: string | null;
+  qi: number; block: number; /** v168: the QI / Block at the plant storage locations (40 / 70 / 75) — in qi / block too */ qi_sent?: number; block_sent?: number;
+  tn: string | null; tn_qty: number | null; tn_status: string | null; /** v164: UR of the TRANSFER NOTE batch (picked first), at most the TN QTY */ tn_ur?: number; wh: number; wh_ur: number; /** ZMMBE Assigned Qty (not free to send) */ assigned?: number; picked: number; /** QTY − ALRADY SEND − picks after the ZMMBE upload */ left?: number; rolls: number; key: string; plant: string | null; remarks: string | null;
 }
 export interface PlanReportRes {
   rid: string; name: string; day: string; plant: string | null; week?: boolean; plants?: string[]; hasZmmbe: boolean; hasSent: boolean; hasTrr: boolean; rows: PlanReportRow[];

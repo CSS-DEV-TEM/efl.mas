@@ -104,7 +104,9 @@ export function totals(rows: Line[]): Totals {
   return t;
 }
 
-export const fmt = (n: number, d = 0) => (Number.isFinite(n) ? n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }) : '–');
+// v168: half-up at the shown decimals — a sum like 10,998.134999… (floating point of 10,998.135) shows 10,998.14 everywhere
+const halfUp = (n: number, d: number) => { const f = 10 ** d; return Math.round(n * f + (n >= 0 ? 1e-6 : -1e-6)) / f; };
+export const fmt = (n: number, d = 0) => (Number.isFinite(n) ? halfUp(n, d).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }) : '–');
 /** QTY always with 2 decimals. */
 export const fmtQty = (n: number) => (Math.abs(n) < 0.0005 ? '–' : fmt(n, Math.abs(n) < 0.005 ? 3 : 2)); // 0.004 is not shown as 0.00
 /** KPI figures: full number with 2 decimals. */
