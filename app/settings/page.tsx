@@ -13,7 +13,9 @@ export default function Page() {
   return <Shell admin><Settings /></Shell>;
 }
 
-export interface SystemSettings { pickBinMode?: 'only' | 'except'; pickBinExcept?: string; fullRollPct: number; defaultPickKind: 'normal' | 'offsite'; allowOffsite: boolean; allowNormalShort: boolean; allowNormalFull: boolean; deriveFromZmmbe: boolean; pfcSlocs: string[]; plantSlocs: string[]; soliPerHour: number; lateGraceMin: number; defaultTarget: string; zmmbePlants?: PlantPair[]; rollGate?: boolean; zrollAvail?: boolean; pickBin?: string; zrollNeedsZinsr?: boolean; blockLocs?: BlockLoc[] }
+export interface SystemSettings { pickBinMode?: 'only' | 'except'; pickBinExcept?: string; fullRollPct: number; defaultPickKind: 'normal' | 'offsite'; allowOffsite: boolean; allowNormalShort: boolean; allowNormalFull: boolean; deriveFromZmmbe: boolean; pfcSlocs: string[]; plantSlocs: string[]; soliPerHour: number; lateGraceMin: number; defaultTarget: string; zmmbePlants?: PlantPair[]; rollGate?: boolean; zrollAvail?: boolean; pickBin?: string; zrollNeedsZinsr?: boolean; blockLocs?: BlockLoc[]; /** v170 */ manualBlock?: ManualBlock }
+/** v170: manual pick blocked for a while — Pick all matched still works */
+export interface ManualBlock { on: boolean; until: string | null; msg: string; boss: boolean; by?: string; at?: string }
 export interface BlockLoc { wh: string; loc: string; note?: string }
 export interface PlantPair { plant: string; soPlant: string; link: string }
 
@@ -118,10 +120,38 @@ function PickRules({ toast }: { toast: (m: string) => void }) {
           <input type="checkbox" checked={s.zrollNeedsZinsr !== false} onChange={(e) => set('zrollNeedsZinsr', e.target.checked)} />
         </label>
       </div>
+      <ManualPickBlock m={s.manualBlock} onChange={(m) => set('manualBlock', m)} />
       <BlockedLocations list={s.blockLocs || []} ver={ver} onChange={(l) => set('blockLocs', l)} />
       {err && <div className="notice bad">{err}</div>}
       <div style={{ marginTop: 12 }}><button className="btn primary" aria-busy={!!busy || undefined} disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save pick rules'}</button></div>
     </section>
+  );
+}
+
+/** v170: block manual pick for a while (the Pick button, the alternative-line pick and the rejected-roll replacement) */
+function ManualPickBlock({ m, onChange }: { m?: ManualBlock; onChange: (m: ManualBlock) => void }) {
+  const cur: ManualBlock = m ?? { on: false, until: null, msg: '', boss: true };
+  const ended = !!cur.on && !!cur.until && Date.parse(cur.until) <= Date.now();
+  const active = cur.on && !ended;
+  // datetime-local wants the viewer's local time
+  const local = (iso: string | null) => { if (!iso) return ''; const d = new Date(iso); if (Number.isNaN(d.getTime())) return ''; const p = (n: number) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`; };
+  const put = (x: Partial<ManualBlock>) => onChange({ ...cur, ...x });
+  return (
+    <div className={`mb-block${active ? ' on' : ''}`}>
+      <div className="mb-head">
+        <span><b>Block manual pick</b><small>Users cannot pick by hand (the Pick button, picking a roll for another SO line, replacing a rejected roll). <b>Pick all matched still works.</b> Saved with “Save pick rules”.</small></span>
+        <input type="checkbox" id="mb-on" aria-label="Block manual pick" checked={cur.on} onChange={(e) => put({ on: e.target.checked })} />
+      </div>
+      {active && <div className="notice bad" role="status">Manual pick is <b>blocked</b>{cur.until ? ` until ${new Date(cur.until).toLocaleString()}` : ' until you turn it off'}{cur.by ? ` · by ${cur.by}` : ''}.</div>}
+      {ended && <div className="notice">The block ended at {new Date(cur.until!).toLocaleString()} — manual pick works again.</div>}
+      {cur.on && (
+        <div className="mb-grid">
+          <label htmlFor="mb-until">Ends by itself at (optional)<input id="mb-until" type="datetime-local" value={local(cur.until)} onChange={(e) => put({ until: e.target.value ? new Date(e.target.value).toISOString() : null })} /></label>
+          <label htmlFor="mb-msg">Message for users<input id="mb-msg" type="text" maxLength={200} value={cur.msg} placeholder="e.g. Stock count in progress" onChange={(e) => put({ msg: e.target.value })} /></label>
+          <label className="mb-check" htmlFor="mb-boss"><input id="mb-boss" type="checkbox" checked={cur.boss} onChange={(e) => put({ boss: e.target.checked })} /> Admin and Head can still pick by hand</label>
+        </div>
+      )}
+    </div>
   );
 }
 

@@ -252,6 +252,7 @@ const BASE_SCHEMA = [
   'CREATE INDEX IF NOT EXISTS zroll_rid_bc ON zroll(rid, barcode)',
   'CREATE INDEX IF NOT EXISTS zroll_rid_batch ON zroll(rid, batch)',
   'CREATE INDEX IF NOT EXISTS zroll_tn ON zroll(tn, rid)',
+  'CREATE INDEX IF NOT EXISTS zinr_lot_rid ON zinr(lot, rid)',
   'CREATE INDEX IF NOT EXISTS picks_tn ON picks(tn)',
   'CREATE INDEX IF NOT EXISTS ztrr_tn ON ztrr(tn, rid)',
   'CREATE INDEX IF NOT EXISTS zcoment_tn ON zcoment(tn, rid)',
@@ -678,7 +679,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 112; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 113; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -740,25 +741,9 @@ function jsonInsert(env: Env, table: string, cols: string[], rows: Row[], chunk 
   const select = cols.map((c) => `json_extract(value, '$.${c}')`).join(', ');
   for (let i = 0; i < rows.length; i += chunk) {
     const part = rows.slice(i, i + chunk).map((r) => Object.fromEntries(cols.map((c) => [c, r[c] ?? null])));
-    const json = JSON.stringify(part);
-    const st = env.DB.prepare(`INSERT INTO ${table} (${cols.join(', ')}) SELECT ${select} FROM json_each(?)`).bind(json);
-    stmtSize.set(st, json.length);
-    stmts.push(st);
+    stmts.push(env.DB.prepare(`INSERT INTO ${table} (${cols.join(', ')}) SELECT ${select} FROM json_each(?)`).bind(JSON.stringify(part)));
   }
   return stmts;
-}
-/** Size (characters) of the big bound value of a statement made by jsonInsert — used to keep a batch under D1's 32 MiB limit. */
-const stmtSize = new WeakMap<object, number>();
-/** env.DB.batch(), split in several batches only when the statements are too big for one (D1 allows 32 MiB per call). */
-async function batchBig(env: Env, stmts: D1PreparedStatement[]) {
-  const LIMIT = 12_000_000;
-  let part: D1PreparedStatement[] = [], size = 0;
-  for (const st of stmts) {
-    const sz = stmtSize.get(st) ?? 0;
-    if (part.length && size + sz > LIMIT) { await env.DB.batch(part); part = []; size = 0; }
-    part.push(st); size += sz;
-  }
-  if (part.length) await env.DB.batch(part);
 }
 
 /**
@@ -768,14 +753,7 @@ async function batchBig(env: Env, stmts: D1PreparedStatement[]) {
  */
 async function diffReplace(env: Env, table: string, cols: string[], rows: Row[], where: string, binds: unknown[], chunk = 400) {
   const sig = (r: Row) => cols.map((c) => { const v = r[c]; return v === null || v === undefined ? '' : String(v); }).join('\u0001');
-  // read the existing rows page by page (rowid order): one query returning everything can pass D1's 32 MiB limit
-  const have: Row[] = [];
-  for (let last = 0; ;) {
-    const page = (await env.DB.prepare(`SELECT rowid AS _rid, ${cols.join(', ')} FROM ${table} WHERE (${where}) AND rowid > ? ORDER BY rowid LIMIT 1000`).bind(...binds, last).all<Row>()).results;
-    have.push(...page);
-    if (page.length < 1000) break;
-    last = Number(page[page.length - 1]._rid);
-  }
+  const have = (await env.DB.prepare(`SELECT rowid AS _rid, ${cols.join(', ')} FROM ${table} WHERE ${where}`).bind(...binds).all<Row>()).results;
   const bySig = new Map<string, number[]>();
   for (const h of have) { const k = sig(h); const l = bySig.get(k); if (l) l.push(Number(h._rid)); else bySig.set(k, [Number(h._rid)]); }
   const add: Row[] = [];
@@ -1023,7 +1001,7 @@ async function handleUpload(env: Env, req: Request) {
     .bind(body.src, body.fileName || null, body.sheetName || null, mapped.length, s.u, now(), body.src !== 'plan' && body.mode === 'add' ? 'add' : null, upRid));
   stmts.push(env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)')
     .bind(now(), s.u, 'upload', `${SRC_LABEL[body.src]}${body.mode === 'add' && body.src !== 'plan' ? ' (added to current)' : ''}${weeks.length ? ' ' + weeks.map((w) => periodLabel(w)).join(', ') : ''}${planSummary?.plant && !weeks.some((w) => parseRound(w)) ? ' · ' + planSummary.plant : ''}: ${planSummary ? `${planSummary.added} new, ${planSummary.updated} updated${planSummary.removed ? `, ${planSummary.removed} removed` : ''}` : mapped.length + ' rows'}${body.fileName ? ' from ' + body.fileName : ''}`));
-  await batchBig(env, stmts); // all or nothing (split only when too big for D1's 32 MiB limit)
+  await env.DB.batch(stmts); // all or nothing
 
   await broadcast(env, { type: 'data', src: body.src, by: s.u, rows: mapped.length, weeks });
   return json({ ok: true, src: body.src, accepted: mapped.length, skipped: Math.max(0, body.rows.length - mapped.length - plantOut - setupOut - (Number(planSummary?.inFileDups) || 0) - stockDups), stockDups, ...(notInSetup.length ? { notInSetup, setupOut } : {}), mode: body.src === 'plan' ? undefined : body.mode === 'add' ? 'add' : 'replace', weeks, changes: stockDiff ? { added: stockDiff.added, removed: stockDiff.removed, unchanged: stockDiff.unchanged } : undefined, derived: derived ?? undefined, ...(planSummary || {}) });
@@ -1124,6 +1102,16 @@ interface Settings {
   zrollNeedsZinsr: boolean;
   /** Korber Wh Id + Location Id no Pick may take a roll from (wh '' = any Wh Id; a location ending in * = every location starting so) */
   blockLocs: { wh: string; loc: string; note?: string }[];
+  /** v170: manual pick blocked for a while (Pick all matched still works); until = ISO time it ends by itself (null = until turned off) */
+  manualBlock?: { on: boolean; until: string | null; msg: string; boss: boolean; by?: string; at?: string };
+}
+/** v170: why a manual pick is not allowed now (null = allowed). boss: Admin / Head may still pick by hand when the block says so */
+function manualBlockWhy(rules: Settings, s: Session): string | null {
+  const m = rules.manualBlock;
+  if (!m || !m.on) return null;
+  if (m.until && Date.now() >= Date.parse(m.until)) return null;
+  if (m.boss && isBoss(s)) return null;
+  return `Manual pick is blocked for now${m.until ? ` (until ${(() => { try { return new Date(m.until).toLocaleString('en-GB', { timeZone: 'Asia/Colombo', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }); } catch { return m.until.slice(0, 16).replace('T', ' ') + ' UTC'; } })()})` : ''}${m.msg ? ` — ${m.msg}` : ''}. Use Pick all matched, or ask the Admin.`;
 }
 const DEFAULT_SETTINGS: Settings = { fullRollPct: 10, defaultPickKind: 'normal', allowOffsite: true, allowNormalShort: true, allowNormalFull: true,
   deriveFromZmmbe: true, pfcSlocs: ['41', 'COMF'], plantSlocs: ['40', '70', '75'], soliPerHour: 12, lateGraceMin: 0, defaultTarget: '', zmmbePlants: [], rollGate: true, zrollAvail: false, pickBin: 'EXPO-FIX', pickBinMode: 'only', pickBinExcept: 'FIXED', zrollNeedsZinsr: true, blockLocs: [] };
@@ -2700,7 +2688,7 @@ async function handlePick(env: Env, req: Request, p: string) {
     stmts.push(env.DB.prepare('INSERT INTO uploads (src, file_name, sheet_name, row_count, uploaded_by, uploaded_at, rid) VALUES (?,?,?,?,?,?,?)').bind(b.src, b.fileName || null, null, rows.length, s.u, now(), rid));
     stmts.push(env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'upload',
       `${PICK_LABEL[b.src]}${rid ? ' · ' + periodLabel(rid) : ''}: ${rows.length} rows${b.total && b.total > rows.length ? ` (of ${b.total} in the file)` : ''}${b.fileName ? ' from ' + b.fileName : ''}`));
-    await batchBig(env, stmts);
+    await env.DB.batch(stmts);
     if (rid === ALL_RID) allKorber.delete(env.DIV || 'active');
     await broadcast(env, { type: 'data', src: b.src, by: s.u, rows: rows.length });
     return json({ ok: true, rows: rows.length, skipped, rid, ...(rid === ALL_RID ? { expires: new Date(Date.now() + KORBER_TTL).toISOString() } : {}) });
@@ -2727,6 +2715,7 @@ async function handlePick(env: Env, req: Request, p: string) {
   //   POST /api/pick/alt { week, key, date, pallet, so, li, item, qty } → picks that roll for that other SO line
   if (part === 'alt') {
     const s = await requireUser(env, req, 'editor');
+    if (req.method === 'POST') { const why = manualBlockWhy(await getSettings(env), s); if (why) throw new HttpError(423, why); }
     const q0 = req.method === 'GET' ? Object.fromEntries(url.searchParams) as Record<string, string> : (await req.json()) as Record<string, string>;
     const week = String(q0.week || ''), key = String(q0.key || ''), date = String(q0.date || '');
     const line = await env.DB.prepare('SELECT so, li, item, qty, plant, date FROM plan WHERE week = ? AND key = ? AND COALESCE(date, \'\') = ?').bind(week, key, date).first<Row>();
@@ -3116,6 +3105,8 @@ async function handlePick(env: Env, req: Request, p: string) {
     const kind = b.kind === 'offsite' ? 'offsite' : 'normal';
     const rules = await getSettings(env);
     if (kind === 'offsite' && !rules.allowOffsite) throw new HttpError(400, 'Offsite picks are turned off in the settings.');
+    // v170: manual pick blocked for now (Settings → Pick rules) — Pick all matched still picks
+    if (!b.auto) { const why = manualBlockWhy(rules, s); if (why) throw new HttpError(423, why); }
     const line = await env.DB.prepare('SELECT so, li, item, qty, plant, date, owner FROM plan WHERE week = ?1 AND key = ?2 AND COALESCE(date, \'\') = ?3 ORDER BY (owner = ?4) DESC LIMIT 1').bind(b.week, b.key, b.date ?? '', s.u).first<Row>();
     if (!line) throw new HttpError(404, 'That plan line is not in this week.');
     if (!isBoss(s) && line.owner && line.owner !== s.u) throw new HttpError(403, `That line is in ${line.owner}'s plan.`);
@@ -3609,6 +3600,7 @@ async function handlePick(env: Env, req: Request, p: string) {
   if (part === 'replace' && req.method === 'POST') {
     const s = await requireUser(env, req, 'editor');
     const b = (await req.json()) as { rejectId?: number; pallet?: string; qty?: number };
+    { const why = manualBlockWhy(await getSettings(env), s); if (why) throw new HttpError(423, why); }
     const rj = await env.DB.prepare('SELECT * FROM pick_reject WHERE id = ?').bind(Number(b.rejectId)).first<Row>();
     if (!rj) throw new HttpError(404, 'That rejected roll is gone. Refresh.');
     if (rj.replaced_by) throw new HttpError(409, `Already replaced by ${rj.replaced_by}.`);
@@ -6129,6 +6121,13 @@ export default {
             pickBinExcept: b.pickBinExcept === undefined ? (cur.pickBinExcept ?? 'FIXED') : String(b.pickBinExcept).toUpperCase().split(/[,;\s]+/).map((x) => x.trim()).filter(Boolean).slice(0, 20).join(', '),
             zrollNeedsZinsr: b.zrollNeedsZinsr === undefined ? cur.zrollNeedsZinsr !== false : !!b.zrollNeedsZinsr,
             blockLocs: b.blockLocs === undefined ? (cur.blockLocs || []) : blockLocList(b.blockLocs),
+            manualBlock: b.manualBlock === undefined ? cur.manualBlock : (() => {
+              const m = b.manualBlock as Partial<NonNullable<Settings['manualBlock']>>;
+              const until = m?.until && !Number.isNaN(Date.parse(String(m.until))) ? new Date(String(m.until)).toISOString() : null;
+              const changed = !!m?.on !== !!cur.manualBlock?.on || until !== (cur.manualBlock?.until ?? null);
+              return { on: !!m?.on, until, msg: String(m?.msg ?? '').trim().slice(0, 200), boss: m?.boss !== false,
+                by: changed ? s.u : (cur.manualBlock?.by ?? s.u), at: changed ? now() : (cur.manualBlock?.at ?? now()) };
+            })(),
           };
           await env.DB.batch([
             env.DB.prepare("INSERT INTO config (k, v) VALUES ('settings', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(JSON.stringify(next)),

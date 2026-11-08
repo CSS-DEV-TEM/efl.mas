@@ -1422,3 +1422,15 @@ p.si-line { margin: 2px 0 0; }
 .maint-form label:first-child { grid-column: 1 / -1; }
 @media (max-width: 640px) { .maint-form { grid-template-columns: 1fr; } }
 .maint-bar { margin: 8px 16px 0; }
+
+/* v170: manual pick block */
+.mb-block { margin-top: 16px; border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; display: grid; gap: 10px; }
+.mb-block.on { border-color: color-mix(in srgb, var(--bad) 55%, transparent); }
+.mb-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.mb-head > span { display: grid; gap: 2px; min-width: 0; }
+.mb-head small { color: var(--ink-2); }
+.mb-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; align-items: end; }
+.mb-grid label { display: grid; gap: 4px; font-size: 13px; }
+.mb-grid .mb-check { grid-column: 1 / -1; display: flex; gap: 8px; align-items: center; }
+@media (max-width: 640px) { .mb-grid { grid-template-columns: minmax(0, 1fr); } }
+.mb-pill { white-space: normal; }

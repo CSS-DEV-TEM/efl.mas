@@ -2,6 +2,7 @@
 import LineCoach from './LineCoach';
 import ReconModal from './ReconModal';
 import DayEndModal from './DayEndModal';
+import { useShell } from './Shell';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Loader, Skeleton } from '@/components/Loader';
@@ -311,16 +312,26 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
   // v138: the Pick all matched mode — Offsite: the last roll cut to the exact QTY; Normal: the same picks, then each cut roll's
   // balance is tallied (to another SO line that can take it, as the Packing List does). Settings → Pick rules give the default.
   const [autoRules, setAutoRules] = useState<{ allowOffsite: boolean; defaultPickKind: 'normal' | 'offsite' }>({ allowOffsite: true, defaultPickKind: 'normal' });
+  // v170: manual pick blocked for now (Settings → Pick rules) — Pick all matched still works
+  const [mBlock, setMBlock] = useState<{ on: boolean; until: string | null; msg: string; boss: boolean } | null>(null);
+  const [, setTick] = useState(0);
+  useEffect(() => { if (!mBlock?.until) return; const t = setInterval(() => setTick((x) => x + 1), 30e3); return () => clearInterval(t); }, [mBlock?.until]);
+  const manualBlocked = !!mBlock && mBlock.on && !(mBlock.until && Date.parse(mBlock.until) <= Date.now()) && !(mBlock.boss && isBossRole(getSession()?.user.role));
+  const { subscribe } = useShell();
   const [autoKind, setAutoKind0] = useState<'normal' | 'offsite'>(() => { try { const v = localStorage.getItem('mas-auto-kind'); return v === 'offsite' ? 'offsite' : 'normal'; } catch { return 'normal'; } });
   const setAutoKind = (k: 'normal' | 'offsite') => { setAutoKind0(k); try { localStorage.setItem('mas-auto-kind', k); } catch { /* private mode */ } };
   useEffect(() => {
-    api<{ settings: { allowOffsite?: boolean; defaultPickKind?: 'normal' | 'offsite' } }>('/api/settings').then((r) => {
+    const loadRules = () => api<{ settings: { allowOffsite?: boolean; defaultPickKind?: 'normal' | 'offsite'; manualBlock?: { on: boolean; until: string | null; msg: string; boss: boolean } } }>('/api/settings').then((r) => {
+      setMBlock(r.settings.manualBlock ?? null);
       const ao = r.settings.allowOffsite !== false;
       setAutoRules({ allowOffsite: ao, defaultPickKind: r.settings.defaultPickKind === 'offsite' ? 'offsite' : 'normal' });
       let saved: string | null = null; try { saved = localStorage.getItem('mas-auto-kind'); } catch { /* */ }
       if (!ao) setAutoKind0('normal'); else if (!saved) setAutoKind0(r.settings.defaultPickKind === 'offsite' ? 'offsite' : 'normal');
     }).catch(() => {});
-  }, []);
+    void loadRules();
+    // the Admin changed the settings: the block shows (or goes) without a reload
+    return subscribe((m) => { if (m.type === 'data' && (m as { src?: string }).src === 'settings') void loadRules(); });
+  }, [subscribe]);
   const runAll = async () => {
     const kindNow: 'normal' | 'offsite' = autoRules.allowOffsite && autoKind === 'offsite' ? 'offsite' : 'normal';
     const targets = rows.filter((l) => !isDone(l) && todo(l) > 1e-9 && !l.hold);
@@ -488,6 +499,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
                 {(['normal', 'offsite'] as const).map((k) => <button key={k} type="button" role="radio" aria-checked={autoKind === k} className={autoKind === k ? 'on' : ''} disabled={!!run && !run.finished} onClick={() => setAutoKind(k)}>{k === 'normal' ? 'Normal' : 'Offsite'}</button>)}
               </div>
             )}
+            {canEdit && manualBlocked && <span className="pill bad mb-pill" role="status" title={mBlock?.msg || undefined}>🔒 Manual pick blocked{mBlock?.until ? ` until ${new Date(mBlock.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''} — use Pick all matched</span>}
             {canEdit && <button className="btn primary run-all" disabled={!!run && !run.finished} onClick={() => void runAll()} title={autoKind === 'offsite' && autoRules.allowOffsite ? 'Offsite: pick every All-match roll, the last roll cut to the exact QTY' : 'Normal: pick every All-match roll, then tally the cut roll balances'}>⚡ Pick all matched{autoRules.allowOffsite ? ` · ${autoKind === 'offsite' ? 'Offsite' : 'Normal'}` : ''}</button>}
             <button className="btn" disabled={repBusy} aria-busy={repBusy || undefined} onClick={() => void downloadReport()} title="Excel: the lines on screen with their State, and every roll of each line — can it be picked, and why not">{repBusy ? 'Preparing…' : '📄 Plan → Pick report'}</button>
             {ended && <button type="button" className="pill accent de-pill" title={`Day ended by ${ended.by_user} at ${new Date(ended.at).toLocaleString()} — the day's Pick reports were cleared; the Day end report has the final state. Click to download it.`} onClick={() => void downloadLatest('dayend', viewDay).catch((e) => toast(e instanceof Error ? e.message : 'Not found'))}>🌙 Day ended · {ended.by_user} · ⬇ report</button>}
@@ -598,7 +610,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
                                 <td className="n">{pk ? fmtQty(pk) : '–'}</td><td className="n">{fmtQty(bal(l))}</td>
                                 <td className="n">{korberOf(l)}</td>
                                 <td>{stateOf(l)}</td>
-                                <td style={{ whiteSpace: 'nowrap' }}>{canEdit && !isDone(l) && !l.hold && <button className="btn sm primary" onClick={() => setPicking(l)}>{pk ? 'Pick more' : 'Pick'}</button>}</td>
+                                <td style={{ whiteSpace: 'nowrap' }}>{canEdit && !isDone(l) && !l.hold && <button className="btn sm primary" disabled={manualBlocked} title={manualBlocked ? 'Manual pick is blocked for now — use Pick all matched' : undefined} onClick={() => setPicking(l)}>{pk ? 'Pick more' : 'Pick'}</button>}</td>
                               </tr>
                             );
                           })}</tbody>
@@ -630,7 +642,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
                       {scope === 'possible' && (() => { const x = possible.get(`${l.key}|${l.date ?? ''}`); return x ? <div className="small run-why"><span className="pill warn">Posibal pending {fmtQty(Number(x.possible))}</span> <span className="muted">sent {fmtQty(x.sent)} · warehouse {fmtQty(x.wh)}{x.tn ? ` · TN ${x.tn}` : ''}</span></div> : null; })()}</td>
                     <td style={{ whiteSpace: 'nowrap' }}>{canEdit && !isDone(l) && (l.hold
                         ? <button className="btn sm" onClick={() => setHold(l, null)} title="Release the hold — the line can be picked again">Release hold</button>
-                        : <><button className="btn sm primary" onClick={() => setPicking(l)}>{pk ? 'Pick more' : 'Pick'}</button> <button className="btn sm" onClick={() => setHolding(l)} title="Put this line on Pick Hold — nobody can pick it until it is released">Hold</button></>)}
+                        : <><button className="btn sm primary" disabled={manualBlocked} title={manualBlocked ? 'Manual pick is blocked for now — use Pick all matched' : undefined} onClick={() => setPicking(l)}>{pk ? 'Pick more' : 'Pick'}</button> <button className="btn sm" onClick={() => setHolding(l)} title="Put this line on Pick Hold — nobody can pick it until it is released">Hold</button></>)}
                       {canEdit && <> <CompleteLine line={l} onDone={(m) => { toast(m); reload(); }} /></>}</td>
                   </tr>
                 );
