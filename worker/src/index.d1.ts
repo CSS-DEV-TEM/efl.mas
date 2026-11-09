@@ -686,7 +686,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 116; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 117; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -5089,7 +5089,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
     const mat = normId(line.item);
     for (const st of stock.filter((x) => Number(x.ur) > 0)) {
       const bt = normId(st.batch);
-      const zr0 = (await env.DB.prepare('SELECT /*exact*/ barcode, bin, batch, status, material, qty, pcore, so, li, tn FROM zroll WHERE batch = ?').bind(bt).all<Row>()).results;
+      const zr0 = (await env.DB.prepare('SELECT /*exact*/ barcode, bin, batch, status, material, qty, pcore, so, li, tn, raw FROM zroll WHERE batch = ?').bind(bt).all<Row>()).results;
       // the same Material (a ZROLLMGT row without Material counts; the Korber item is checked below)
       const zr = zr0.filter((z) => !z.material || normId(z.material) === mat || normId(z.material) === normId(st.material));
       if (!zr.length) { steps.push(`Batch ${st.batch}: ZROLLMGT has no roll with System Batch ${bt}${zr0.length ? ` of material ${mat} (${zr0.length} of another material)` : ''}.`); continue; }
@@ -5116,9 +5116,16 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
       // other SO lines with this batch: in ZINSR, or with UR of it in ZMMBE
       const sharers = (await env.DB.prepare(`SELECT /*exact*/ so, li FROM zinr WHERE material = ?1 AND batch = ?2 AND NOT (so = ?3 AND li = ?4)
         UNION SELECT so, li FROM stock WHERE src = 'zmmbe' AND material = ?1 AND batch = ?2 AND ur > 0 AND NOT (so = ?3 AND li = ?4)`).bind(mat, bt, normId(line.so), normId(line.li)).all<Row>()).results;
-      let added = 0, known = 0, off = 0, noK = 0, other = 0, otherLine = 0, shared = 0, tnOther = 0;
+      let added = 0, known = 0, off = 0, noK = 0, other = 0, otherLine = 0, shared = 0, tnOther = 0, otherVb = 0;
+      // v174: the Vendor Batches of this SO line's ZINSR lots of the batch — a roll of the System Batch with another Vendor Batch is
+      // another SO line's roll (one batch holds several vendor batches / lots, each lot its own SO line)
+      const lineVb = new Map<string, Row>();
+      for (const l of zi) if (l.lot && txt(l.vendor_batch)) lineVb.set(up(l.vendor_batch), l);
+      const zrawOf = (z: Row, ...names: string[]) => { try { for (const [h, v] of Object.entries(JSON.parse(String(z.raw ?? '{}')) as Record<string, unknown>)) if (names.includes(hnorm(h))) return txt(up(v)); } catch { /* */ } return null; };
       for (const z of zr) {
         const pal = up(z.barcode);
+        const zvb = zrawOf(z, 'vendorbatch'), zvr = zrawOf(z, 'vendorroll', 'vendorrollno');
+        if (lineVb.size && zvb && !lineVb.has(zvb)) { otherVb++; continue; }
         // ZROLLMGT with its own Sales Order / Line Item: must be this line's
         if ((z.so && normId(z.so) !== normId(line.so)) || (z.li && normId(z.li) !== normId(line.li))) { otherLine++; continue; }
         // v162: a TRANSFER NOTE roll (ZROLLMGT comment TN#) of a ZMM_TRR transfer to another SO line is that line's roll
@@ -5147,16 +5154,20 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
         const mine = zcl.find((x) => myLots.has(String(x.lot)));
         if (zcl.length && !mine) { otherLine++; continue; }
         const sh = mine ?? zcl[0] ?? null;
-        const l1 = sh?.lot ? { ...lot0, lot: sh.lot } : lot0;
+        const lv = zvb ? lineVb.get(zvb) : undefined;
+        const l1 = sh?.lot ? { ...lot0, lot: sh.lot } : lv ? { ...lot0, lot: lv.lot, vendor_batch: lv.vendor_batch, invoice: lv.invoice ?? lot0.invoice } : lot0;
+        // Korber Lot Number = the roll's Vendor Batch (MAS Kreeda's Korber: = Vendor Roll)
+        const lotOk = zvb && k.lot ? up(k.lot) === zvb || (!!zvr && up(k.lot) === zvr) : null;
         // no ZCOMENT lot to tell which SO line the roll is for, and the batch is in other SO lines too: offered, not selected
         const pool = !mine && sharers.length ? sharers.length + 1 : undefined;
         if (pool) shared++;
         addRoll(await korberBase(k, l1, { shade: (sh?.shade as string) ?? null, zroll: true, via: kp !== pal ? kp : null, ...(pool ? { pool } : {}),
-          checks: { item: true, batch: true, bin: true, lot: null, hu: null, invoice: lot0.invoice && k.invoice ? invRoot(k.invoice) === invRoot(lot0.invoice) : null },
+          checks: { item: true, batch: true, bin: true, lot: lotOk, hu: null, invoice: lot0.invoice && k.invoice ? invRoot(k.invoice) === invRoot(lot0.invoice) : null },
+          ...(lotOk === false ? { warnings: [`Korber Lot Number ${k.lot ?? '–'} ≠ ZROLLMGT Vendor Batch ${zvb}`], needsConfirm: true } : {}),
           qtyNote: `ZMMBE batch ${st.batch}${myLots.size ? ` = ZINSR SO ${line.so} / LI ${line.li} / Material / Batch (ZINSR lot ${Array.from(myLots).join(', ')})` : ' (ZINSR not required — Settings)'} = ZROLLMGT System Batch → Barcode ${pal}${kp !== pal ? ` (Korber pallet ${kp})` : ''} = Korber Pallet${gate.on ? ` · StorageBin ${gate.bin}${gate.hasStatus ? ' · Status UR' : ''}` : ''}` }), l1);
         added++;
       }
-      steps.push(`Batch ${st.batch}: ZROLLMGT has ${zr.length} roll${zr.length === 1 ? '' : 's'} with this System Batch${added ? ` — ${added} matched straight to Korber` : ''}${known ? `, ${known} already matched` : ''}${otherLine ? `, ${otherLine} belong to another SO / Line Item (ZCOMENT lot / ZROLLMGT SO${tnOther ? ` / TRANSFER NOTE of another SO line: ${tnOther}` : ''})` : ''}${off ? `, ${off} not pickable (bin / status)` : ''}${noK ? `, ${noK} not in this Pick's Korber` : ''}${other ? `, ${other} another item in Korber` : ''}.${shared ? ` ${shared} roll${shared === 1 ? ' has' : 's have'} no ZCOMENT lot and batch ${bt} is in ${sharers.length} other SO line${sharers.length === 1 ? '' : 's'} (${sharers.slice(0, 4).map((x) => `${x.so}/${x.li}`).join(', ')}) — tick them yourself.` : ''}`);
+      steps.push(`Batch ${st.batch}: ZROLLMGT has ${zr.length} roll${zr.length === 1 ? '' : 's'} with this System Batch${added ? ` — ${added} matched straight to Korber` : ''}${known ? `, ${known} already matched` : ''}${otherLine ? `, ${otherLine} belong to another SO / Line Item (ZCOMENT lot / ZROLLMGT SO${tnOther ? ` / TRANSFER NOTE of another SO line: ${tnOther}` : ''})` : ''}${off ? `, ${off} not pickable (bin / status)` : ''}${noK ? `, ${noK} not in this Pick's Korber` : ''}${other ? `, ${other} another item in Korber` : ''}${otherVb ? `, ${otherVb} of another Vendor Batch (this SO line's ZINSR lots: ${Array.from(lineVb.keys()).join(', ')}) — another SO line's rolls` : ''}.${shared ? ` ${shared} roll${shared === 1 ? ' has' : 's have'} no ZCOMENT lot and batch ${bt} is in ${sharers.length} other SO line${sharers.length === 1 ? '' : 's'} (${sharers.slice(0, 4).map((x) => `${x.so}/${x.li}`).join(', ')}) — tick them yourself.` : ''}`);
     }
   } else if (gate.on) steps.push('ZMMBE batch → ZROLLMGT System Batch: no ZROLLMGT uploaded for this Pick.');
   // the Invoice + Item category offers only rolls not matched already (a matched roll is ticked in Matched rolls)
