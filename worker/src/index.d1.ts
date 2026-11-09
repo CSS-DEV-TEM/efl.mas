@@ -686,7 +686,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 117; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 118; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -3292,7 +3292,7 @@ async function handlePick(env: Env, req: Request, p: string) {
         const usedT = new Map<string, number>();
         for (const x of [...picks]) {
           if (x.tn) continue; // a TRANSFER NOTE roll stays with its TN's SO line
-          const sysB = gate.loaded ? normId(await gate.batchOf(String(x.pallet))) : '';
+          const sysB = gate.loaded ? normId(await gate.batchOf(String(x.pallet), String(x.batch ?? '').split(','))) : '';
           const own = Array.from(new Set([sysB && lineBs.has(sysB) ? sysB : '', ...String(x.batch ?? '').split(',').map((v) => normId(v))].filter(Boolean)));
           let cap = 0;
           for (const bt of own) { const r0 = roomOf(bt); if (r0 === Infinity) { cap = Infinity; break; } cap = r3(cap + r0); }
@@ -3425,9 +3425,16 @@ async function handlePick(env: Env, req: Request, p: string) {
       const parts = (r?.parts?.length ? r.parts : String(x.batch || '').split(',').filter(Boolean).map((bt) => ({ batch: bt, lot: '', qty: Infinity })))
         .map((pt) => ({ ...pt, left: Number(pt.qty) })).sort((p1, p2) => p1.left - p2.left);
       let q = Number(x.qty);
-      // the roll's own SAP batch (ZROLLMGT System Batch) takes its QTY first when it is a batch of this SO line
-      const sysB = gate.loaded ? normId(await gate.batchOf(String(x.pallet))) : '';
-      if (sysB && lineBatches.has(sysB)) {
+      // the roll's own SAP batch (ZROLLMGT System Batch) takes its QTY first when it is a batch of this SO line — of a roll in two
+      // System Batches, the one of its ZINSR lot (the batch of the roll's Lot Number / Vendor Batch)
+      const sysB = gate.loaded ? normId(await gate.batchOf(String(x.pallet), (r?.parts || []).filter((p0) => p0.lot).map((p0) => String(p0.batch)))) : '';
+      // v175: the SAP line follows the roll's Korber Lot Number (= Vendor Batch): when this SO line's ZINSR lot of the System Batch has
+      // another Vendor Batch, and the roll's own ZINSR lot (its Vendor Batch) is of another batch of the line, that batch takes it
+      const kLot = up(r?.lot ?? '');
+      const sysVb = (cand.lots || []).filter((l) => normId(l.batch) === sysB).map((l) => up(l.vendor_batch)).filter(Boolean);
+      const lotPart = (r?.parts || []).some((p0) => p0.lot && normId(p0.batch) !== sysB && lineBatches.has(normId(p0.batch)));
+      const sysOff = !!kLot && sysVb.length > 0 && !sysVb.includes(kLot) && lotPart;
+      if (sysB && lineBatches.has(sysB) && !sysOff) {
         const pt = parts.find((p0) => normId(p0.batch) === sysB) ?? { batch: sysB, lot: '', qty: Infinity, left: Infinity };
         const t = Math.min(q, pt.left, roomB(pt.batch));
         if (t > 1e-9) {
@@ -3449,7 +3456,7 @@ async function handlePick(env: Env, req: Request, p: string) {
       for (const pt of parts) give(pt, Math.min(q, pt.left));
       // over the roll's own batch lot room: another batch of the SO line with lot room and UR takes the rest
       if (q > 1e-9 && lotB0.size) {
-        const own = sysB || normId(parts[0]?.batch ?? '');
+        const own = (!sysOff && sysB) || normId(parts[0]?.batch ?? '');
         // the other batch's UR in ZMMBE (less what this pick already put on it) limits it too
         const urOf = (bt: string) => Math.max(0, r3((cand.stock || []).filter((z) => normId(z.batch) === bt).reduce((t, z) => t + Math.max(0, Number(z.ur) || 0), 0) - (allocB.get(bt) ?? 0)));
         const others = Array.from(lotB0.keys()).filter((bt) => bt !== own && lineBatches.has(bt) && Math.min(roomB(bt), urOf(bt)) > 1e-9).sort((a1, a2) => Math.min(roomB(a2), urOf(a2)) - Math.min(roomB(a1), urOf(a1)));
@@ -4632,7 +4639,13 @@ async function makeGate(env: Env) {
     for (const e of out.values()) e.avail = Math.max(0, e.avail);
     return out;
   };
-  const batchOf = async (pallet: string) => loaded ? ((await rowsOf([up(pallet)])).sort((a, c) => Number(c.qty ?? 0) - Number(a.qty ?? 0)).map((z) => z.batch as string | null).find(Boolean) ?? null) : null;
+  // v175: a roll SAP lists in two System Batches (part of it in each): `prefer` (the batches of its ZINSR lot) picks the right one
+  const batchOf = async (pallet: string, prefer?: string[]) => {
+    if (!loaded) return null;
+    const bs = (await rowsOf([up(pallet)])).sort((a, c) => Number(c.qty ?? 0) - Number(a.qty ?? 0)).map((z) => z.batch as string | null).filter(Boolean) as string[];
+    const pf = new Set((prefer || []).map((b0) => normId(b0)).filter(Boolean));
+    return (pf.size ? bs.find((b0) => pf.has(normId(b0))) : undefined) ?? bs[0] ?? null;
+  };
   const rowOk = (z: Row) => !on || !rowWhy(z);
   const locWhy = locBlocker(st);
   return { on, bin, loaded, hasStatus, useAvail, splitNote, check, atBin, rowOk, rowWhy, batchOf, availOf, poolOf, locWhy };

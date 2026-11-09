@@ -350,6 +350,57 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
     }
   }
 
+  // v176: the SAP lines follow the Korber Lot Number — a roll whose saved SAP batch is not the batch of its own ZINSR lot (the lot
+  // whose Vendor Batch = the roll's Korber Lot Number) is put on that lot's batch when the file is made, up to what that batch gives the
+  // SO line (its ZINSR Insp. Lot Quantity and ZMMBE UR, less what the other rolls of the line in this file already put on it). An older
+  // pick saved on the wrong batch comes out right without picking it again; what cannot be moved stays, and Lot Check shows it.
+  {
+    const U0 = (x: unknown) => String(x ?? '').trim().toUpperCase();
+    const nl = (x: unknown) => String(x ?? '').trim().replace(/^0+/, '');
+    const iLot = col(PL_SRC['Lot Number'] ?? []);
+    const byLine = new Map<string, Entry[]>();
+    for (const e of entries) { const k = `${e.r.so}|${e.r.li}|${e.r.item}`; byLine.set(k, [...(byLine.get(k) ?? []), e]); }
+    for (const es of byLine.values()) {
+      const lotRows = new Map<string, Record<string, unknown>>();
+      const urB = new Map<string, number>();
+      for (const e of es) {
+        const m = parseMatch(e.r);
+        for (const z of [...(m.zinr || []), ...(m.lots || [])]) if (z.lot) lotRows.set(nl(z.lot), z);
+        const seenB = new Map<string, number>();
+        for (const z of [...(m.zmmbe || []), ...(e.r.zstock || [])] as Record<string, unknown>[]) { const b = bkey(z.batch); seenB.set(b, (seenB.get(b) ?? 0) + Math.max(0, Number(z.ur) || 0)); }
+        for (const [b, q] of seenB) urB.set(b, Math.max(urB.get(b) ?? 0, q));
+      }
+      const lotQ = new Map<string, number>();
+      for (const z of lotRows.values()) { const b = bkey(z.batch); lotQ.set(b, (lotQ.get(b) ?? 0) + (Number(z.qty) || 0)); }
+      const used = new Map<string, number>();
+      for (const e of es) for (const b of e.batches) used.set(bkey(b.batch), (used.get(bkey(b.batch)) ?? 0) + b.qty);
+      for (const e of es) {
+        const kl = U0(iLot >= 0 ? e.raw[iLot] : e.p.lot);
+        if (!kl) continue;
+        const lots = String(e.p.insp_lot ?? '').split(',').map(nl).filter(Boolean);
+        const lb = Array.from(new Set(lots.map((l) => lotRows.get(l)).filter((z) => z && U0(z.vendor_batch) === kl).map((z) => bkey(z!.batch)).filter(Boolean)));
+        if (lb.length !== 1) continue;
+        const B = lb[0];
+        if (!urB.has(B)) continue; // not a ZMMBE batch of the SO line
+        let moved = 0;
+        for (const part of e.batches) {
+          if (bkey(part.batch) === B || part.qty <= 1e-9) continue;
+          const cap = Math.min(lotQ.get(B) ?? 0, urB.get(B) ?? 0) - (used.get(B) ?? 0);
+          const t = Math.round(Math.min(part.qty, Math.max(0, cap)) * 1000) / 1000;
+          if (t <= 1e-9) continue;
+          part.qty = Math.round((part.qty - t) * 1000) / 1000;
+          used.set(bkey(part.batch), (used.get(bkey(part.batch)) ?? 0) - t); used.set(B, (used.get(B) ?? 0) + t);
+          moved = Math.round((moved + t) * 1000) / 1000;
+        }
+        if (moved > 1e-9) {
+          const had = e.batches.find((b) => bkey(b.batch) === B);
+          if (had) had.qty = Math.round((had.qty + moved) * 1000) / 1000; else e.batches.push({ batch: B, qty: moved });
+          e.batches = e.batches.filter((b) => b.qty > 1e-9);
+        }
+      }
+    }
+  }
+
   // one pallet can be picked in pieces (several picks / batches): its pieces are one row, and it is a cut roll only when
   // the pieces together are less than the roll (Korber Actual Qty); pieces adding up to the whole roll are not a cut
   const aq = header.indexOf('actual qty');
@@ -405,7 +456,11 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
         const ok = !!kl && vbs.some((x) => U0(x) === U0(kl));
         // MAS Kreeda's Korber: Lot Number = the ZROLLMGT Vendor Roll of a TRANSFER NOTE roll
         const byRoll = !ok && !!kl && !!t?.vendor_roll && U0(t.vendor_roll) === U0(kl);
-        lotCheck.push({ e, korberLot: kl, sap: vbs.join(' / '), src, result: !vbs.length ? 'no SAP Vendor Batch saved' : ok ? '✓' : byRoll ? '✓ (= Vendor Roll)' : '✗' });
+        // v175: the SAP line's batch must be the batch of that ZINSR lot (the Korber Lot Number's batch for this SO line)
+        const lotBs = new Set(zl.map((x) => bkey(x.batch)).filter(Boolean));
+        const offB = lotBs.size ? bs.filter((b) => !lotBs.has(bkey(b.batch))).map((b) => bkey(b.batch)) : [];
+        if (offB.length) add(e, 'error', `SAP batch ${offB.join(', ')} is not the batch of the roll's ZINSR lot (${Array.from(lotBs).join(', ')} — Lot Number ${kl || '–'})`);
+        lotCheck.push({ e, korberLot: kl, sap: vbs.join(' / '), src, result: !vbs.length ? 'no SAP Vendor Batch saved' : offB.length ? `✗ SAP batch ${offB.join(', ')} ≠ lot batch ${Array.from(lotBs).join(', ')}` : ok ? '✓' : byRoll ? '✓ (= Vendor Roll)' : '✗' });
         if (byRoll) continue;
         if (vbs.length && !ok) add(e, 'error', `Korber Lot Number ${kl || '–'} ≠ SAP Vendor Batch ${vbs.join(' / ')} (${src})`);
       }
