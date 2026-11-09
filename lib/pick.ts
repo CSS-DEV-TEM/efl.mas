@@ -12,13 +12,17 @@ export const PICK_SRCS: { src: PickSrc; title: string; hint: string; needs: stri
   { src: 'zinr', title: 'ZINR', hint: 'Inspection lots: Sales Order, Line Item, Material, Batch, Insp. Lot Quantity, Vendor Invoice No', needs: ['inspection lot', 'insp lot quantity'] },
   // either layout: the detail export (Inspection lot, Report Name, Roll qty.) or the roll view (Inspection #, Vendor Roll No, Shade, Barcode Number)
   { src: 'zcoment', title: 'ZCOMENT VIEW', hint: 'One row per roll: Inspection # / Inspection lot, Vendor Batch, Vendor Roll No, Shade, Barcode Number (only "Shade Report" rows when there is a Report Name)', needs: ['vendor roll no', 'shade'] },
-  { src: 'ztrr', title: 'ZMM_TRR', hint: 'Transfer requests: Transfer Request Number, To Sales Order, Sales Document Item, Material (the plan report’s TRANSFER NOTE)', needs: ['transfer request number', 'to sales order'] },
+  { src: 'ztrr', title: 'ZMM_TRR', hint: 'Transfer requests: Transfer Request Number, To Sales Order, Sales Document Item, Material, Batch, Transfer Quantity, From SO Report No (= ZROLLMGT QM Comment 1 of its rolls)', needs: ['transfer request number', 'to sales order'] },
   { src: 'zroll', title: 'ZROLLMGT', hint: 'Roll management: Barcode Number and StorageBin (the StorageBin rule in Settings → Pick rules decides which rolls can be picked)', needs: ['barcode number|barcode|barcode no|barcode no.', 'storagebin|storage bin|bin|bin location'] },
   { src: 'korber', title: 'Korber Inventory', hint: 'Only rolls of items in the plan are uploaded: Pallet, Item Number, Lot Number, Actual Qty, Supplier Hu', needs: ['pallet', 'item number', 'actual qty'] },
 ];
 
 /** v162: a TRANSFER NOTE (ZMM_TRR) roll's details, kept with its pick */
-export interface TnRoll { tn: string; date?: string | null; from_so?: string | null; from_li?: string | null; to_plant?: string | null; batch?: string | null; qty?: number; status?: string | null; barcode?: string | null; vendor_batch?: string | null; vendor_roll?: string | null; zavail?: number; bin?: string | null; zplant?: string | null; shade?: string | null; roll_no?: string | null; orig?: number | null }
+export interface TnRoll { tn: string; date?: string | null; from_so?: string | null; from_li?: string | null; to_plant?: string | null; batch?: string | null; qty?: number; status?: string | null; barcode?: string | null; vendor_batch?: string | null; vendor_roll?: string | null; zavail?: number; bin?: string | null; zplant?: string | null; shade?: string | null; roll_no?: string | null; orig?: number | null;
+  /** v173: ZMM_TRR From SO Report No, the roll's ZROLLMGT QM Comment 1 and Del. Note Num; by4 = Korber roll found by Item + Lot + Supplier Hu + Invoice (not the pallet) */
+  rep?: string | null; qm1?: string | null; dn?: string | null; by4?: boolean;
+  /** what the TN had picked before this pick */
+  before?: number }
 export interface Candidate {
   /** v162: a TRANSFER NOTE roll (picked first) */
   tn?: TnRoll;
@@ -89,7 +93,7 @@ export interface Candidates {
   /** v143: INTERLINING / FUSIBLE line */
   trim?: boolean;
   /** v162: the line's TRANSFER NOTEs (ZMM_TRR); TN-UR = their batch's UR (picked first), urNormal = the rest */
-  tn?: { tn: string; date: string | null; from_so: string | null; from_li: string | null; batch: string | null; qty: number; picked: number; status: string | null; ur: number; rolls: number; ok: number; why: string | null }[];
+  tn?: { tn: string; date: string | null; from_so: string | null; from_li: string | null; batch: string | null; qty: number; picked: number; status: string | null; ur: number; rolls: number; ok: number; why: string | null; /** v173: ZMM_TRR From SO Report No */ rep?: string | null }[];
   tnUr?: number; urNormal?: number;
 }
 export interface BlockedRoll { lot: string; batch: string | null; roll_no: string | null; barcode: string | null; shade: string | null; pallet: string | null; qty: number | null; why: string }
@@ -169,6 +173,8 @@ const ST = {
   head: { font: { bold: true }, fill: { patternType: 'solid', fgColor: { rgb: 'D9D9D9' } }, border: BOX },
   cell: { border: BOX },
   cut: { font: { bold: true, color: { rgb: '9C0006' } }, fill: { patternType: 'solid', fgColor: { rgb: 'FFC7CE' } }, border: BOX },
+  tn: { font: { bold: true, color: { rgb: '7F3F00' } }, fill: { patternType: 'solid', fgColor: { rgb: 'FFD966' } }, border: BOX },
+  ok: { font: { bold: true, color: { rgb: '006100' } }, fill: { patternType: 'solid', fgColor: { rgb: 'C6EFCE' } }, border: BOX },
   cutHead: { font: { bold: true, color: { rgb: 'FFFFFF' } }, fill: { patternType: 'solid', fgColor: { rgb: 'C00000' } }, border: BOX },
   key: { font: { bold: true, color: { rgb: 'FFFFFF' } }, fill: { patternType: 'solid', fgColor: { rgb: '808000' } }, border: BOX },
   match: { fill: { patternType: 'solid', fgColor: { rgb: 'C9C900' } }, border: { top: { style: 'thin', color: { rgb: 'FFFF00' } }, bottom: { style: 'thin', color: { rgb: 'FFFF00' } }, left: { style: 'thin', color: { rgb: 'FFFF00' } }, right: { style: 'thin', color: { rgb: 'FFFF00' } } } },
@@ -184,7 +190,7 @@ const PL_SRC: Record<string, string[]> = {
 };
 const QTY_COL = PL_HEAD2.indexOf('Actual Qty'), SHADE_COL = PL_HEAD2.indexOf('Shade'), PICKNO_COL = PL_HEAD2.indexOf('Pick No');
 
-type Match = { zmmbe?: Record<string, unknown>[]; zinr?: Record<string, unknown>[]; alloc?: { pallet: string; batch: string; qty: number }[] };
+type Match = { zmmbe?: Record<string, unknown>[]; zinr?: Record<string, unknown>[]; lots?: Record<string, unknown>[]; alloc?: { pallet: string; batch: string; qty: number }[] };
 const parseMatch = (r: PickReq): Match => { try { return r.match ? JSON.parse(r.match) : {}; } catch { return {}; } };
 const canonSloc = (v: unknown) => String(v ?? '').trim().toUpperCase().replace(/^0+(?=\w)/, '');
 
@@ -358,6 +364,7 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
 
   // check every roll before the file is made: the Korber row and the SAP lines must be right
   const issues: PLIssue[] = opts.issues ?? [];
+  const lotCheck: { e: Entry; korberLot: string; sap: string; src: string; result: string }[] = [];
   {
     const r3q = (x: number) => Math.round(x * 1000) / 1000;
     const nItem = (v: unknown) => String(v ?? '').trim().toUpperCase().replace(/^[A-Z]{2,10}-(?=[A-Z0-9])/, '').replace(/^0+(?=\d)/, '');
@@ -385,6 +392,23 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
       if (!String(e.p.insp_lot ?? '').trim()) add(e, 'warn', 'No ZINSR inspection lot saved with this roll');
       if (!String(e.p.shade ?? '').trim()) add(e, 'warn', 'No shade (ZCOMENT VIEW) for this roll');
       if (e.clientKind && e.clientKind !== e.sapKind) add(e, 'warn', `Korber client ${e.client} (${e.clientKind}) but the SAP location of its batch is ${e.sapKind}`);
+      // v173: every roll — Korber Lot Number = SAP Vendor Batch (the ZINSR lots of the pick; a TRANSFER NOTE roll: its ZROLLMGT Vendor Batch,
+      // or Vendor Roll for MAS Kreeda's Korber)
+      {
+        const U0 = (x: unknown) => String(x ?? '').trim().toUpperCase();
+        const t = tnOf(e.p);
+        const lotsP = String(e.p.insp_lot ?? '').split(',').map((x) => x.trim().replace(/^0+/, '')).filter(Boolean);
+        const zl = [...(m.zinr || []), ...(m.lots || [])].filter((x) => lotsP.includes(String(x.lot ?? '').trim().replace(/^0+/, '')));
+        const vbs = Array.from(new Set([...(t ? [t.vendor_batch] : []), ...zl.map((x) => x.vendor_batch)].map((x) => String(x ?? '').trim()).filter(Boolean)));
+        const src = [t ? 'ZROLLMGT (TN)' : '', zl.length ? `ZINSR lot ${Array.from(new Set(zl.map((x) => String(x.lot)))).join(', ')}` : ''].filter(Boolean).join(' + ');
+        const kl = String(v('Lot Number') ?? '').trim();
+        const ok = !!kl && vbs.some((x) => U0(x) === U0(kl));
+        // MAS Kreeda's Korber: Lot Number = the ZROLLMGT Vendor Roll of a TRANSFER NOTE roll
+        const byRoll = !ok && !!kl && !!t?.vendor_roll && U0(t.vendor_roll) === U0(kl);
+        lotCheck.push({ e, korberLot: kl, sap: vbs.join(' / '), src, result: !vbs.length ? 'no SAP Vendor Batch saved' : ok ? '✓' : byRoll ? '✓ (= Vendor Roll)' : '✗' });
+        if (byRoll) continue;
+        if (vbs.length && !ok) add(e, 'error', `Korber Lot Number ${kl || '–'} ≠ SAP Vendor Batch ${vbs.join(' / ')} (${src})`);
+      }
     }
     // a pallet picked for more than the roll
     for (const [pal, q] of palTotal) { const full = palFull.get(pal) ?? 0; if (full > 0 && q > full + 0.0005) { const e = entries.find((x) => x.p.pallet === pal)!; add(e, 'error', `Picked ${r3q(q)} — more than the roll (${full})`); } }
@@ -411,7 +435,7 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
       [null, null],
       [],
     ];
-    const qtyRanges: string[] = []; const headRows: number[] = []; const rollRows: number[] = []; const sapRows: number[] = []; const cutRows: number[] = []; const badRows: number[] = [];
+    const qtyRanges: string[] = []; const headRows: number[] = []; const rollRows: number[] = []; const sapRows: number[] = []; const cutRows: number[] = []; const badRows: number[] = []; const tnRows: number[] = [];
     const groups = new Map<string, Merged[]>();
     for (const m of list) { const g = groups.get(m.e.group); if (g) g.push(m); else groups.set(m.e.group, [m]); }
     for (const g of groups.values()) {
@@ -425,7 +449,7 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
         const nos = m.parts.filter((x) => !seen.has(x.r.id)).map((x) => { seen.add(x.r.id); return pickNoOf(x.r); }).filter((x) => x !== '');
         row[PICKNO_COL] = nos.length ? (nos.length === 1 ? nos[0] : Array.from(new Set(nos)).join(', ')) : null;
         if (hasOff) row.push(m.parts.some((x) => x.r.kind === 'offsite') ? (Array.from(new Set(m.parts.map((x) => String(x.p.qm1 ?? '').trim()).filter(Boolean))).join(', ') || null) : null);
-        if (hasTn) { const tns = Array.from(new Set(m.parts.map((x) => tnOf(x.p)?.tn).filter(Boolean))); row.push(tns.length ? `TRANSFER NOTE · Transfer Request Number ${tns.join(', ')}` : null); }
+        if (hasTn) { const tns = Array.from(new Set(m.parts.map((x) => tnOf(x.p)?.tn).filter(Boolean))); row.push(tns.length ? `TN · Transfer Request Number ${tns.join(', ')}` : null); if (tns.length) tnRows.push(aoa.length); }
         if (isCut(m.e.p.pallet)) cutRows.push(aoa.length);
         rollRows.push(aoa.length); aoa.push(row);
       }
@@ -478,6 +502,8 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
     for (const r0 of cutRows) for (const i of [0, QTY_COL]) style(U.encode_col(i) + (r0 + 1), ST.cut);
     for (const r0 of sapRows) for (let i = 0; i < 5; i++) style(U.encode_col(i) + (r0 + 1), ST.match);
     for (const r0 of badRows) style('A' + (r0 + 1), ST.cut);
+    // v173: a TRANSFER NOTE roll: its Remark (TN + Transfer Request Number) marked
+    for (const r0 of tnRows) style(U.encode_col(HEAD.length - 1) + (r0 + 1), ST.tn);
     ws['!cols'] = [17.5, 14, 19, 26, 12, 9, 12, 12, 24, 22, 22, 11, 10, 7, 12, ...(hasOff ? [24] : []), ...(hasTn ? [40] : [])].map((w) => ({ wch: w }));
     return ws;
   };
@@ -570,7 +596,7 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
     if (tnE.length) {
       const tq3 = (x: number) => Math.round(x * 1000) / 1000;
       const head = ['Transfer Request Number', 'TN Date', 'TN Status', 'From SO', 'From LI', 'To SO', 'To LI', 'Material', 'To Plant', 'TN Batch', 'TN Qty',
-        'ZROLLMGT Barcode', 'Korber Pallet', 'Vendor Batch', 'Korber Lot Number', 'Vendor Roll', 'Korber Supplier Hu', 'StorageBin', 'ZROLLMGT Available', 'Korber Actual Qty',
+        'From SO Report No', 'ZROLLMGT QM Comment 1', 'ZROLLMGT Barcode', 'Korber Pallet', 'Vendor Batch', 'Korber Lot Number', 'Vendor Roll', 'Korber Supplier Hu', 'Del. Note Num', 'Korber Invoice Number', 'StorageBin', 'ZROLLMGT Available', 'Korber Actual Qty',
         'Picked Qty', 'Cut Roll Balance', 'SAP Batch', 'St Loc', 'ZINSR Lot', 'Shade', 'Sheet', 'Pick No', 'Picked on', 'By', 'Check'];
       const aoa: (string | number | null)[][] = [['TRANSFER NOTE DETAILS', null, `${new Set(tnE.map((e) => tnOf(e.p)!.tn)).size} transfer note(s) · ${tnE.length} roll(s)`], [], head];
       const bad: number[] = [];
@@ -582,16 +608,17 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
         const bs = e.batches.filter((b) => b.qty > 1e-9);
         const z = zrows.find((x) => bs.some((b) => bkey(b.batch) === bkey(x.batch)));
         const full = palFull.get(e.p.pallet) ?? 0;
-        const kLot = String(v('Lot Number') ?? e.p.lot ?? ''), kHu = String(v('Supplier Hu') ?? '');
+        const kLot = String(v('Lot Number') ?? e.p.lot ?? ''), kHu = String(v('Supplier Hu') ?? ''), kInv = String((() => { const i = col(['invoice number']); return i >= 0 ? e.raw[i] : ''; })() ?? '');
         // Korber Lot Number = Vendor Batch (MAS Active) or = Vendor Roll (MAS Kreeda)
         const U0 = (x: unknown) => String(x ?? '').trim().toUpperCase();
         const lotOk = !kLot || !(t.vendor_batch || t.vendor_roll) || [U0(t.vendor_batch), U0(t.vendor_roll)].includes(U0(kLot));
         const huOk = !kHu || !t.vendor_roll || [U0(t.vendor_roll), U0(t.vendor_batch)].includes(U0(kHu));
-        const miss = [lotOk ? '' : 'Lot ≠ Vendor Batch / Roll', huOk ? '' : 'Supplier Hu ≠ Vendor Roll',
+        const invOk = !kInv || !t.dn || U0(kInv) === U0(t.dn);
+        const miss = [lotOk ? '' : 'Lot ≠ Vendor Batch / Roll', huOk ? '' : 'Supplier Hu ≠ Vendor Roll', invOk ? '' : 'Invoice ≠ Del. Note Num',
           t.batch && bs.length && !bs.some((b) => bkey(b.batch) === bkey(t.batch)) ? 'SAP batch ≠ TN batch' : '', Number(e.p.qty) > Number(t.qty ?? Infinity) + 0.0005 ? 'Picked > TN Qty' : ''].filter(Boolean);
         if (miss.length) bad.push(aoa.length);
         aoa.push([num(t.tn), t.date ? String(t.date).split('-').reverse().join('-') : '', t.status ?? '', t.from_so ?? '', num(t.from_li ?? ''), String(e.r.so), num(e.r.li), num(e.r.item), t.to_plant ?? '', num(String(t.batch ?? '').replace(/^0+(?=\d)/, '')), Number(t.qty ?? 0),
-          t.barcode ?? '', e.p.pallet, t.vendor_batch ?? '', kLot, t.vendor_roll ?? '', kHu, t.bin ?? '', Number(t.zavail ?? 0), full || null,
+          t.rep ?? '', t.qm1 ?? '', t.barcode ?? '', e.p.pallet + (t.by4 ? ' (Item + Lot + Supplier Hu + Invoice)' : ''), t.vendor_batch ?? '', kLot, t.vendor_roll ?? '', kHu, t.dn ?? '', kInv, t.bin ?? '', Number(t.zavail ?? 0), full || null,
           tq3(Number(e.p.qty)), full ? Math.max(0, tq3(full - (palTotal.get(e.p.pallet) ?? 0))) : null, bs.map((b) => bkey(b.batch)).join(', '), z ? String(z.sloc ?? '') : '', String(e.p.insp_lot ?? ''), e.p.shade ?? t.shade ?? '', e.kind,
           pickNoOf(e.r), e.p.day ? e.p.day.split('-').reverse().join('-') : '', e.p.by_user, miss.length ? `✗ ${miss.join(' · ')}` : '✓']);
       }
@@ -599,9 +626,51 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
       for (let i = 0; i < head.length; i++) { const ref = U.encode_cell({ r: 2, c: i }); (ws[ref] as { s?: unknown }).s = ST.head; }
       for (let i = 0; i < 3; i++) { const ref = U.encode_cell({ r: 0, c: i }); if (ws[ref]) (ws[ref] as { s?: unknown }).s = ST.top; }
       for (let r = 3; r < aoa.length; r++) for (let c = 0; c < head.length; c++) { const ref = U.encode_cell({ r, c }); if (!ws[ref]) ws[ref] = { t: 's', v: '' }; (ws[ref] as { s?: unknown }).s = bad.includes(r) && c === head.length - 1 ? ST.cut : ST.cell; }
-      ws['!cols'] = [14, 11, 8, 13, 7, 13, 6, 12, 9, 12, 8, 17, 20, 13, 13, 14, 14, 11, 11, 11, 10, 11, 12, 7, 13, 7, 6, 9, 11, 10, 22].map((w) => ({ wch: w }));
+      ws['!cols'] = [14, 11, 8, 13, 7, 13, 6, 12, 9, 12, 8, 20, 20, 17, 20, 13, 13, 14, 14, 18, 18, 11, 11, 11, 10, 11, 12, 7, 13, 7, 6, 9, 11, 10, 22].map((w) => ({ wch: w }));
       U.book_append_sheet(wb, ws, sheetName('Transfer Notes'));
+      // v173: TN Balance — each TRANSFER NOTE (Transfer Request Number + batch + To SO line): its QTY, what was picked before, in this
+      // Packing List and in all, and the balance still to pick
+      {
+        const units = new Map<string, { t: TnRoll; so: string; li: string; item: string; inPl: number; before: number | null; rolls: Set<string>; cut: number }>();
+        for (const e of tnE) {
+          const t = tnOf(e.p)!;
+          const k = [t.tn, bkey(t.batch), e.r.so, e.r.li].join('|');
+          const u = units.get(k) ?? { t, so: String(e.r.so), li: String(e.r.li), item: String(e.r.item), inPl: 0, before: null as number | null, rolls: new Set<string>(), cut: 0 };
+          u.inPl = tq3(u.inPl + Number(e.p.qty)); u.rolls.add(e.p.pallet);
+          if (t.before !== undefined && t.before !== null) u.before = u.before === null ? Number(t.before) : Math.min(u.before, Number(t.before));
+          units.set(k, u);
+        }
+        for (const u of units.values()) u.cut = Array.from(u.rolls).filter((p) => isCut(p)).length;
+        const bh = ['Transfer Request Number', 'TN Date', 'From SO', 'From SO Report No', 'To SO', 'To LI', 'Material', 'TN Batch', 'TN Qty', 'Picked before', 'Picked (this Packing List)', 'Total picked', 'Balance', 'Rolls', 'Cut rolls', 'Status'];
+        const ba: (string | number | null)[][] = [['TRANSFER NOTE BALANCE', null, `${units.size} transfer note line(s)`], [], bh];
+        const st: { r: number; ok: boolean }[] = [];
+        for (const u of Array.from(units.values()).sort((a, b) => String(a.t.tn).localeCompare(String(b.t.tn)))) {
+          const q = Number(u.t.qty ?? 0), bef = u.before ?? 0, tot = tq3(bef + u.inPl), bal = tq3(q - tot);
+          const status = bal > 0.0005 ? `Balance ${bal} to pick` : bal < -0.0005 ? `✗ ${tq3(-bal)} over the TN Qty` : '✓ Complete';
+          st.push({ r: ba.length, ok: bal <= 0.0005 && bal >= -0.0005 });
+          ba.push([num(u.t.tn), u.t.date ? String(u.t.date).split('-').reverse().join('-') : '', u.t.from_so ?? '', u.t.rep ?? '', u.so, num(u.li), num(u.item), num(String(u.t.batch ?? '').replace(/^0+(?=\d)/, '')), q, u.before ?? null, u.inPl, tot, bal, u.rolls.size, u.cut, status]);
+        }
+        const bws = U.aoa_to_sheet(ba);
+        for (let i = 0; i < bh.length; i++) { const ref = U.encode_cell({ r: 2, c: i }); (bws[ref] as { s?: unknown }).s = ST.head; }
+        for (let i = 0; i < 3; i++) { const ref = U.encode_cell({ r: 0, c: i }); if (bws[ref]) (bws[ref] as { s?: unknown }).s = ST.top; }
+        for (const x of st) for (let c = 0; c < bh.length; c++) { const ref = U.encode_cell({ r: x.r, c }); if (!bws[ref]) bws[ref] = { t: 's', v: '' }; (bws[ref] as { s?: unknown }).s = c === bh.length - 1 ? (x.ok ? ST.ok : ST.cut) : ST.cell; }
+        bws['!cols'] = [14, 11, 13, 20, 13, 6, 12, 12, 10, 11, 14, 11, 10, 6, 8, 22].map((w) => ({ wch: w }));
+        U.book_append_sheet(wb, bws, sheetName('TN Balance'));
+      }
     }
+  }
+  // v173: Lot Check — every roll of the Packing List: Korber Lot Number = SAP Vendor Batch
+  if (lotCheck.length) {
+    const lh = ['Pallet', 'SO', 'LI', 'Item', 'Picked Qty', 'Korber Lot Number', 'SAP Vendor Batch', 'From', 'TN', 'Sheet', 'Pick No', 'Check'];
+    const bad = lotCheck.filter((x) => !x.result.startsWith('✓')).length;
+    const la: (string | number | null)[][] = [['LOT CHECK — KORBER LOT NUMBER = SAP VENDOR BATCH', null, null, bad ? `${bad} of ${lotCheck.length} roll(s) to check` : `all ${lotCheck.length} roll(s) ✓`], [], lh];
+    for (const x of lotCheck) la.push([x.e.p.pallet, String(x.e.r.so), num(x.e.r.li), num(x.e.r.item), Math.round(Number(x.e.p.qty) * 1000) / 1000, x.korberLot, x.sap, x.src, tnOf(x.e.p)?.tn ?? '', x.e.kind, pickNoOf(x.e.r), x.result]);
+    const lws = U.aoa_to_sheet(la);
+    for (let i = 0; i < lh.length; i++) { const ref = U.encode_cell({ r: 2, c: i }); (lws[ref] as { s?: unknown }).s = ST.head; }
+    for (let i = 0; i < 4; i++) { const ref = U.encode_cell({ r: 0, c: i }); if (lws[ref]) (lws[ref] as { s?: unknown }).s = ST.top; }
+    lotCheck.forEach((x, i) => { for (let c = 0; c < lh.length; c++) { const ref = U.encode_cell({ r: 3 + i, c }); if (!lws[ref]) lws[ref] = { t: 's', v: '' }; (lws[ref] as { s?: unknown }).s = c === lh.length - 1 ? (x.result.startsWith('✓') ? ST.ok : ST.cut) : ST.cell; } });
+    lws['!cols'] = [18, 13, 5, 12, 10, 18, 20, 26, 10, 6, 8, 22].map((w) => ({ wch: w }));
+    U.book_append_sheet(wb, lws, 'Lot Check');
   }
   // Summary: one line per pick, its KFC and PFC QTY
   const summary: (string | number | null)[][] = [['Req', 'Total Qty', 'KFC Qty', 'PFC Qty', 'Total Rolls', 'Pick No', 'Type', 'Remarks']];
