@@ -1434,3 +1434,38 @@ p.si-line { margin: 2px 0 0; }
 .mb-grid .mb-check { grid-column: 1 / -1; display: flex; gap: 8px; align-items: center; }
 @media (max-width: 640px) { .mb-grid { grid-template-columns: minmax(0, 1fr); } }
 .mb-pill { white-space: normal; }
+
+/* v171: Inventory reconciliation */
+.inv-page { display: grid; gap: 16px; }
+.inv-slots { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.inv-slot { position: relative; display: grid; gap: 4px; align-content: start; padding: 14px; border: 1.5px dashed var(--line); border-radius: 14px; cursor: pointer; min-width: 0; }
+.inv-slot:hover, .inv-slot:focus-within { border-color: var(--accent); }
+.inv-slot.has { border-style: solid; border-color: var(--ok); }
+.inv-slot small { color: var(--ink-2); }
+.inv-slot input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.inv-file { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; color: var(--accent); }
+.inv-slot.has .inv-file { color: var(--ok); }
+.inv-head { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline; justify-content: space-between; }
+.inv-sides { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+.inv-side { display: grid; gap: 4px; text-align: left; padding: 14px; border-radius: 14px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; font: inherit; min-width: 0; }
+.inv-side.on { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent); }
+.inv-side .k { font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-2); }
+.inv-side .v { font-size: 24px; font-weight: 700; }
+.inv-side .v small { font-size: 13px; font-weight: 500; color: var(--ink-2); }
+.inv-side .s { font-size: 13px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.inv-bar { display: flex; height: 8px; border-radius: 99px; overflow: hidden; background: var(--line); margin-top: 4px; }
+.inv-bar i { display: block; }
+.st-Match { background: color-mix(in srgb, var(--ok) 70%, transparent); }
+.st-Korbermore { background: color-mix(in srgb, var(--warn) 70%, transparent); }
+.st-SAPmore { background: color-mix(in srgb, var(--bad) 65%, transparent); }
+.st-SAPonly, .st-Korberonly { background: color-mix(in srgb, var(--ink-2) 35%, transparent); }
+.pill.inv-st { color: var(--ink); white-space: nowrap; }
+.inv-filter { margin-top: 14px; flex-wrap: wrap; }
+.inv-filter small { opacity: .7; margin-left: 4px; }
+.inv-search { width: 100%; max-width: 420px; margin-top: 10px; }
+.inv-table { margin-top: 10px; max-height: 560px; overflow: auto; }
+.inv-pos { color: var(--warn); font-weight: 600; }
+.inv-neg { color: var(--bad); font-weight: 600; }
+.inv-locs { margin-top: 10px; }
+.inv-locs summary { cursor: pointer; font-weight: 600; }
+@media (max-width: 760px) { .inv-slots, .inv-sides { grid-template-columns: minmax(0, 1fr); } }

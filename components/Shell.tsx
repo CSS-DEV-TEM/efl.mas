@@ -198,6 +198,7 @@ export default function Shell({ children, admin, allowGuest }: { children: React
     { href: '/upload/', label: 'Uploads' },
     { href: '/dispatch/', label: 'Pick & Dispatch' },
     { href: '/data/', label: 'Data' },
+    { href: '/inventory/', label: 'Inventory' },
     ...(user.role === 'admin' ? [{ href: '/settings/', label: 'Settings' }] : []),
   ];
   const liveText = state === 'live' ? 'Live' : state === 'connecting' ? 'Connecting…' : 'Updates on activity';

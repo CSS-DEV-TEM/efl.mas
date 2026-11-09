@@ -679,7 +679,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 113; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 114; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -2207,7 +2207,8 @@ async function handleFiles(env: Env, req: Request, p: string) {
     if (Number(got?.n) !== Number(f.parts) || Math.abs(bytes - Number(f.size)) > 0) throw new HttpError(400, `The file did not arrive in full (${got?.n} of ${f.parts} parts) — upload it again.`);
     await env.DB.prepare('UPDATE upload_file SET complete = 1, uploaded_at = ? WHERE id = ?').bind(now(), f.id).run();
     // keep the newest files of each report + scope, and the total under the limit (the oldest go first)
-    const old = (await env.DB.prepare(`SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY srcs, COALESCE(rid, '') ORDER BY uploaded_at DESC, id DESC) rn FROM upload_file WHERE complete = 1 AND srcs <> 'dayend') WHERE rn > ?`).bind(FILE_KEEP).all<Row>()).results.map((x) => Number(x.id));
+    const old = (await env.DB.prepare(`SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY srcs, COALESCE(rid, '') ORDER BY uploaded_at DESC, id DESC) rn, srcs FROM upload_file WHERE complete = 1 AND srcs <> 'dayend')
+        WHERE rn > CASE WHEN srcs IN ('inv-sap', 'inv-pfc', 'inv-korber') THEN 1 ELSE ? END`).bind(FILE_KEEP).all<Row>()).results.map((x) => Number(x.id)); // v171: the inventory files: the latest of each
     const byAge = (await env.DB.prepare("SELECT id, size FROM upload_file WHERE complete = 1 AND srcs <> 'dayend' ORDER BY uploaded_at DESC, id DESC").all<Row>()).results; // v155: Day end reports are kept
     let t = 0; for (const x of byAge) { t += Number(x.size) || 0; if (t > FILES_TOTAL && Number(x.id) !== Number(f.id)) old.push(Number(x.id)); }
     if (old.length) {
