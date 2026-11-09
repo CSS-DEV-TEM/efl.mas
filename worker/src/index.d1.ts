@@ -506,9 +506,14 @@ async function ensureSchema(env: Env) {
   try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS zcoment_tn ON zcoment(tn, rid)').run(); } catch { /* */ }
   try {
     // the ZROLLMGT rows already uploaded: their TN# from the comments kept in raw
-    const old = (await env.DB.prepare("SELECT rowid id, raw FROM zroll WHERE tn IS NULL AND raw LIKE '%TN#%'").all<{ id: number; raw: string }>()).results;
+    // (in pages by rowid: all of them in one read can go over D1's 32 MiB)
     const upd: D1PreparedStatement[] = [];
+    for (let after = -1; ;) {
+    const old = (await env.DB.prepare("SELECT rowid id, raw FROM zroll WHERE tn IS NULL AND raw LIKE '%TN#%' AND rowid > ? ORDER BY rowid LIMIT 2500").bind(after).all<{ id: number; raw: string }>()).results;
     for (const r of old) { let o: Record<string, unknown> = {}; try { o = JSON.parse(r.raw); } catch { /* */ } const t = tnTags(Object.keys(o), Object.values(o)); if (t) upd.push(env.DB.prepare('UPDATE zroll SET tn = ? WHERE rowid = ?').bind(t, r.id)); }
+    if (old.length < 2500) break;
+    after = old[old.length - 1].id;
+    }
     for (let i = 0; i < upd.length; i += 50) await env.DB.batch(upd.slice(i, i + 50));
   } catch { /* */ }
   await env.DB.prepare("INSERT INTO config (k, v) VALUES ('schema_v', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(SCHEMA_V).run();
@@ -679,7 +684,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 114; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 115; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -741,9 +746,37 @@ function jsonInsert(env: Env, table: string, cols: string[], rows: Row[], chunk 
   const select = cols.map((c) => `json_extract(value, '$.${c}')`).join(', ');
   for (let i = 0; i < rows.length; i += chunk) {
     const part = rows.slice(i, i + chunk).map((r) => Object.fromEntries(cols.map((c) => [c, r[c] ?? null])));
-    stmts.push(env.DB.prepare(`INSERT INTO ${table} (${cols.join(', ')}) SELECT ${select} FROM json_each(?)`).bind(JSON.stringify(part)));
+    const js = JSON.stringify(part);
+    stmts.push(sized(env.DB.prepare(`INSERT INTO ${table} (${cols.join(', ')}) SELECT ${select} FROM json_each(?)`).bind(js), js.length));
   }
   return stmts;
+}
+
+/**
+ * v172: D1 takes at most 32 MiB of arguments (and of results) in one call. A statement made here carries its size; a list of
+ * statements over BATCH_MAX goes in several batches, in the same order (a small list stays one all-or-nothing batch).
+ */
+const stmtSize = new WeakMap<D1PreparedStatement, number>();
+function sized(st: D1PreparedStatement, chars: number) { stmtSize.set(st, chars); return st; }
+const BATCH_MAX = 12 * 1024 * 1024; // characters (a non-ASCII character can be 2–3 bytes: well under 32 MiB)
+async function batchSized(env: Env, stmts: D1PreparedStatement[]) {
+  const sz = (x: D1PreparedStatement) => stmtSize.get(x) ?? 2048;
+  if (!stmts.length) return;
+  if (stmts.reduce((t, x) => t + sz(x), 0) <= BATCH_MAX) { await env.DB.batch(stmts); return; }
+  let cur: D1PreparedStatement[] = [], n = 0;
+  for (const x of stmts) {
+    if (cur.length && n + sz(x) > BATCH_MAX) { await env.DB.batch(cur); cur = []; n = 0; }
+    cur.push(x); n += sz(x);
+  }
+  if (cur.length) await env.DB.batch(cur);
+}
+/** a 53-bit string hash (cyrb53) — two seeds together stand for a row's values without keeping the whole row in memory */
+function h53(str: string, seed = 0) {
+  let h1 = 0xdeadbeef ^ seed, h2 = 0x41c6ce57 ^ seed;
+  for (let i = 0; i < str.length; i++) { const ch = str.charCodeAt(i); h1 = Math.imul(h1 ^ ch, 2654435761); h2 = Math.imul(h2 ^ ch, 1597334677); }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return 4294967296 * (2097151 & h2) + (h1 >>> 0);
 }
 
 /**
@@ -752,15 +785,21 @@ function jsonInsert(env: Env, table: string, cols: string[], rows: Row[], chunk 
  * D1 counts every written row (and index entry), and a report uploaded again is mostly the same rows.
  */
 async function diffReplace(env: Env, table: string, cols: string[], rows: Row[], where: string, binds: unknown[], chunk = 400) {
-  const sig = (r: Row) => cols.map((c) => { const v = r[c]; return v === null || v === undefined ? '' : String(v); }).join('\u0001');
-  const have = (await env.DB.prepare(`SELECT rowid AS _rid, ${cols.join(', ')} FROM ${table} WHERE ${where}`).bind(...binds).all<Row>()).results;
+  const sig = (r: Row) => { const t = cols.map((c) => { const v = r[c]; return v === null || v === undefined ? '' : String(v); }).join('\u0001'); return `${h53(t, 1)}:${h53(t, 7)}:${t.length}`; };
+  // v172: what is there now, read in pages by rowid (one read of a big report went over D1's 32 MiB)
   const bySig = new Map<string, number[]>();
-  for (const h of have) { const k = sig(h); const l = bySig.get(k); if (l) l.push(Number(h._rid)); else bySig.set(k, [Number(h._rid)]); }
+  const page = cols.includes('raw') ? 2500 : 10000;
+  for (let after = -1; ;) {
+    const have = (await env.DB.prepare(`SELECT rowid AS _rid, ${cols.join(', ')} FROM ${table} WHERE (${where}) AND rowid > ? ORDER BY rowid LIMIT ${page}`).bind(...binds, after).all<Row>()).results;
+    for (const h of have) { const k = sig(h); const l = bySig.get(k); if (l) l.push(Number(h._rid)); else bySig.set(k, [Number(h._rid)]); }
+    if (have.length < page) break;
+    after = Number(have[have.length - 1]._rid);
+  }
   const add: Row[] = [];
   for (const r of rows) { const l = bySig.get(sig(r)); if (l && l.length) l.pop(); else add.push(r); }
   const del = Array.from(bySig.values()).flat();
   const stmts: D1PreparedStatement[] = [];
-  for (let i = 0; i < del.length; i += 2000) stmts.push(env.DB.prepare(`DELETE FROM ${table} WHERE rowid IN (SELECT value FROM json_each(?))`).bind(JSON.stringify(del.slice(i, i + 2000))));
+  for (let i = 0; i < del.length; i += 2000) { const js = JSON.stringify(del.slice(i, i + 2000)); stmts.push(sized(env.DB.prepare(`DELETE FROM ${table} WHERE rowid IN (SELECT value FROM json_each(?))`).bind(js), js.length)); }
   stmts.push(...jsonInsert(env, table, cols, add, chunk));
   return { stmts, added: add.length, removed: del.length, unchanged: rows.length - add.length };
 }
@@ -1001,7 +1040,7 @@ async function handleUpload(env: Env, req: Request) {
     .bind(body.src, body.fileName || null, body.sheetName || null, mapped.length, s.u, now(), body.src !== 'plan' && body.mode === 'add' ? 'add' : null, upRid));
   stmts.push(env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)')
     .bind(now(), s.u, 'upload', `${SRC_LABEL[body.src]}${body.mode === 'add' && body.src !== 'plan' ? ' (added to current)' : ''}${weeks.length ? ' ' + weeks.map((w) => periodLabel(w)).join(', ') : ''}${planSummary?.plant && !weeks.some((w) => parseRound(w)) ? ' · ' + planSummary.plant : ''}: ${planSummary ? `${planSummary.added} new, ${planSummary.updated} updated${planSummary.removed ? `, ${planSummary.removed} removed` : ''}` : mapped.length + ' rows'}${body.fileName ? ' from ' + body.fileName : ''}`));
-  await env.DB.batch(stmts); // all or nothing
+  await batchSized(env, stmts); // all or nothing (a very big report: in parts of < 32 MiB, in order)
 
   await broadcast(env, { type: 'data', src: body.src, by: s.u, rows: mapped.length, weeks });
   return json({ ok: true, src: body.src, accepted: mapped.length, skipped: Math.max(0, body.rows.length - mapped.length - plantOut - setupOut - (Number(planSummary?.inFileDups) || 0) - stockDups), stockDups, ...(notInSetup.length ? { notInSetup, setupOut } : {}), mode: body.src === 'plan' ? undefined : body.mode === 'add' ? 'add' : 'replace', weeks, changes: stockDiff ? { added: stockDiff.added, removed: stockDiff.removed, unchanged: stockDiff.unchanged } : undefined, derived: derived ?? undefined, ...(planSummary || {}) });
@@ -2689,7 +2728,7 @@ async function handlePick(env: Env, req: Request, p: string) {
     stmts.push(env.DB.prepare('INSERT INTO uploads (src, file_name, sheet_name, row_count, uploaded_by, uploaded_at, rid) VALUES (?,?,?,?,?,?,?)').bind(b.src, b.fileName || null, null, rows.length, s.u, now(), rid));
     stmts.push(env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'upload',
       `${PICK_LABEL[b.src]}${rid ? ' · ' + periodLabel(rid) : ''}: ${rows.length} rows${b.total && b.total > rows.length ? ` (of ${b.total} in the file)` : ''}${b.fileName ? ' from ' + b.fileName : ''}`));
-    await env.DB.batch(stmts);
+    await batchSized(env, stmts);
     if (rid === ALL_RID) allKorber.delete(env.DIV || 'active');
     await broadcast(env, { type: 'data', src: b.src, by: s.u, rows: rows.length });
     return json({ ok: true, rows: rows.length, skipped, rid, ...(rid === ALL_RID ? { expires: new Date(Date.now() + KORBER_TTL).toISOString() } : {}) });
