@@ -490,7 +490,7 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
       [null, null],
       [],
     ];
-    const qtyRanges: string[] = []; const headRows: number[] = []; const rollRows: number[] = []; const sapRows: number[] = []; const cutRows: number[] = []; const badRows: number[] = []; const tnRows: number[] = [];
+    const qtyRanges: string[] = []; const headRows: number[] = []; const rollRows: number[] = []; const sapRows: number[] = []; const cutRows: number[] = []; const badRows: number[] = []; const tnRows: number[] = []; const vbBad: number[] = [];
     const groups = new Map<string, Merged[]>();
     for (const m of list) { const g = groups.get(m.e.group); if (g) g.push(m); else groups.set(m.e.group, [m]); }
     for (const g of groups.values()) {
@@ -509,17 +509,27 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
         rollRows.push(aoa.length); aoa.push(row);
       }
       qtyRanges.push(`${U.encode_col(QTY_COL)}${first + 1}:${U.encode_col(QTY_COL)}${aoa.length}`);
-      // the SAP lines of this table: SO | LI | Qty | Material | Batch, adding up to its Actual Qty
+      // the SAP lines of this table: SO | LI | Qty | Material | Batch | Vendor Batch, adding up to its Actual Qty
+      // v178: Vendor Batch = the ZINSR lot of that SO line + batch (it must be the table's Korber Lot Number)
+      const tLot = String(g[0]?.e.row[PL_HEAD2.indexOf('Lot Number')] ?? '').trim().toUpperCase();
       const sap = new Map<string, (string | number)[]>();
+      const sapVb = new Map<string, Set<string>>();
       for (const e of g.flatMap((m) => m.parts)) for (const b of e.batches) {
         if (!(b.qty > 1e-9)) continue;
         const k = [e.r.so, e.r.li, e.r.item, String(b.batch).replace(/^0+(?=\d)/, '')].join('|');
+        const m0 = parseMatch(e.r);
+        const vbs = Array.from(new Set([...(m0.zinr || []), ...(m0.lots || [])].filter((z) => bkey(z.batch) === bkey(b.batch)).map((z) => String(z.vendor_batch ?? '').trim()).filter(Boolean)));
+        // the lot of the roll's own Korber Lot Number first (a batch can hold several lots of the SO line)
+        const vb = vbs.find((x) => x.toUpperCase() === tLot) ?? vbs.join(' / ');
+        if (!sapVb.has(k)) sapVb.set(k, new Set());
+        if (vb) sapVb.get(k)!.add(vb);
         const had = sap.get(k);
         if (had) had[2] = Math.round(((had[2] as number) + b.qty) * 1000) / 1000;
         else sap.set(k, [String(e.r.so), num(e.r.li), Math.round(b.qty * 1000) / 1000, num(e.r.item), num(String(b.batch).replace(/^0+(?=\d)/, ''))]);
       }
+      for (const [k, row] of sap) row.push(Array.from(sapVb.get(k) ?? []).join(' / '));
       aoa.push([]);
-      for (const row of sap.values()) { sapRows.push(aoa.length); aoa.push(row); }
+      for (const row of sap.values()) { sapRows.push(aoa.length); if (tLot && String(row[5] ?? '').trim() && String(row[5]).toUpperCase() !== tLot) vbBad.push(aoa.length); aoa.push(row); }
       // the SAP lines must add up to the table's Actual Qty
       const tq = Math.round(g.reduce((t, m) => t + m.qty, 0) * 1000) / 1000;
       const sq = Math.round(Array.from(sap.values()).reduce((t, row) => t + Number(row[2]), 0) * 1000) / 1000;
@@ -555,11 +565,13 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
     for (const r0 of rollRows) HEAD.forEach((_, i) => style(U.encode_col(i) + (r0 + 1), ST.cell));
     // a cut roll: its Pallet and Actual Qty (the cut QTY) in red, so it is seen on the floor
     for (const r0 of cutRows) for (const i of [0, QTY_COL]) style(U.encode_col(i) + (r0 + 1), ST.cut);
-    for (const r0 of sapRows) for (let i = 0; i < 5; i++) style(U.encode_col(i) + (r0 + 1), ST.match);
+    for (const r0 of sapRows) for (let i = 0; i < 6; i++) style(U.encode_col(i) + (r0 + 1), ST.match);
+    // v178: a SAP line whose Vendor Batch is not the table's Korber Lot Number
+    for (const r0 of vbBad) style(U.encode_col(5) + (r0 + 1), ST.cut);
     for (const r0 of badRows) style('A' + (r0 + 1), ST.cut);
     // v173: a TRANSFER NOTE roll: its Remark (TN + Transfer Request Number) marked
     for (const r0 of tnRows) style(U.encode_col(HEAD.length - 1) + (r0 + 1), ST.tn);
-    ws['!cols'] = [17.5, 14, 19, 26, 12, 9, 12, 12, 24, 22, 22, 11, 10, 7, 12, ...(hasOff ? [24] : []), ...(hasTn ? [40] : [])].map((w) => ({ wch: w }));
+    ws['!cols'] = [17.5, 14, 19, 26, 12, 15, 12, 12, 24, 22, 22, 11, 10, 7, 12, ...(hasOff ? [24] : []), ...(hasTn ? [40] : [])].map((w) => ({ wch: w }));
     return ws;
   };
   const usedNames = new Set<string>();
