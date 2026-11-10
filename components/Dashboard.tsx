@@ -180,9 +180,14 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
   useEffect(() => {
     let stop = false;
     if (!repIds.length) { setRepMap(null); return; }
-    Promise.all(repIds.map((id) => api<PlanReportRes>(`/api/plan-report?rid=${encodeURIComponent(id)}${!isDay && wPlant ? '&plant=' + encodeURIComponent(wPlant) : ''}`)
-      .then((r) => r.rows.map((x) => [`${id}|${x.key}|${x.pick_date ?? ''}`, x] as [string, PlanReportRow])).catch(() => [] as [string, PlanReportRow][])))
-      .then((all) => { if (!stop) setRepMap(new Map(all.flat())); });
+    // v177: two at a time (every Pick of the day at once overloaded D1)
+    const one = (id: string) => api<PlanReportRes>(`/api/plan-report?rid=${encodeURIComponent(id)}${!isDay && wPlant ? '&plant=' + encodeURIComponent(wPlant) : ''}`)
+      .then((r) => r.rows.map((x) => [`${id}|${x.key}|${x.pick_date ?? ''}`, x] as [string, PlanReportRow])).catch(() => [] as [string, PlanReportRow][]);
+    (async () => {
+      const all: [string, PlanReportRow][][] = [];
+      for (let i = 0; i < repIds.length && !stop; i += 2) all.push(...(await Promise.all(repIds.slice(i, i + 2).map(one))));
+      if (!stop) setRepMap(new Map(all.flat()));
+    })();
     return () => { stop = true; };
   }, [repIds.join(','), wPlant, data?.generatedAt]); // eslint-disable-line react-hooks/exhaustive-deps
   const rep = useMemo(() => {
@@ -386,6 +391,20 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
               <b>{t.open > 0 ? `${fmt(t.open)} line${t.open === 1 ? '' : 's'} still open` : 'All lines are done 🎉'}</b>
               <span>{compact(t.dispatched)} of {compact(t.qty)} QTY picked · {fmt(t.done)} of {fmt(t.lines)} lines done</span>
               <div className="gl-bar"><i style={{ width: `${linePct}%` }} /></div>
+            </div>
+            {/* v177: what is on screen — the chosen date and Pick (day plan), or the week and plant (week plan) */}
+            <div className="gl-sel" aria-label="Selected plan">
+              {isDay ? (
+                <>
+                  <span className="gl-sel-i"><small>Date</small><b>{data?.day ? dayLabel(data.day) : '–'}</b>{data?.day === today && <em>Today</em>}</span>
+                  <span className="gl-sel-i"><small>Pick</small><b>{data?.week && roundOf(data.week) ? roundLabel(data.week) : 'All picks of the day'}</b></span>
+                </>
+              ) : (
+                <>
+                  <span className="gl-sel-i"><small>Week</small><b>{data?.week ? weekLabel(data.week) : '–'}</b></span>
+                  <span className="gl-sel-i"><small>Plant</small><b>{wPlant ? plantLabel(wPlant) : 'All plants'}</b></span>
+                </>
+              )}
             </div>
             <div className="gl-actions">
               {canEdit && ready > 0 && <Link className="gl-act ok" href="/dispatch/"><b>{fmt(ready)}</b><span>Ready to pull — pick now</span></Link>}

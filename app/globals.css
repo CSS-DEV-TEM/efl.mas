@@ -829,7 +829,7 @@ tr.on-hold td { background: color-mix(in srgb, #ef4444 9%, transparent); }
 @media (prefers-reduced-motion: reduce) { .run-dot, .run-bar i, .run-list li { animation: none; } }
 
 /* Dashboard: at a glance (components/Dashboard) */
-.glance { display: grid; grid-template-columns: auto minmax(200px, 1fr) auto; gap: 18px; align-items: center; margin: 12px 0; padding: 14px 18px; border: 1px solid var(--line); border-radius: 14px; background: linear-gradient(120deg, var(--panel) 0%, var(--panel-2) 100%); animation: fadein .3s ease-out; }
+.glance { display: grid; grid-template-columns: auto minmax(200px, 1fr) auto auto; gap: 18px; align-items: center; margin: 12px 0; padding: 14px 18px; border: 1px solid var(--line); border-radius: 14px; background: linear-gradient(120deg, var(--panel) 0%, var(--panel-2) 100%); animation: fadein .3s ease-out; }
 .gl-ring { position: relative; width: 92px; height: 92px; }
 .gl-track { fill: none; stroke: var(--line); stroke-width: 8; }
 .gl-fill { fill: none; stroke: var(--ok, #2fa86a); stroke-width: 8; stroke-linecap: round; transition: stroke-dasharray .8s ease; }
@@ -853,6 +853,13 @@ tr.on-hold td { background: color-mix(in srgb, #ef4444 9%, transparent); }
 .gl-act.bad { border-color: color-mix(in srgb, #e5484d 60%, transparent); }
 .gl-act.bad b { color: #e5484d; }
 @media (max-width: 860px) { .glance { grid-template-columns: auto 1fr; } .gl-actions { grid-column: 1 / -1; justify-content: flex-start; } }
+/* v177: the chosen date + Pick (day plan) / week + plant (week plan) in the at-a-glance band */
+.gl-sel { display: flex; gap: 10px; align-items: stretch; }
+.gl-sel-i { display: grid; gap: 2px; padding: 8px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); min-width: 120px; }
+.gl-sel-i small { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-2); }
+.gl-sel-i b { font-size: 16px; white-space: nowrap; }
+.gl-sel-i em { font-style: normal; font-size: 11px; color: var(--ok); font-weight: 600; }
+@media (max-width: 860px) { .gl-sel { grid-column: 1 / -1; flex-wrap: wrap; } }
 @media (prefers-reduced-motion: reduce) { .glance, .gl-fill, .gl-bar i, .gl-act { animation: none; transition: none; } }
 
 /* Plan report (components/PlanReport) */

@@ -3,9 +3,9 @@
 export const API_URL = (process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8787').replace(/\/+$/, '');
 
 /** The Worker version this website needs (see API_VERSION in worker/src/index.ts). */
-export const NEEDS_API = 118;
+export const NEEDS_API = 119;
 /** This website's release (shown in the header and footer; the Worker's API version is shown next to it). */
-export const APP_VERSION = 'v176';
+export const APP_VERSION = 'v177';
 
 export type Role = 'admin' | 'head' | 'editor' | 'viewer';
 /** How each role is called on screen (the "editor" role is a planner's user account). */
@@ -89,7 +89,8 @@ async function apiCall<T>(path: string, opts: { method?: string; body?: unknown 
         headers: { 'Content-Type': 'application/json', 'X-Div': getDiv(), ...(s ? { Authorization: 'Bearer ' + s.token } : {}) },
         body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
       });
-      if (get && res.status === 503 && attempt < 2) { await new Promise((r) => setTimeout(r, 700 * (attempt + 1))); continue; }
+      // v177: the database busy for a moment ("D1 overloaded" → 503): wait a little longer each time and ask again
+      if (get && res.status === 503 && attempt < 4) { await new Promise((r) => setTimeout(r, 800 * 2 ** attempt + Math.random() * 400)); continue; }
       break;
     } catch {
       if (get && attempt < 2) { await new Promise((r) => setTimeout(r, 700 * (attempt + 1))); continue; }

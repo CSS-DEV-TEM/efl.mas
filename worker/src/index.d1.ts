@@ -686,7 +686,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 118; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 119; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1560,6 +1560,12 @@ async function tnUrOf(env: Env, senv: Env, rid: string, keys: string[]): Promise
 
 async function handlePlanReport(env: Env, req: Request) {
   await requireUser(env, req);
+  // v177: kept until the data changes (an upload / plan / settings change, or a pick of one of its Materials) — the dashboard asks
+  // for every Pick of the day at once, and working them all out together overloaded D1
+  const sp = new URL(req.url).searchParams;
+  return json(await revCached(env, `prep|${sp.get('rid') || ''}|${String(sp.get('plant') || '').trim().toUpperCase()}`, [], () => planReportOf(env, req)));
+}
+async function planReportOf(env: Env, req: Request) {
   const sp0 = new URL(req.url).searchParams;
   const rid = String(sp0.get('rid') || '');
   // a Pick (day plan round) or a week plan (2026-W43, optionally one plant of it)
@@ -1614,9 +1620,9 @@ async function handlePlanReport(env: Env, req: Request) {
   });
   const sum = (f: (r: typeof rows[number]) => number) => r3(rows.reduce((t0, r) => t0 + f(r), 0));
   const weekPlants = isWeek ? (await env.DB.prepare("SELECT DISTINCT upper(COALESCE(plant, '')) p FROM plan WHERE week = ? AND plan_type = 'week' ORDER BY 1").bind(rid).all<{ p: string }>()).results.map((x) => x.p).filter(Boolean) : [];
-  return json({ rid, name, day: firstDay, plant: plantCode || null, week: isWeek, plants: weekPlants, hasZmmbe: zm, hasSent, hasTrr, rows,
+  return ({ rid, name, day: firstDay, plant: plantCode || null, week: isWeek, plants: weekPlants, hasZmmbe: zm, hasSent, hasTrr, rows,
     totals: { lines: rows.length, qty: sum((r) => r.qty), avail: sum((r) => r.avail), sent: sum((r) => r.sent), pending: sum((r) => Math.max(0, r.pending)), possible: sum((r) => r.possible ?? 0),
-      possibleLines: rows.filter((r) => r.possible).length, qi: sum((r) => r.qi), block: sum((r) => r.block), tnLines: rows.filter((r) => r.tn).length, tnUr: sum((r) => r.tn_ur), picked: sum((r) => r.picked) } });
+      possibleLines: rows.filter((r) => r.possible).length, qi: sum((r) => r.qi), block: sum((r) => r.block), tnLines: rows.filter((r) => r.tn).length, tnUr: sum((r) => r.tn_ur), picked: sum((r) => r.picked) } } as Record<string, unknown>);
 }
 
 async function handleZroll(env: Env, req: Request) {
@@ -4302,6 +4308,19 @@ const candCacheReady = new Set<string>();
  * A pick made while the result was being worked out (its stamp is newer than the start) is never kept. 15 minutes at most.
  */
 const ITEM_RE = /"item":"([^"]*)"/g;
+/** v177: D1 errors that only mean "busy for a moment" — answered 503 so the website asks again */
+const D1_BUSY = /overloaded|queued for too long|too many requests queued|object to be reset|Network connection lost|D1_ERROR: internal error|Please retry/i;
+/** v177: at most HEAVY_MAX of the big dashboard reads at a time in one Worker isolate; the rest wait in line */
+const HEAVY_GET = new Set(['/api/pullplan', '/api/plan-report', '/api/status']);
+const HEAVY_MAX = 3;
+let heavyN = 0;
+const heavyQ: (() => void)[] = [];
+async function heavyGate(): Promise<() => void> {
+  if (heavyN >= HEAVY_MAX) await new Promise<void>((r) => heavyQ.push(r));
+  heavyN++;
+  let done = false;
+  return () => { if (done) return; done = true; heavyN--; const nx = heavyQ.shift(); if (nx) nx(); };
+}
 async function revCached<T>(env: Env, id: string, base: string[], make: () => Promise<T>): Promise<T> {
   try {
     if (!candCacheReady.has(env.DIV || 'active')) { await env.DB.batch([env.DB.prepare('CREATE TABLE IF NOT EXISTS cand_cache (k TEXT PRIMARY KEY, rev TEXT NOT NULL, at TEXT NOT NULL, v TEXT NOT NULL)'), env.DB.prepare('CREATE INDEX IF NOT EXISTS cand_cache_at ON cand_cache(at)')]); candCacheReady.add(env.DIV || 'active'); }
@@ -6134,9 +6153,12 @@ export default {
     if (env.DB) env = { ...env, DB: meterDb(env.DB, meter) };
     const cors = corsHeaders(env, req);
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
+    let heavyRelease: (() => void) | null = null;
 
     try {
       const p = url.pathname.replace(/\/+$/, '');
+      // v177: the big dashboard reads wait their turn (a few at a time in this Worker) so D1 is not flooded at once
+      if (req.method === 'GET' && HEAVY_GET.has(p)) heavyRelease = await heavyGate();
       if (p !== '/api/health' && !env.DB) throw new HttpError(500, 'The D1 database is not bound to the Worker as DB (Settings → Bindings).');
       // which system: MAS Active (DB) or MAS Kreeda (DB_KREEDA); users and logins always come from DB
       {
@@ -6353,11 +6375,13 @@ export default {
       liveAdd(rawDb, meter, ctx, epOf(req.method, p));
       return new Response(res.body, { status: res.status, headers: h });
     } catch (e) {
-      const status = e instanceof HttpError ? e.status : 500;
-      const message = e instanceof Error ? e.message : 'Unexpected error.';
+      let status = e instanceof HttpError ? e.status : 500;
+      let message = e instanceof Error ? e.message : 'Unexpected error.';
+      // v177: D1 busy for a moment (overloaded / queued too long / reset): 503 — the website waits a little and asks again
+      if (status === 500 && D1_BUSY.test(message)) { status = 503; message = 'The database is busy for a moment — please try again.'; }
       if (status === 500) console.error(e);
-      return new Response(JSON.stringify({ error: message }), { status, headers: { 'Content-Type': 'application/json', ...cors } });
-    }
+      return new Response(JSON.stringify({ error: message, ...(status === 503 ? { busy: true } : {}) }), { status, headers: { 'Content-Type': 'application/json', ...(status === 503 ? { 'Retry-After': '2' } : {}), ...cors } });
+    } finally { heavyRelease?.(); }
   },
 };
 
