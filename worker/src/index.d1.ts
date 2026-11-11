@@ -686,7 +686,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 119; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 120; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1556,6 +1556,55 @@ async function tnUrOf(env: Env, senv: Env, rid: string, keys: string[]): Promise
     out.set(key, { tnUr, tns: Array.from(new Set(Array.from(m.keys()).map((u) => u.split('|')[0]))) });
   }
   return out;
+}
+
+/**
+ * v179: Plan_Format check — POST {keys: ["SO|LI|Item", …]} → every pick ever sent for those SO / LI / Items (not cancelled), roll by
+ * roll, with its Pick (day, Pick No, plan, Normal / Offsite), the Korber roll (Lot Number, Supplier Hu, Location) and SAP details
+ * (batch, ZINSR lot, Vendor Batch), and what was picked of each in all.
+ */
+async function handlePlanCheck(env: Env, req: Request) {
+  await requireUser(env, req);
+  const b = (await req.json()) as { keys?: string[] };
+  const keys = Array.from(new Set((b.keys || []).map((k) => String(k).split('|').map((x) => normId(x)).join('|')).filter((k) => k.split('|').every(Boolean)))).slice(0, 5000);
+  if (!keys.length) throw new HttpError(400, 'No SO / LI / Item Code in the file.');
+  let header: string[] = [];
+  try { header = JSON.parse(String((await env.DB.prepare("SELECT v FROM config WHERE k = 'korber_header'").first<{ v: string }>())?.v ?? '[]')); } catch { /* no header */ }
+  const hi = (...names: string[]) => header.findIndex((h) => names.includes(String(h ?? '').trim().toLowerCase()));
+  const iLoc = hi('location id'), iHu = hi('supplier hu'), iPo = hi('po number'), iAsn = hi('asn number'), iLot = hi('lot number');
+  const rows: Row[] = [];
+  for (let i = 0; i < keys.length; i += 400) {
+    const J = JSON.stringify(keys.slice(i, i + 400));
+    rows.push(...(await env.DB.prepare(`SELECT p.id, p.req_id, p.so, p.li, p.item, p.pallet, p.qty, p.roll_qty, p.partial, p.shade, p.lot, p.insp_lot, p.batch, p.note, p.by_user, p.at, p.day, p.korber, p.tn,
+        r.day AS req_day, r.pick_no, r.seq, r.week, r.plant, r.kind, r.closed, r.short, r.auto, r.match
+      FROM picks p JOIN pick_req r ON r.id = p.req_id
+      WHERE p.cancelled_at IS NULL AND r.cancelled_at IS NULL AND p.so || '|' || p.li || '|' || p.item IN (SELECT value FROM json_each(?))
+      ORDER BY p.so, p.li, p.item, r.day, p.id`).bind(J).all<Row>()).results);
+  }
+  // the Vendor Batch of each pick's ZINSR lot (kept with the pick), its SAP batch split
+  const vbOf = new Map<number, Map<string, string>>(), allocOf = new Map<number, Row[]>();
+  for (const r of rows) {
+    if (vbOf.has(Number(r.req_id))) continue;
+    let m: Row = {}; try { m = JSON.parse(String(r.match ?? '{}')); } catch { /* */ }
+    const vb = new Map<string, string>();
+    for (const z of [...((m.zinr as Row[]) || []), ...((m.lots as Row[]) || [])]) if (z.lot && z.vendor_batch) vb.set(String(z.lot).replace(/^0+/, ''), String(z.vendor_batch));
+    vbOf.set(Number(r.req_id), vb); allocOf.set(Number(r.req_id), (m.alloc as Row[]) || []);
+  }
+  const out = rows.map((r) => {
+    let raw: unknown[] = []; try { raw = JSON.parse(String(r.korber ?? '[]')); } catch { /* */ }
+    const kv = (i: number) => (i >= 0 && Array.isArray(raw) ? (raw[i] ?? null) : null);
+    const lots = String(r.insp_lot ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+    const vbm = vbOf.get(Number(r.req_id)) ?? new Map();
+    const al = (allocOf.get(Number(r.req_id)) ?? []).filter((a) => up(a.pallet) === up(r.pallet));
+    let tn: string | null = null; try { tn = r.tn ? String((JSON.parse(String(r.tn)) as Row).tn ?? '') || null : null; } catch { /* */ }
+    return { so: r.so, li: r.li, item: r.item, day: r.req_day ?? r.day, pick_no: r.pick_no ?? null, seq: r.seq, plan: r.week ? periodLabel(r.week) : null, plant: r.plant ?? null,
+      kind: r.kind || 'normal', auto: Number(r.auto) ? 1 : 0, pallet: r.pallet, qty: Number(r.qty), roll_qty: r.roll_qty === null ? null : Number(r.roll_qty), cut: Number(r.partial) ? 1 : 0,
+      lot: (kv(iLot) as string | null) ?? r.lot ?? null, hu: kv(iHu), location: kv(iLoc), po: kv(iPo), asn: kv(iAsn), shade: r.shade ?? null,
+      batch: al.length ? al.map((a) => `${normId(a.batch)}${al.length > 1 ? ` (${r3(Number(a.qty))})` : ''}`).join(', ') : String(r.batch ?? ''),
+      insp_lot: lots.join(', '), vendor_batch: Array.from(new Set(lots.map((l) => vbm.get(l.replace(/^0+/, ''))).filter(Boolean))).join(', ') || null,
+      tn, closed: Number(r.closed) ? Number(r.short) || 0 : null, by: r.by_user, at: r.at, note: r.note ?? null };
+  });
+  return json({ keys: keys.length, picks: out });
 }
 
 async function handlePlanReport(env: Env, req: Request) {
@@ -6281,6 +6330,7 @@ export default {
       else if (p === '/api/follow') res = await handleFollow(env, req);
       else if (p === '/api/zroll' && req.method === 'GET') res = await handleZroll(env, req);
       else if (p === '/api/plan-report' && req.method === 'GET') res = await handlePlanReport(env, req);
+      else if (p === '/api/plan-check' && req.method === 'POST') res = await handlePlanCheck(env, req);
       else if (p === '/api/week-plants' && req.method === 'GET') {
         // the plants of a week plan: lines, QTY and which reports each has uploaded for that week + plant
         await requireUser(env, req);
