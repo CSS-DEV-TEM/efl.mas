@@ -14,11 +14,21 @@ export interface SentPick {
   shade: string | null; batch: string; insp_lot: string; vendor_batch: string | null; tn: string | null; closed: number | null; by: string; at: string; note: string | null;
 }
 export type CheckStatus = 'Sent' | 'Partly sent' | 'Not sent';
+/** v180: a roll SAP inspected for the SO line (ZINSR lot → ZCMNTVIEW Barcode Number → Korber Pallet) and whether that pallet was picked */
+export type RollStatus = 'Picked' | 'Picked for another SO' | 'Not picked' | 'Not in Korber' | 'No barcode';
+export interface ZRoll {
+  key: string; so: string; li: string; item: string; lot: string; batch: string; vendor_batch: string | null; roll_no: string | null; barcode: string | null; roll_qty: number | null; shade: string | null;
+  pallet: string | null; korber_qty: number | null; korber_lot: string | null; location: string | null; picked: number; other: number;
+  picks: { so: string; li: string; qty: number; day: string | null; pick: string | null; kind: string }[]; status: RollStatus;
+}
+export const ROLL_STATUSES: RollStatus[] = ['Picked', 'Picked for another SO', 'Not picked', 'Not in Korber', 'No barcode'];
 export interface CheckLine {
   row: number; values: unknown[]; so: string; li: string; item: string; key: string; date: string; qty: number;
   sent: number; balance: number; status: CheckStatus; rolls: number; picks: number; days: string; last: string | null; keySent: number; repeat: boolean;
+  /** v180: the line's ZCMNTVIEW rolls: how many, picked for it, picked for another SO line, not picked */
+  zRolls: number; zPicked: number; zOther: number; zNot: number; rollStatus: string;
 }
-export interface CheckResult { file: string; sheet: string; header: string[]; dateCol: number; lines: CheckLine[]; picks: SentPick[]; at: string; by: string }
+export interface CheckResult { file: string; sheet: string; header: string[]; dateCol: number; lines: CheckLine[]; picks: SentPick[]; rolls: ZRoll[]; at: string; by: string }
 
 /** the same as the Worker's normId: trimmed, "123.0" → "123", leading zeros of a number off, short letter prefixes upper case */
 export function normId(v: unknown): string {
@@ -63,7 +73,9 @@ export async function checkPlan(file: File, by: string, step: (s: string) => voi
   const keys = Array.from(new Set(p.rows.map((r) => keyOf(r.values))));
   step(`Looking up the picks of ${keys.length} SO / LI / Item…`);
   const picks: SentPick[] = [];
-  for (let i = 0; i < keys.length; i += 1000) picks.push(...(await api<{ picks: SentPick[] }>('/api/plan-check', { method: 'POST', body: { keys: keys.slice(i, i + 1000) } })).picks);
+  const zrolls: ZRoll[] = [];
+  for (let i = 0; i < keys.length; i += 1000) { const r = await api<{ picks: SentPick[]; rolls?: ZRoll[] }>('/api/plan-check', { method: 'POST', body: { keys: keys.slice(i, i + 1000) } }); picks.push(...r.picks); zrolls.push(...(r.rolls || [])); }
+  const zBy = new Map<string, ZRoll[]>(); for (const z of zrolls) zBy.set(z.key, [...(zBy.get(z.key) ?? []), z]);
   const byKey = new Map<string, SentPick[]>();
   for (const x of picks) { const k = `${normId(x.so)}|${normId(x.li)}|${normId(x.item)}`; byKey.set(k, [...(byKey.get(k) ?? []), x]); }
   // the same SO / LI / Item more than once in the file: what was sent is given to its lines in order (each up to its QTY; the last takes the rest)
@@ -84,9 +96,15 @@ export async function checkPlan(file: File, by: string, step: (s: string) => voi
     const days = Array.from(new Set(xs.map((x) => x.day).filter(Boolean))).sort() as string[];
     return { row: r.row, values: r.values, so: normId(r.values[p.ix.so]), li: normId(r.values[p.ix.li]), item: normId(r.values[p.ix.item]), key, date: p.ix.date >= 0 ? dd(dateText(r.values[p.ix.date])) : '', qty,
       sent, balance, status, rolls: new Set(xs.map((x) => x.pallet)).size, picks: new Set(xs.map((x) => `${x.day}|${x.seq}|${x.plan}`)).size, days: days.map(dd).join(', '), last: days.length ? dd(days[days.length - 1]) : null,
-      keySent: r3(xs.reduce((t, x) => t + x.qty, 0)), repeat: (count.get(key) ?? 1) > 1 };
+      keySent: r3(xs.reduce((t, x) => t + x.qty, 0)), repeat: (count.get(key) ?? 1) > 1, ...rollsOf(zBy.get(key) ?? []) };
   });
-  return { file: file.name, sheet: p.sheet, header: p.header, dateCol: p.ix.date, lines, picks, at: new Date().toISOString(), by };
+  return { file: file.name, sheet: p.sheet, header: p.header, dateCol: p.ix.date, lines, picks, rolls: zrolls, at: new Date().toISOString(), by };
+}
+function rollsOf(zs: ZRoll[]) {
+  const zPicked = zs.filter((z) => z.status === 'Picked').length, zOther = zs.filter((z) => z.status === 'Picked for another SO').length;
+  const zNot = zs.length - zPicked - zOther;
+  const rollStatus = !zs.length ? 'No ZCMNTVIEW rolls' : zPicked === zs.length ? 'All rolls picked' : zPicked ? 'Some rolls picked' : 'No roll picked';
+  return { zRolls: zs.length, zPicked, zOther, zNot, rollStatus };
 }
 const dd = (d: string | null | undefined) => (d && /^\d{4}-\d{2}-\d{2}/.test(d) ? `${d.slice(8, 10)}-${d.slice(5, 7)}-${d.slice(0, 4)}` : String(d ?? ''));
 
@@ -126,16 +144,18 @@ export function checkWorkbook(res: CheckResult) {
   const U = XLSXS.utils;
   const wb = U.book_new();
   // 1. the Plan_Format as uploaded, with the check on the right
-  const add = ['Sent Status', 'Sent QTY', 'Balance to send', 'Rolls sent', 'Picks', 'Sent on (days)', 'Last sent'];
+  const add = ['Sent Status', 'Sent QTY', 'Balance to send', 'Rolls sent', 'Picks', 'Sent on (days)', 'Last sent', 'ZCMNTVIEW rolls', 'Rolls picked', 'Picked for another SO', 'Rolls not picked', 'Roll Status'];
   const n0 = res.header.length;
   const plan: AOA = [[...res.header.map((h) => h || null), ...add]];
   for (const l of res.lines) {
     const base = Array.from({ length: n0 }, (_, i) => (i === res.dateCol && l.values[i] !== null && l.values[i] !== '' ? dd(dateText(l.values[i])) : cellV(l.values[i])));
-    plan.push([...base, l.status, l.sent, l.balance, l.rolls || null, l.picks || null, l.days || null, l.last]);
+    plan.push([...base, l.status, l.sent, l.balance, l.rolls || null, l.picks || null, l.days || null, l.last, l.zRolls || null, l.zRolls ? l.zPicked : null, l.zOther || null, l.zRolls ? l.zNot : null, l.rollStatus]);
   }
   const stCol = n0;
-  U.book_append_sheet(wb, sheetOf(plan, 0, [...res.header.map((h) => Math.max(10, Math.min(28, String(h).length + 4))), 12, 11, 13, 10, 7, 30, 11],
-    (r, c) => (c === stCol ? ST[plan[r][stCol] as CheckStatus] ?? ST.cell : ST.cell), n0), res.sheet.slice(0, 31) || 'Plan');
+  const rsCol = n0 + add.length - 1;
+  const RS: Record<string, unknown> = { 'All rolls picked': ST.Sent, 'Some rolls picked': ST['Partly sent'], 'No roll picked': ST['Not sent'] };
+  U.book_append_sheet(wb, sheetOf(plan, 0, [...res.header.map((h) => Math.max(10, Math.min(28, String(h).length + 4))), 12, 11, 13, 10, 7, 30, 11, 11, 10, 12, 11, 18],
+    (r, c) => (c === stCol ? ST[plan[r][stCol] as CheckStatus] ?? ST.cell : c === rsCol ? RS[String(plan[r][rsCol])] ?? ST.cell : ST.cell), n0), res.sheet.slice(0, 31) || 'Plan');
   // 2. every roll that was sent
   const qtyOf = new Map<string, number>(); for (const l of res.lines) qtyOf.set(l.key, (qtyOf.get(l.key) ?? 0) + l.qty);
   const dh = ['SO', 'LI', 'Item Code', 'Plan QTY (file)', 'Pick date', 'Pick No', 'Pick (plan)', 'Plant', 'Type', 'Pallet', 'Korber Lot Number', 'Supplier Hu', 'Location Id', 'Po Number', 'Asn Number',
@@ -151,11 +171,24 @@ export function checkWorkbook(res: CheckResult) {
   }
   if (ord.length) det.push(['Total', null, null, null, null, null, null, null, null, `${new Set(ord.map((x) => x.pallet)).size} rolls`, null, null, null, null, null, r3(ord.reduce((t, x) => t + x.qty, 0))]);
   U.book_append_sheet(wb, sheetOf(det, 3, [13, 5, 12, 12, 11, 9, 24, 12, 13, 18, 18, 11, 14, 16, 18, 10, 9, 8, 7, 18, 14, 18, 13, 10, 10, 19, 40]), 'Sent Details');
+  // v180: 2b. every roll SAP inspected for the SO lines (ZINSR lot → ZCMNTVIEW Barcode Number → Korber Pallet): picked or not
+  const rh = ['SO', 'LI', 'Item Code', 'ZINSR Lot', 'SAP Batch', 'Vendor Batch', 'Roll No', 'Barcode Number (ZCMNTVIEW)', 'Roll Qty', 'Shade', 'Korber Pallet', 'Korber Lot Number', 'Korber Qty', 'Location Id',
+    'Roll Status', 'Picked for this SO', 'Picked for another SO', 'Picks (day · SO / LI · Qty · Pick)'];
+  const ra: AOA = [[`ROLL CHECK — ${res.file}`], ['Each SO line’s ZINSR lots → their ZCMNTVIEW rolls → Barcode Number = Korber Pallet: was that pallet picked? (cancelled picks left out)'], [], rh];
+  const RST: Record<RollStatus, unknown> = { Picked: ST.Sent, 'Picked for another SO': ST['Partly sent'], 'Not picked': ST['Not sent'], 'Not in Korber': ST['Not sent'], 'No barcode': ST.cell };
+  const zs = [...res.rolls].sort((a, b) => a.so.localeCompare(b.so) || Number(a.li) - Number(b.li) || a.item.localeCompare(b.item) || a.lot.localeCompare(b.lot) || String(a.roll_no).localeCompare(String(b.roll_no), undefined, { numeric: true }));
+  for (const z of zs) ra.push([z.so, Number(z.li) || z.li, Number(z.item) || z.item, z.lot, z.batch, z.vendor_batch, z.roll_no, z.barcode, z.roll_qty || null, z.shade, z.pallet, z.korber_lot, z.korber_qty, z.location,
+    z.status, z.picked || null, z.other || null, z.picks.map((x) => `${dd(x.day)} · ${x.so} / ${x.li} · ${r3(x.qty)}${x.pick ? ` · ${x.pick}` : ''}${x.kind === 'offsite' ? ' · Offsite' : ''}`).join('\n') || null]);
+  if (zs.length) U.book_append_sheet(wb, sheetOf(ra, 3, [13, 5, 12, 13, 12, 18, 8, 20, 9, 7, 20, 18, 10, 14, 20, 10, 12, 60], (r, c) => (c === 14 ? RST[ra[r][14] as RollStatus] ?? ST.cell : ST.cell)), 'Roll Check');
   // 3. summary
   const by = (s: CheckStatus) => res.lines.filter((l) => l.status === s);
   const sum: AOA = [[`PLAN_FORMAT CHECK — ${res.file}`], [`Sheet “${res.sheet}” · ${res.lines.length} lines · checked ${new Date(res.at).toLocaleString()} by ${res.by}`], [], ['Status', 'Lines', 'Plan QTY', 'Sent QTY', 'Balance to send']];
   for (const s of ['Sent', 'Partly sent', 'Not sent'] as CheckStatus[]) { const ls = by(s); sum.push([s, ls.length, r3(ls.reduce((t, l) => t + l.qty, 0)), r3(ls.reduce((t, l) => t + l.sent, 0)), r3(ls.reduce((t, l) => t + l.balance, 0))]); }
   sum.push(['Total', res.lines.length, r3(res.lines.reduce((t, l) => t + l.qty, 0)), r3(res.lines.reduce((t, l) => t + l.sent, 0)), r3(res.lines.reduce((t, l) => t + l.balance, 0))]);
+  if (res.rolls.length) {
+    sum.push([], ['Roll check (ZCMNTVIEW Barcode → Korber Pallet)', 'Rolls', 'Korber Qty']);
+    for (const s0 of ROLL_STATUSES) { const zz = res.rolls.filter((z) => z.status === s0); if (zz.length) sum.push([s0, zz.length, r3(zz.reduce((t, z) => t + (z.korber_qty || 0), 0))]); }
+  }
   const rep = res.lines.filter((l) => l.repeat).length;
   if (rep) sum.push([], [`${rep} lines have the same SO / LI / Item Code as another line of the file: what was sent is given to them in file order, each up to its QTY.`]);
   U.book_append_sheet(wb, sheetOf(sum, 3, [16, 9, 12, 12, 15], (r, c) => (c === 0 && r > 3 && r < 7 ? ST[sum[r][0] as CheckStatus] ?? ST.cell : ST.cell)), 'Summary');

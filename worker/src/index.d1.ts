@@ -686,7 +686,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 120; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 121; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1604,7 +1604,56 @@ async function handlePlanCheck(env: Env, req: Request) {
       insp_lot: lots.join(', '), vendor_batch: Array.from(new Set(lots.map((l) => vbm.get(l.replace(/^0+/, ''))).filter(Boolean))).join(', ') || null,
       tn, closed: Number(r.closed) ? Number(r.short) || 0 : null, by: r.by_user, at: r.at, note: r.note ?? null };
   });
-  return json({ keys: keys.length, picks: out });
+  // v180: the rolls SAP inspected for each SO line — ZINSR lots of the SO / LI / Item → their ZCMNTVIEW rolls → Barcode Number = the Korber
+  // Pallet (or the same roll with a prefix) → was that pallet picked (for this SO line, or for another one)?
+  const lotRows: Row[] = [];
+  for (let i = 0; i < keys.length; i += 400) {
+    lotRows.push(...(await env.DB.prepare(`SELECT DISTINCT so, li, material, lot, batch, vendor_batch, qty FROM zinr WHERE so || '|' || li || '|' || material IN (SELECT value FROM json_each(?))`).bind(JSON.stringify(keys.slice(i, i + 400))).all<Row>()).results);
+  }
+  const lotKey = new Map<string, Row>();
+  for (const l of lotRows) if (!lotKey.has(String(l.lot) + '|' + `${l.so}|${l.li}|${l.material}`)) lotKey.set(String(l.lot) + '|' + `${l.so}|${l.li}|${l.material}`, l);
+  const lots = Array.from(new Set(lotRows.map((l) => String(l.lot))));
+  const zc: Row[] = [];
+  for (let i = 0; i < lots.length; i += 400) {
+    zc.push(...(await env.DB.prepare('SELECT DISTINCT lot, batch, vendor_batch, roll_no, barcode, roll_qty, shade FROM zcoment WHERE lot IN (SELECT value FROM json_each(?))').bind(JSON.stringify(lots.slice(i, i + 400))).all<Row>()).results);
+  }
+  const bcs = Array.from(new Set(zc.map((z) => up(z.barcode)).filter(Boolean)));
+  const cores = Array.from(new Set(bcs.map((b0) => palletCore(b0)).filter(Boolean))) as string[];
+  const kRows: Row[] = [];
+  for (let i = 0; i < bcs.length; i += 400) kRows.push(...(await env.DB.prepare('SELECT pallet, pcore, item, lot, qty, location, supplier_hu FROM korber WHERE pallet IN (SELECT value FROM json_each(?))').bind(JSON.stringify(bcs.slice(i, i + 400))).all<Row>()).results);
+  for (let i = 0; i < cores.length; i += 400) kRows.push(...(await env.DB.prepare('SELECT pallet, pcore, item, lot, qty, location, supplier_hu FROM korber WHERE pcore IN (SELECT value FROM json_each(?))').bind(JSON.stringify(cores.slice(i, i + 400))).all<Row>()).results);
+  // the picks of those pallets (any SO line), and of the barcodes themselves
+  const pals = Array.from(new Set([...bcs, ...kRows.map((k) => up(k.pallet))]));
+  const pk: Row[] = [];
+  for (let i = 0; i < pals.length; i += 400) {
+    pk.push(...(await env.DB.prepare(`SELECT p.pallet, p.so, p.li, p.item, p.qty, r.day, r.pick_no, r.seq, r.week, r.kind FROM picks p JOIN pick_req r ON r.id = p.req_id
+      WHERE p.cancelled_at IS NULL AND r.cancelled_at IS NULL AND upper(p.pallet) IN (SELECT value FROM json_each(?)) ORDER BY r.day, p.id`).bind(JSON.stringify(pals.slice(i, i + 400))).all<Row>()).results);
+  }
+  const pkBy = new Map<string, Row[]>(); for (const x of pk) { const k0 = up(x.pallet); pkBy.set(k0, [...(pkBy.get(k0) ?? []), x]); }
+  const rolls: Row[] = [];
+  const seenR = new Set<string>();
+  for (const [lk, l] of lotKey) {
+    const key = `${l.so}|${l.li}|${l.material}`;
+    for (const z of zc.filter((x) => String(x.lot) === String(l.lot))) {
+      const bc = up(z.barcode);
+      const id = `${key}|${l.lot}|${bc || up(z.roll_no)}`;
+      if (seenR.has(id)) continue; seenR.add(id);
+      const pc = bc ? palletCore(bc) : null;
+      // the Korber roll: the Barcode Number, else the same roll with a prefix of the same item
+      const k = bc ? kRows.find((x) => up(x.pallet) === bc) ?? (pc ? kRows.find((x) => x.pcore === pc && normId(x.item) === normId(l.material)) : undefined) : undefined;
+      const pallet = k ? up(k.pallet) : bc || null;
+      const ps = pallet ? [...(pkBy.get(pallet) ?? []), ...(bc && bc !== pallet ? pkBy.get(bc) ?? [] : [])] : [];
+      const mine = ps.filter((x) => `${normId(x.so)}|${normId(x.li)}|${normId(x.item)}` === key);
+      const other = ps.filter((x) => !mine.includes(x));
+      const status = !bc ? 'No barcode' : mine.length ? 'Picked' : other.length ? 'Picked for another SO' : k ? 'Not picked' : 'Not in Korber';
+      rolls.push({ key, so: l.so, li: l.li, item: l.material, lot: l.lot, batch: normId(z.batch ?? l.batch), vendor_batch: z.vendor_batch ?? l.vendor_batch ?? null, roll_no: z.roll_no ?? null, barcode: bc || null,
+        roll_qty: z.roll_qty === null ? null : Number(z.roll_qty), shade: z.shade ?? null, pallet: k ? up(k.pallet) : null, korber_qty: k ? Number(k.qty) : null, korber_lot: k?.lot ?? null, location: k?.location ?? null,
+        picked: r3(mine.reduce((t, x) => t + Number(x.qty), 0)), other: r3(other.reduce((t, x) => t + Number(x.qty), 0)),
+        picks: ps.map((x) => ({ so: x.so, li: x.li, qty: Number(x.qty), day: x.day, pick: x.pick_no || (x.week ? periodLabel(x.week) : null), kind: x.kind || 'normal' })), status });
+    }
+    void lk;
+  }
+  return json({ keys: keys.length, picks: out, rolls, lots: lotRows.length });
 }
 
 async function handlePlanReport(env: Env, req: Request) {
