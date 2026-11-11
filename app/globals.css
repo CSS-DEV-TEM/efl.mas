@@ -1487,3 +1487,12 @@ p.si-line { margin: 2px 0 0; }
 .pc-tile.on { outline: 2px solid var(--accent); outline-offset: -1px; }
 .pc-click { cursor: pointer; }
 .pc-detail > td { background: var(--panel-2); padding: 6px 10px 10px; }
+
+/* v181: Pick diagnosis */
+.pd-why { margin: 0; padding-left: 16px; display: grid; gap: 3px; }
+.pd-si { font-family: "Noto Sans Sinhala", "Iskoola Pota", system-ui, sans-serif; font-size: 13px; line-height: 1.5; }
+.pd-table td { vertical-align: top; }
+.pd-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+.pd-grid ul { margin: 4px 0 0; padding-left: 16px; }
+.pd-table td.pd-si, .pd-table td.small { white-space: normal; min-width: 420px; }
+.pd-table .pd-why li { white-space: normal; }

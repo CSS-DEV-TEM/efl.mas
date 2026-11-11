@@ -3,7 +3,8 @@ import { useMemo, useRef, useState } from 'react';
 import Shell, { useShell } from '@/components/Shell';
 import { fmt, fmtQty } from '@/lib/calc';
 import { keepFile } from '@/lib/files';
-import { checkBytes, checkPlan, checkWorkbook, type CheckResult, type CheckStatus, type RollStatus } from '@/lib/plancheck';
+import { checkBytes, checkPlan, checkWorkbook, normId, readPlan, type CheckResult, type CheckStatus, type RollStatus } from '@/lib/plancheck';
+import { diagnose, diagWorkbook, explain, loc, type DiagLine, type DiagStatus } from '@/lib/plandiag';
 
 export default function Page() {
   return <Shell><PlanCheckPage /></Shell>;
@@ -23,6 +24,33 @@ function PlanCheckPage() {
   const [st, setSt] = useState<CheckStatus | 'all'>('all');
   const [q, setQ] = useState('');
   const [open, setOpen] = useState<string | null>(null);
+  // v181: pick diagnosis — why each line can / cannot be picked (Sinhala and English)
+  const [diag, setDiag] = useState<DiagLine[] | null>(null);
+  const [dBusy, setDBusy] = useState('');
+  const [dOpen, setDOpen] = useState<string | null>(null);
+  const [dSt, setDSt] = useState<DiagStatus | 'all'>('all');
+  const [lang, setLang] = useState<'si' | 'en'>('si');
+  async function runDiag() {
+    if (!file) { setErr('Choose the Plan_Format file first.'); return; }
+    setErr(''); setDiag(null); setDOpen(null);
+    try {
+      setDBusy('Reading the Plan_Format…');
+      const p = await readPlan(file);
+      const seen = new Set<string>();
+      const ls = p.rows.map((r) => ({ so: normId(r.values[p.ix.so]), li: normId(r.values[p.ix.li]), item: normId(r.values[p.ix.item]), qty: p.ix.qty >= 0 ? Number(r.values[p.ix.qty]) || 0 : 0 }))
+        .filter((l) => { const k = `${l.so}|${l.li}|${l.item}`; if (seen.has(k)) return false; seen.add(k); return true; });
+      setDiag(await diagnose(ls, (n) => setDBusy(`Checking the lines… ${n} / ${ls.length}`)));
+    } catch (e) { setErr(e instanceof Error ? e.message : 'The diagnosis failed.'); }
+    finally { setDBusy(''); }
+  }
+  function downloadDiag() {
+    if (!diag || !file) return;
+    const bytes = diagWorkbook(file.name, diag, user.username);
+    const blob = new Blob([bytes as BlobPart], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${file.name.replace(/\.[^.]+$/, '')}_Pick_Diagnosis.xlsx`; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  }
+  const dx = useMemo(() => (diag || []).map((d) => ({ d, x: explain(d) })), [diag]);
   const last = useRef<{ bytes: Uint8Array; name: string } | null>(null);
 
   async function run(f = file) {
@@ -82,6 +110,67 @@ function PlanCheckPage() {
           {busy && <span className="muted">{busy}</span>}
         </div>
         {err && <div className="notice bad" style={{ marginTop: 12 }}>{err}</div>}
+      </section>
+
+      <section className="card">
+        <h2 style={{ marginTop: 0 }}>🩺 Pick diagnosis — pick නොවෙන්නේ ඇයි?</h2>
+        <p className="muted" style={{ marginTop: 0 }}>
+          Plan_Format එකේ හැම line එකක්ම Pick &amp; Dispatch එකේ roll matching එකෙන්ම check කරලා, <b>pick වෙනවද, නැත්නම් ඇයි, මොකක්ද කරන්න ඕනේ</b> කියලා සිංහලෙන් පෙන්නනවා
+          (ZMMBE UR / QI / Block, ZINSR lot, ZCMNTVIEW barcode → Korber, ZROLLMGT bin / status). System එකට upload කරලා තියෙන reports පාවිච්චි කරනවා —
+          line එක plan එකක තියෙනවා නම් ඒ Pick එකේ reports, නැත්නම් shared reports. Reports අලුත් කරන්න <a href="/upload/">Uploads</a> එකට යන්න.
+        </p>
+        <div className="row" style={{ gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+          <button className="btn primary" disabled={!!dBusy || !!busy || !file} onClick={() => void runDiag()}>{dBusy ? 'Checking…' : '🩺 Check why (සිංහලෙන්)'}</button>
+          {diag && <button className="btn" onClick={downloadDiag}>⤓ Download diagnosis (Excel)</button>}
+          {diag && <div className="seg" role="group" aria-label="Language"><button className={lang === 'si' ? 'on' : ''} onClick={() => setLang('si')}>සිංහල</button><button className={lang === 'en' ? 'on' : ''} onClick={() => setLang('en')}>English</button></div>}
+          {dBusy && <span className="muted">{dBusy}</span>}
+          {!file && <span className="muted small">මුලින් Plan_Format file එක තෝරන්න.</span>}
+        </div>
+        {diag && (() => {
+          const cnt = (s: DiagStatus) => dx.filter((y) => y.x.status === s).length;
+          const LBL: Record<DiagStatus, [string, string]> = { ok: ['Pick වෙනවා', 'ok'], part: ['කොටසක් විතරයි', 'warn'], none: ['Pick වෙන්නේ නෑ', 'bad'], done: ['Pick කරන්න දෙයක් නෑ', 'mute'] };
+          const shownD = dx.filter((y) => dSt === 'all' || y.x.status === dSt);
+          return (
+            <>
+              <div className="pc-tiles">
+                <button type="button" className={`pc-tile${dSt === 'all' ? ' on' : ''}`} onClick={() => setDSt('all')}><span className="k">All lines</span><span className="v">{fmt(dx.length)}</span><span className="s">QTY to pick {fmtQty(dx.reduce((t, y) => t + (y.d.need || 0), 0))}</span></button>
+                {(['ok', 'part', 'none', 'done'] as DiagStatus[]).map((s0) => (
+                  <button key={s0} type="button" className={`pc-tile ${LBL[s0][1]}${dSt === s0 ? ' on' : ''}`} onClick={() => setDSt(s0)}>
+                    <span className="k">{LBL[s0][0]}</span><span className="v">{fmt(cnt(s0))}</span>
+                    <span className="s">auto pick {fmtQty(dx.filter((y) => y.x.status === s0).reduce((t, y) => t + (y.d.auto || 0), 0))}</span>
+                  </button>
+                ))}
+              </div>
+              <div className="table-wrap">
+                <table className="mini pd-table">
+                  <thead><tr><th>SO</th><th>LI</th><th>Item Code</th><th className="n">To pick</th><th className="n">UR</th><th className="n">Auto pick</th><th>Status</th><th>{lang === 'si' ? 'හේතුව / කරන්න ඕනේ දේ' : 'Reason / what to do'}</th></tr></thead>
+                  <tbody>
+                    {shownD.map(({ d, x }) => [
+                      <tr key={d.key} className="pc-click" onClick={() => setDOpen(dOpen === d.key ? null : d.key)} title="Details">
+                        <td className="mono">{d.so}</td><td>{d.li}</td><td className="mono">{d.item}</td>
+                        <td className="n">{fmtQty(d.need || 0)}</td><td className="n">{fmtQty(d.ur || 0)}</td><td className="n">{d.auto ? fmtQty(d.auto) : ''}</td>
+                        <td><span className={`pill ${LBL[x.status][1]}`}>{x.label}</span></td>
+                        <td className={lang === 'si' ? 'pd-si' : 'small'}><ul className="pd-why">{(lang === 'si' ? x.si : x.en).map((t, i) => <li key={i}>{t}</li>)}</ul></td>
+                      </tr>,
+                      dOpen === d.key && (
+                        <tr key={d.key + 'd'} className="pc-detail"><td colSpan={8}>
+                          <div className="pd-grid">
+                            <div><b className="small">ZMMBE (St Location / Batch: UR · QI · Block)</b><ul className="small">{(d.stock || []).map((s0, i) => <li key={i}>{loc(s0.sloc)} / {s0.batch}: {fmtQty(s0.ur)} · {fmtQty(s0.qi)} · {fmtQty(s0.block)}{(d.plantLocs || []).map((p0) => p0.replace(/^0+/, '')).includes(s0.sloc.replace(/^0+/, '')) ? ' (plant — already sent)' : ''}</li>)}{!d.stock?.length && <li>none</li>}</ul></div>
+                            <div><b className="small">ZINSR lots</b><ul className="small">{(d.lots || []).map((l, i) => <li key={i}>{l.lot} · batch {l.batch} · {l.vendor_batch ?? '–'} · {fmtQty(l.qty)} · {loc(l.sloc)}</li>)}{!d.lots?.length && <li>none</li>}</ul></div>
+                            <div><b className="small">Not pickable rolls</b><ul className="small">{(d.blocked || []).map((b, i) => <li key={i}>{b.n} × {b.why}</li>)}{!d.blocked?.length && <li>none</li>}</ul></div>
+                          </div>
+                          <div className="small muted" style={{ marginTop: 6 }}>{d.found ? `Plan: ${d.found.plan}${d.found.date ? ` · ${d.found.date}` : ''}` : 'Not in a plan of the system — shared reports'}</div>
+                          <details style={{ marginTop: 6 }}><summary className="small">System steps (English)</summary><ul className="small">{(d.steps || []).map((t, i) => <li key={i}>{t}</li>)}</ul></details>
+                        </td></tr>
+                      ),
+                    ])}
+                  </tbody>
+                </table>
+              </div>
+              <p className="muted small">Line එක click කරලා ZMMBE, ZINSR lots සහ pick නොවෙන rolls බලන්න.</p>
+            </>
+          );
+        })()}
       </section>
 
       {res && sums && (

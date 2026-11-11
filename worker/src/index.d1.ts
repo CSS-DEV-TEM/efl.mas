@@ -686,7 +686,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 121; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 122; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1654,6 +1654,57 @@ async function handlePlanCheck(env: Env, req: Request) {
     void lk;
   }
   return json({ keys: keys.length, picks: out, rolls, lots: lotRows.length });
+}
+
+/**
+ * v181: why can (or can't) these lines be picked — POST {lines: [{so, li, item, qty}]} (at most 8 a call). Each line is worked out by the
+ * same roll matching as Pick & Dispatch, with the reports of its own Pick when the line is in a plan (else the shared reports), and
+ * comes back in short: the QTY that "Pick all matched" can take, the rolls that need a tick, the rolls that are not pickable and why,
+ * the ZINSR lots and the ZMMBE stock by St Location / batch. The website explains it (Sinhala and English).
+ */
+async function handlePlanDiagnose(env: Env, req: Request) {
+  await requireUser(env, req);
+  const b = (await req.json()) as { lines?: { so: unknown; li: unknown; item: unknown; qty?: unknown }[] };
+  const ls = (b.lines || []).slice(0, 8);
+  const out: Row[] = [];
+  for (const l0 of ls) {
+    const so = normId(l0.so), li = normId(l0.li), item = normId(l0.item), key = lineKey(so, li, item);
+    const r0: Row = { key, so, li, item, qty: num(l0.qty) };
+    try {
+      // the line in a plan of the system (the latest), else checked with the shared reports
+      const pl = await env.DB.prepare("SELECT week, key, date, plant, qty FROM plan WHERE key = ? ORDER BY COALESCE(date, '') DESC, rowid DESC LIMIT 1").bind(key).first<Row>();
+      const week = pl ? String(pl.week) : 'DIAG';
+      const date = pl ? String(pl.date ?? '') : '';
+      const line: Row = pl ? { so, li, item, qty: pl.qty, plant: pl.plant, date: pl.date } : { so, li, item, qty: r0.qty, plant: null, date: null };
+      const lrid = pl ? weekPlantRid(week, pl.plant) : '';
+      const senv = await envFor(env, lrid);
+      const c = await pickCandidates(senv, week, key, date, line, lrid) as unknown as Row;
+      const rolls = (c.rolls as Row[]) || [];
+      const need = r3(Math.max(0, Number(c.need) - Number(c.picked)));
+      const auto = r3(Math.min(need, rolls.filter((x) => !x.needsConfirm && !x.pool).reduce((t, x) => t + Number(x.available || 0), 0)));
+      const pool = r3(rolls.filter((x) => !x.needsConfirm && x.pool).reduce((t, x) => t + Number(x.available || 0), 0));
+      const confirm = rolls.filter((x) => x.needsConfirm);
+      const bl = new Map<string, { n: number; qty: number }>();
+      for (const x of (c.blocked as Row[]) || []) {
+        const w = String(x.why ?? '').replace(/^Barcode \S+ is not in Korber Inventory.*$/, 'Barcode not in Korber Inventory').replace(/^ZROLLMGT StorageBin .*/, 'ZROLLMGT StorageBin not allowed').replace(/^ZROLLMGT Status .*/, 'ZROLLMGT Status not UR')
+          .replace(/^ZINSR has no SO .*/, 'ZINSR has no SO / LI / batch').replace(/^Korber Pick Id .*/, 'Korber Pick Id not 0 (WMS pick)').replace(/^TRANSFER NOTE (\S+): /, 'TN: ');
+        const e = bl.get(w) ?? { n: 0, qty: 0 }; e.n++; e.qty = r3(e.qty + (Number(x.qty) || 0)); bl.set(w, e);
+      }
+      const st = (await senv.DB.prepare("SELECT sloc, batch, ur, qi, block FROM stock WHERE src = 'zmmbe' AND key = ? UNION ALL SELECT sloc, batch, ur, qi, block FROM stock_sent WHERE src = 'sent' AND key = ?").bind(key, key).all<Row>()).results;
+      const byLoc = new Map<string, Row>();
+      for (const x of st) { const k = `${normId(x.sloc)}|${normId(x.batch)}`; const e = byLoc.get(k) ?? { sloc: normId(x.sloc), batch: normId(x.batch), ur: 0, qi: 0, block: 0 }; e.ur = r3(Number(e.ur) + (Number(x.ur) || 0)); e.qi = r3(Number(e.qi) + (Number(x.qi) || 0)); e.block = r3(Number(e.block) + (Number(x.block) || 0)); byLoc.set(k, e); }
+      const st1 = await getSettings(env);
+      const zl = (await senv.DB.prepare('SELECT DISTINCT lot, batch, vendor_batch, qty, sloc FROM zinr WHERE so = ? AND li = ? AND material = ?').bind(so, li, item).all<Row>()).results;
+      out.push({ ...r0, found: pl ? { week, plan: periodLabel(week), date: pl.date ?? null } : null, need, picked: r3(Number(c.picked) || 0), planQty: Number(c.planQty ?? line.qty) || 0, ur: Number(c.ur) || 0, sent: Number(c.sent) || 0,
+        auto, pool, confirmN: confirm.length, confirmQty: r3(confirm.reduce((t, x) => t + Number(x.available || 0), 0)), confirmWhy: Array.from(new Set(confirm.flatMap((x) => (x.warnings as string[]) || []).map((w) => String(w).replace(/[\d.,]+/g, '#')))).slice(0, 3),
+        rolls: rolls.length, manualN: ((c.manual as Row[]) || []).length, nobarcodeN: ((c.nobarcode as Row[]) || []).length, trim: !!c.trim,
+        blocked: Array.from(bl, ([why, e]) => ({ why, n: e.n, qty: e.qty })).sort((a, b2) => b2.n - a.n),
+        lots: zl.map((z) => ({ lot: z.lot, batch: normId(z.batch), vendor_batch: z.vendor_batch, qty: Number(z.qty) || 0, sloc: normId(z.sloc) })),
+        stock: Array.from(byLoc.values()), plantLocs: st1.plantSlocs || [], tn: ((c.tn as Row[]) || []).map((t) => ({ tn: t.tn, qty: t.qty, picked: t.picked, ok: t.ok, why: t.why })),
+        steps: ((c.steps as string[]) || []).slice(0, 14) });
+    } catch (e) { out.push({ ...r0, error: e instanceof Error ? e.message : 'could not be checked' }); }
+  }
+  return json({ lines: out });
 }
 
 async function handlePlanReport(env: Env, req: Request) {
@@ -6380,6 +6431,7 @@ export default {
       else if (p === '/api/zroll' && req.method === 'GET') res = await handleZroll(env, req);
       else if (p === '/api/plan-report' && req.method === 'GET') res = await handlePlanReport(env, req);
       else if (p === '/api/plan-check' && req.method === 'POST') res = await handlePlanCheck(env, req);
+      else if (p === '/api/plan-diagnose' && req.method === 'POST') res = await handlePlanDiagnose(env, req);
       else if (p === '/api/week-plants' && req.method === 'GET') {
         // the plants of a week plan: lines, QTY and which reports each has uploaded for that week + plant
         await requireUser(env, req);
