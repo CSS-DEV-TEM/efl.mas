@@ -686,7 +686,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 122; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 124; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -3433,7 +3433,7 @@ async function handlePick(env: Env, req: Request, p: string) {
     // over it goes to another SO line — same Material and LI, the roll's System Batch with UR in ZMMBE, SO Plant = the Pick
     // plant's code, a ZINSR lot with the roll's Vendor Batch (= Korber Lot Number) and room in it — saved as a pick of that
     // SO line (its own SAP line). What no other SO line can take is checked as before (another batch of this line, else stop).
-    const moves: { pallet: string; t: Row; qty: number; info: Awaited<ReturnType<typeof tallyInfo>> }[] = [];
+    const moves: { pallet: string; t: Row; qty: number; info: Awaited<ReturnType<typeof tallyInfo>>; why?: string }[] = [];
     // ZINSR Insp. Lot Quantity per batch of this SO line and what it already took: read once for the checks below
     const lotQ0 = await batchLotQty(senv, line.so, line.li, line.item);
     const tk0 = lotQ0.size ? await batchTaken(env, line.so, line.li, line.item) : new Map<string, number>();
@@ -3476,11 +3476,43 @@ async function handlePick(env: Env, req: Request, p: string) {
         for (let i = picks.length - 1; i >= 0; i--) if (!(Number(picks[i].qty) > 1e-9)) picks.splice(i, 1);
       }
     }
+    // v182: a cut is never less than MIN_CUT (0.5): a roll cut for less than that is cut at 0.5 — what this SO line does not need of
+    // it goes to another SO line, as the cut roll balance tally does (same Material and LI, the roll's System Batch with UR, SO Plant,
+    // a ZINSR lot with the roll's Vendor Batch and room). No SO line can take it: the cut stays as it is (noted).
+    // v183: Normal and Offsite picks alike
+    {
+      const usedM = new Map<string, number>();
+      for (const x of picks) {
+        if (x.tn) continue; // a TRANSFER NOTE roll stays with its TN's SO line
+        const r = byPallet.get(String(x.pallet));
+        const q = Number(x.qty);
+        if (!r || !(q > 1e-9) || q >= MIN_CUT - 1e-9) continue;
+        const inThis = r3(picks.filter((p0) => p0.pallet === x.pallet).reduce((t, p0) => t + Number(p0.qty), 0)) + r3(moves.filter((m) => m.pallet === String(x.pallet)).reduce((t, m) => t + m.qty, 0));
+        const rest = r3(Number(r.available) - inThis);
+        if (!(rest > 1e-9)) continue; // the whole roll (not a cut)
+        let extra = r3(Math.min(MIN_CUT - q, rest));
+        const info = await tallyInfo(env, String(x.pallet), { week: b.week, plant: line.plant, so: line.so, li: line.li, item: line.item, batch: x.batch, day, line: lineId }, new Map());
+        if (info.k) for (const t of info.targets) {
+          if (extra <= 1e-9) break;
+          if (String(t.key) === String(b.key)) continue; // another SO line only
+          const used = usedM.get(String(t.key)) ?? 0;
+          const g = r3(Math.min(extra, Number(t.can) - used));
+          if (!(g > 1e-9)) continue;
+          usedM.set(String(t.key), r3(used + g));
+          moves.push({ pallet: String(x.pallet), t, qty: g, info, why: 'min' });
+          extra = r3(extra - g);
+        }
+        const given = r3(Math.min(MIN_CUT - q, rest) - extra);
+        x.note = [x.note, given > 1e-9
+          ? `Cut at ${r3(q + given)} (at least ${MIN_CUT}): ${r3(q)} for ${line.so} / ${line.li}, ${given} to ${moves.filter((m) => m.pallet === String(x.pallet) && m.why === 'min').map((m) => `${normId(String(m.t.key).split('|')[0])} / ${normId(String(m.t.key).split('|')[1])}`).join(', ')}`
+          : `Cut of ${r3(q)} is under ${MIN_CUT} — no other SO line can take the rest (same Material and LI, batch, ZINSR lot)`].filter(Boolean).join(' · ');
+      }
+    }
     const saveMoves = async (src: Row) => {
       const out: { pallet: string; so: string; li: string; qty: number; id: number }[] = [];
       for (const m of moves) {
         const [mso, mli] = String(m.t.key).split('|');
-        const note = `Batch lot full — roll ${m.pallet} picked for ${line.so} / ${line.li}: ${m.qty} to ${normId(mso)} / ${normId(mli)} (same Material and LI, SO Plant ${m.t.plant ?? '–'}, batch ${m.t.batch}, ZINSR lot ${(m.t.lots as Row[]).map((l) => l.lot).join(', ')}, Vendor Batch ${m.info.vb}) by ${s.u}`;
+        const note = m.why === 'min' ? `Cut at least ${MIN_CUT} — roll ${m.pallet} cut for ${line.so} / ${line.li} (under ${MIN_CUT}): ${m.qty} to ${normId(mso)} / ${normId(mli)} (same Material and LI, SO Plant ${m.t.plant ?? '–'}, batch ${m.t.batch})` : `Batch lot full — roll ${m.pallet} picked for ${line.so} / ${line.li}: ${m.qty} to ${normId(mso)} / ${normId(mli)} (same Material and LI, SO Plant ${m.t.plant ?? '–'}, batch ${m.t.batch}, ZINSR lot ${(m.t.lots as Row[]).map((l) => l.lot).join(', ')}, Vendor Batch ${m.info.vb}) by ${s.u}`;
         const id = await saveTallyPick(env, s.u, src, m.pallet, m.t, m.qty, m.info, note);
         out.push({ pallet: m.pallet, so: normId(mso), li: normId(mli), qty: m.qty, id });
       }
@@ -4457,6 +4489,8 @@ const candCacheReady = new Set<string>();
  * A pick made while the result was being worked out (its stamp is newer than the start) is never kept. 15 minutes at most.
  */
 const ITEM_RE = /"item":"([^"]*)"/g;
+/** v182: the smallest piece a roll is cut to (a smaller cut is cut at this, the rest tallied to another SO line) */
+const MIN_CUT = 0.5;
 /** v177: D1 errors that only mean "busy for a moment" — answered 503 so the website asks again */
 const D1_BUSY = /overloaded|queued for too long|too many requests queued|object to be reset|Network connection lost|D1_ERROR: internal error|Please retry/i;
 /** v177: at most HEAVY_MAX of the big dashboard reads at a time in one Worker isolate; the rest wait in line */
