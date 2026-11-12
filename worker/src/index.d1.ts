@@ -259,12 +259,14 @@ const BASE_SCHEMA = [
   'CREATE INDEX IF NOT EXISTS zcoment_tn ON zcoment(tn, rid)',
   'CREATE INDEX IF NOT EXISTS stock_sent_rid ON stock_sent(rid, key)',
   'CREATE INDEX IF NOT EXISTS zinr_doc ON zinr(mat_doc)',
+  'CREATE INDEX IF NOT EXISTS zinr_doc_rid ON zinr(mat_doc, rid)',
+  'CREATE INDEX IF NOT EXISTS zroll_doc_rid_doc ON zroll_doc(rid, mat_doc)',
   'CREATE INDEX IF NOT EXISTS zroll_doc_doc ON zroll_doc(mat_doc)',
   'CREATE INDEX IF NOT EXISTS zroll_doc_rid ON zroll_doc(rid)',
 ];
 /** per system (each has its own database) */
 const schemaDone = new Set<string>();
-const SCHEMA_V = '41';
+const SCHEMA_V = '42';
 async function ensureSchema(env: Env) {
   const dk = env.DIV || 'active';
   if (schemaDone.has(dk) || !env.DB) return;
@@ -525,7 +527,8 @@ async function ensureSchema(env: Env) {
   // v41 (v189): ZINSR Material Document and every ZROLLMGT row's Mat. Doc — a roll's inspection lot without ZCMNTVIEW
   try { await env.DB.prepare('ALTER TABLE zinr ADD COLUMN mat_doc TEXT').run(); } catch { /* already there */ }
   for (const q of ["CREATE TABLE IF NOT EXISTS zroll_doc (barcode TEXT NOT NULL, material TEXT, batch TEXT, vendor_batch TEXT, mat_doc TEXT, vendor_roll TEXT, roll_no TEXT, shade TEXT, rid TEXT NOT NULL DEFAULT '')",
-    'CREATE INDEX IF NOT EXISTS zinr_doc ON zinr(mat_doc)', 'CREATE INDEX IF NOT EXISTS zroll_doc_doc ON zroll_doc(mat_doc)', 'CREATE INDEX IF NOT EXISTS zroll_doc_rid ON zroll_doc(rid)']) {
+    'CREATE INDEX IF NOT EXISTS zinr_doc ON zinr(mat_doc)', 'CREATE INDEX IF NOT EXISTS zroll_doc_doc ON zroll_doc(mat_doc)', 'CREATE INDEX IF NOT EXISTS zroll_doc_rid ON zroll_doc(rid)',
+    'CREATE INDEX IF NOT EXISTS zinr_doc_rid ON zinr(mat_doc, rid)', 'CREATE INDEX IF NOT EXISTS zroll_doc_rid_doc ON zroll_doc(rid, mat_doc)']) {
     try { await env.DB.prepare(q).run(); } catch { /* already there */ }
   }
   await env.DB.prepare("INSERT INTO config (k, v) VALUES ('schema_v', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(SCHEMA_V).run();
@@ -585,6 +588,8 @@ async function scopeOf(env: Env, rid: unknown): Promise<Scope> {
   const ups = (await env.DB.prepare('SELECT src, MAX(uploaded_at) at FROM uploads WHERE rid = ? GROUP BY src').bind(String(rid)).all<{ src: string; at: string }>()).results;
   const own = new Set(ups.map((x) => x.src));
   const r = String(rid);
+  // v194: the rows worked out from this Pick's ZROLLMGT / ZINSR (Mat. Doc) are this Pick's ZCOMENT rows
+  if (!own.has('zcoment') && (own.has('zroll') || own.has('zinr')) && (await env.DB.prepare("SELECT 1 FROM zcoment WHERE rid = ? AND accept = 'ZROLLMGT' LIMIT 1").bind(r).first())) own.add('zcoment');
   // the Korber: the Pick's own when it was uploaded after the All-Picks one, else the All-Picks one (while it lives)
   const ownK = ups.find((x) => x.src === 'korber')?.at ?? null;
   const korber = allAt && (!ownK || allAt >= ownK) ? ALL_RID : ownK ? r : '';
@@ -696,7 +701,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 129; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 130; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1874,7 +1879,7 @@ async function handleRounds(env: Env, req: Request) {
         // balance lines of this Pick's lines in other Picks: they stay as lines of their own
         env.DB.prepare("UPDATE plan SET follow_of = NULL WHERE follow_of LIKE ? || '|%'").bind(rid),
       ] : []),
-      ...['stock', 'stock_sent', 'zinr', 'zcoment', 'korber', 'zroll', 'ztrr', 'uploads'].map((t) => env.DB.prepare(`DELETE FROM ${t} WHERE rid = ?`).bind(rid)),
+      ...['stock', 'stock_sent', 'zinr', 'zcoment', 'korber', 'zroll', 'zroll_doc', 'ztrr', 'uploads'].map((t) => env.DB.prepare(`DELETE FROM ${t} WHERE rid = ?`).bind(rid)),
       env.DB.prepare("DELETE FROM line_status WHERE key LIKE ? || '#%'").bind(rid),
       env.DB.prepare('DELETE FROM plan WHERE week = ?').bind(rid),
       env.DB.prepare('DELETE FROM pick_round WHERE rid = ?').bind(rid),
@@ -2772,6 +2777,8 @@ async function handlePick(env: Env, req: Request, p: string) {
         const r = await env.DB.prepare(`DELETE FROM ${t} WHERE rid = ?`).bind(rid).run();
         deleted[t] = (deleted[t] ?? 0) + Number(r.meta?.changes ?? 0);
       }
+      // v194: the Mat. Doc rows of those Picks' ZROLLMGT go with them
+      for (const rid of rids) await env.DB.prepare('DELETE FROM zroll_doc WHERE rid = ?').bind(rid).run();
       const J = JSON.stringify(rids);
       const fr = await env.DB.batch([
         env.DB.prepare("DELETE FROM upload_file_part WHERE file_id IN (SELECT id FROM upload_file WHERE rid IN (SELECT value FROM json_each(?)) AND srcs <> 'dayend')").bind(J),
@@ -2924,7 +2931,18 @@ async function handlePick(env: Env, req: Request, p: string) {
     if (rid === ALL_RID) allKorber.delete(env.DIV || 'active');
     // v189: the rolls ZCMNTVIEW does not list get their inspection lot from ZROLLMGT Mat. Doc = ZINSR Material Document
     let derived: number | null = null;
-    if (b.src === 'zroll' || b.src === 'zinr' || b.src === 'zcoment') derived = await deriveZcoment(env).catch((e) => { console.log('deriveZcoment', String(e)); return null; });
+    if (b.src === 'zroll' || b.src === 'zinr' || b.src === 'zcoment') {
+      // this Pick (or the shared rows); a shared ZROLLMGT / ZINSR also feeds the last week's Picks that have only the other one
+      const rids = [rid];
+      if (!rid && b.src !== 'zcoment') {
+        const since = new Date(Date.now() - 7 * 86400000).toISOString();
+        rids.push(...(await env.DB.prepare("SELECT DISTINCT rid FROM uploads WHERE rid <> '' AND src IN ('zinr', 'zroll') AND uploaded_at > ? LIMIT 40").bind(since).all<Row>()).results.map((x) => String(x.rid)));
+      }
+      for (const r0 of Array.from(new Set(rids))) {
+        const n = await deriveZcoment(env, r0).catch((e) => { console.log('deriveZcoment', r0, String(e)); return null; });
+        if (r0 === rid) derived = n;
+      }
+    }
     await broadcast(env, { type: 'data', src: b.src, by: s.u, rows: rows.length });
     // v185: the new Korber Inventory against the pick history, pallet by pallet
     const check = b.src === 'korber' ? await korberUploadCheck(env, rows).catch(() => undefined) : undefined;
@@ -4729,17 +4747,21 @@ async function palletPicksMany(env: Env, pallets: unknown[], kenv?: Env): Promis
 /**
  * v189: a roll's inspection lot without ZCMNTVIEW — ZROLLMGT Mat. Doc = ZINSR Material Document, with the same Material,
  * System Batch (= ZINSR Batch) and Vendor Batch. Those rolls are added to the ZCOMENT rows (marked "ZROLLMGT") only when
- * ZCMNTVIEW does not list the roll at all: ZCMNTVIEW stays the first word. Worked out again after each ZROLLMGT, ZINSR or
- * ZCMNTVIEW upload. Returns how many roll + lot rows came from ZROLLMGT.
+ * ZCMNTVIEW does not list the roll at all: ZCMNTVIEW stays the first word.
+ * v194: worked out for ONE Pick (rid) at a time — its own ZROLLMGT / ZINSR, else the shared ones — and saved under that
+ * Pick, so the Pick reads them (v189 joined every Pick's rows at once: over D1's CPU limit, and a Pick's own rows were not
+ * read). Returns how many roll + lot rows came from ZROLLMGT.
  */
-async function deriveZcoment(env: Env): Promise<number> {
-  const r = await env.DB.batch([
-    env.DB.prepare("DELETE FROM zcoment WHERE accept = 'ZROLLMGT'"),
-    env.DB.prepare(`INSERT INTO zcoment (lot, material, batch, vendor_batch, roll_no, barcode, shade, sys_roll, accept, rid)
-      SELECT DISTINCT i.lot, i.material, i.batch, i.vendor_batch, d.vendor_roll, d.barcode, d.shade, d.roll_no, 'ZROLLMGT', d.rid
-      FROM zroll_doc d JOIN zinr i ON i.mat_doc = d.mat_doc AND i.material = d.material AND i.batch = d.batch AND UPPER(COALESCE(i.vendor_batch, '')) = UPPER(COALESCE(d.vendor_batch, ''))
-      WHERE d.mat_doc IS NOT NULL AND NOT EXISTS (SELECT 1 FROM zcoment c WHERE c.barcode = d.barcode AND COALESCE(c.accept, '') <> 'ZROLLMGT')`),
-  ]);
+async function deriveZcoment(env: Env, rid: string): Promise<number> {
+  const own = rid ? new Set((await env.DB.prepare("SELECT DISTINCT src FROM uploads WHERE rid = ? AND src IN ('zinr', 'zroll')").bind(rid).all<Row>()).results.map((x) => String(x.src))) : new Set(['zinr', 'zroll']);
+  const del = env.DB.prepare("DELETE FROM zcoment WHERE rid = ? AND accept = 'ZROLLMGT'").bind(rid);
+  // a Pick with neither of its own: it reads the shared ZCOMENT rows (worked out under the shared rid)
+  if (rid && !own.size) { await del.run(); return 0; }
+  const zr = own.has('zroll') ? rid : '', zi = own.has('zinr') ? rid : '';
+  const r = await env.DB.batch([del, env.DB.prepare(`INSERT INTO zcoment (lot, material, batch, vendor_batch, roll_no, barcode, shade, sys_roll, accept, rid)
+      SELECT DISTINCT i.lot, i.material, i.batch, i.vendor_batch, d.vendor_roll, d.barcode, d.shade, d.roll_no, 'ZROLLMGT', ?1
+      FROM zroll_doc d JOIN zinr i ON i.mat_doc = d.mat_doc AND i.rid = ?3 AND i.material = d.material AND i.batch = d.batch AND UPPER(COALESCE(i.vendor_batch, '')) = UPPER(COALESCE(d.vendor_batch, ''))
+      WHERE d.rid = ?2 AND d.mat_doc IS NOT NULL AND NOT EXISTS (SELECT 1 FROM zcoment c WHERE c.barcode = d.barcode AND c.rid = ?1 AND COALESCE(c.accept, '') <> 'ZROLLMGT')`).bind(rid, zr, zi)]);
   return Number(r[1]?.meta?.changes ?? 0);
 }
 async function korberUploadCheck(env: Env, rows: Row[]) {
@@ -6103,6 +6125,9 @@ async function handleClear(env: Env, req: Request, src: string) {
     await env.DB.batch([
       env.DB.prepare(`DELETE FROM ${t} WHERE rid = ?`).bind(crid),
       ...(src === 'zmmbe' ? [env.DB.prepare('DELETE FROM stock_sent WHERE rid = ?').bind(crid)] : []),
+      // v194: a removed ZROLLMGT / ZINSR takes the rows worked out from it (Mat. Doc) too
+      ...(src === 'zroll' ? [env.DB.prepare('DELETE FROM zroll_doc WHERE rid = ?').bind(crid)] : []),
+      ...(src === 'zroll' || src === 'zinr' ? [env.DB.prepare("DELETE FROM zcoment WHERE rid = ? AND accept = 'ZROLLMGT'").bind(crid)] : []),
       env.DB.prepare(`DELETE FROM uploads WHERE rid = ? AND src IN (${src === 'zmmbe' ? "'zmmbe', 'kfc', 'pfc', 'plant'" : `'${src}'`})`).bind(crid),
       env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'clear', `Cleared ${src.toUpperCase()} of ${periodLabel(crid)}`),
       env.DB.prepare("DELETE FROM config WHERE k IN ('c_counts', 'c_pick_counts')"),
