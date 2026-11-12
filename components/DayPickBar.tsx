@@ -3,7 +3,7 @@ import { downloadLatest } from '@/lib/files';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, getSession, isBossRole } from '@/lib/api';
 import { ago, fmt, fmtDate } from '@/lib/calc';
-import { uploadPickFile, type PickSrc } from '@/lib/pick';
+import { uploadPickFile, korberCheckText, type PickSrc } from '@/lib/pick';
 import PlanReport from '@/components/PlanReport';
 import { todayLocal } from '@/lib/smart';
 
@@ -89,7 +89,7 @@ export default function DayPickBar({ day, setDay, rid, setRid, toast, refreshKey
     setBusy(src);
     try {
       const r = await uploadPickFile(src, f, rid);
-      toast(`${REPORT_NAME[src]} → ${pickLabel(rounds.find((x) => x.id === rid) || { plant: null, round: 0 }, names)}: ${fmt(r.rows)} rows${r.total > r.rows ? ` (of ${fmt(r.total)} in the file${src === 'korber' ? ' — only this Pick\'s plan items kept' : src === 'zcoment' ? ' — Shade Report only' : ''})` : ''}`);
+      toast(`${REPORT_NAME[src]} → ${pickLabel(rounds.find((x) => x.id === rid) || { plant: null, round: 0 }, names)}: ${fmt(r.rows)} rows${r.total > r.rows ? ` (of ${fmt(r.total)} in the file${src === 'korber' ? ' — only this Pick\'s plan items kept' : src === 'zcoment' ? ' — Shade Report only' : ''})` : ''}${korberCheckText(r.check)}`);
       await loadReports(); onUploaded?.();
     } catch (e) { toast(e instanceof Error ? e.message : 'Upload failed.'); } finally { setBusy(''); }
   };

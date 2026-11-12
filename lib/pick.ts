@@ -153,8 +153,40 @@ export async function uploadPickSheets(src: PickSrc, sheets: ReturnType<typeof r
     const ri = t.header.map(hn).indexOf('report name');
     if (ri >= 0) rows = rows.filter((r) => hn(r[ri]) === 'shade report');
   }
-  const r = await api<{ rows: number; skipped: number }>('/api/pick/upload', { method: 'POST', body: { src, header: t.header, rows, fileName: file.name, total, ...(rid ? { rid } : {}) } });
+  const r = await api<{ rows: number; skipped: number; check?: KorberCheck }>('/api/pick/upload', { method: 'POST', body: { src, header: t.header, rows, fileName: file.name, total, ...(rid ? { rid } : {}) } });
+  // v185: the Korber Inventory against the pick history, pallet by pallet — the report downloads when something differs
+  if (r.check && (r.check.lowN || r.check.notOutN)) {
+    try { saveWorkbook(korberCheckWorkbook(r.check, fileName), `Korber_Upload_Check_${new Date().toISOString().slice(0, 16).replace(/[T:]/g, '-')}.xlsx`); } catch { /* the toast still says it */ }
+  }
   return { ...r, total, sheet: t.sheet };
+}
+/** v185: a Korber Inventory upload against the pick history (every user and Pick), pallet by pallet */
+export interface KCRow { pallet: string; item: string | null; lot: string | null; location: string | null; roll: number; picked: number; left: number; korber: number; used: number; diff: number; lines: string | null; picks: string; day: string | null }
+export interface KorberCheck { pallets: number; same: number; lowN: number; notOutN: number; low: KCRow[]; notOut: KCRow[] }
+/** one line for the upload toast */
+export function korberCheckText(c?: KorberCheck) {
+  if (!c || !c.pallets) return '';
+  return ` · Pick history check: ${c.pallets} picked pallet${c.pallets === 1 ? '' : 's'} — ${c.same} same` +
+    (c.lowN ? `, ${c.lowN} LESS in Korber (Korber Actual Qty used)` : '') + (c.notOutN ? `, ${c.notOutN} not out of Korber yet (history kept)` : '') +
+    (c.lowN || c.notOutN ? ' — Korber_Upload_Check downloaded' : '');
+}
+export function korberCheckWorkbook(c: KorberCheck, fileName: string) {
+  const wb = XLSXS.utils.book_new();
+  const head = ['Pallet', 'Item', 'Lot Number', 'Location', 'Roll QTY (first pick)', 'Picked (history)', 'History left', 'Korber Actual Qty', 'Difference', 'QTY used now', 'SO / LI picked', 'Picks', 'Last pick day'];
+  const rowOf = (x: KCRow) => [x.pallet, x.item, x.lot, x.location, x.roll, x.picked, x.left, x.korber, x.diff, x.used, x.lines, x.picks, x.day];
+  const W = [18, 18, 16, 14, 12, 12, 12, 12, 11, 12, 30, 36, 12];
+  const sum: (string | number | null)[][] = [
+    ['Uploaded file', fileName], ['Checked at', new Date().toLocaleString()], [],
+    ['Picked pallets in this Korber Inventory', c.pallets],
+    ['Same as the pick history (no change)', c.same],
+    ['LESS in Korber than the history leaves — the Korber Actual Qty is used', c.lowN],
+    ['MORE in Korber than the history leaves (picks not out of Korber yet) — the history is used', c.notOutN], [],
+    ['Rule: Korber Actual Qty the same as (or more than) what the pick history leaves → the history stays; LESS → the Korber Actual Qty replaces it for that pallet.'],
+  ];
+  XLSXS.utils.book_append_sheet(wb, simpleSheet('KORBER UPLOAD CHECK — pick history (every user, every Pick)', ['Check', 'Pallets'], sum, [90, 12]), 'Summary');
+  XLSXS.utils.book_append_sheet(wb, simpleSheet(`LESS IN KORBER — Korber Actual Qty used (${c.lowN})`, head, c.low.map(rowOf), W), 'Korber less');
+  XLSXS.utils.book_append_sheet(wb, simpleSheet(`NOT OUT OF KORBER YET — history kept (${c.notOutN})`, head, c.notOut.map(rowOf), W), 'Not out of Korber');
+  return wb;
 }
 
 const PL_HEAD = ['Pallet', 'Location Id', 'Item Number', 'Supplier Desc', 'Lot Number', 'Supplier Hu', 'Color', 'Plant', 'Asn Number', 'Po Number', 'Customer Ref Number', 'Cus Dec Number', 'Actual Qty', 'Pick No', 'Shade'];

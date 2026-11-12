@@ -17,7 +17,7 @@ import PlanReport from '@/components/PlanReport';
 import { todayLocal, weekDays, weekIdOf, weekOptions } from '@/lib/smart';
 import { keepFile } from '@/lib/files';
 import UploadedFiles from '@/components/UploadedFiles';
-import { PICK_SRCS, PLAN_SHEET, pickSrcOfSheet, squash, uploadPickSheets, type PickSrc } from '@/lib/pick';
+import { PICK_SRCS, PLAN_SHEET, pickSrcOfSheet, squash, uploadPickSheets, korberCheckText, type PickSrc } from '@/lib/pick';
 import {
   FIELDS, SRC_INFO, SRC_ORDER, applyMapping, colLetter, detectMapping, guessSrc, guessSrcFromGrid, isHelpSheet, readWorkbook, usableCount,
   type Grid, type Mapping, type Src,
@@ -206,7 +206,7 @@ function Uploads() {
         const msgs: string[] = [];
         for (const to of targetsOf(to0)) {
           const r = await uploadPickSheets(j.pickSrc, [{ name: j.sheet, grid: j.grid }], j.file, to);
-          msgs.push(`${fmt(r.rows)} rows → ${roundName(to, plantNames)}${r.total > r.rows ? ` (of ${fmt(r.total)})` : ''}`);
+          msgs.push(`${fmt(r.rows)} rows → ${roundName(to, plantNames)}${r.total > r.rows ? ` (of ${fmt(r.total)})` : ''}${korberCheckText(r.check)}`);
           await keepFile(fileObj.current[j.file], [j.pickSrc], to);
         }
         setJob(j.id, { state: 'done', msg: `${PICK_SRCS.find((x) => x.src === j.pickSrc)!.title}: ${msgs.join(' · ')}.` });

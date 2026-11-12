@@ -15,7 +15,7 @@ import { downloadLatest } from '@/lib/files';
 import { smartBest, smartSuggest, type Suggestion } from '@/lib/rollSuggest';
 import { startTask } from '@/lib/progress';
 import {
-  PICK_SRCS, type PLIssue, type NotPicked, notPickedWhy, korberWorkbook, ordinal, packingListWorkbook, saveWorkbook, uploadPickFile,
+  PICK_SRCS, type PLIssue, type NotPicked, notPickedWhy, korberWorkbook, ordinal, packingListWorkbook, saveWorkbook, uploadPickFile, korberCheckText,
   pickNote, parsePackingListFile, planPickWorkbook, type PPLine, type PPRoll, type PLPiece, type Candidate, type Candidates, type KorberRow, type SapFit, type ManualRoll, type NbOption, type NoBarcodeRoll, type PickHistory, type PickSrc,
 } from '@/lib/pick';
 
@@ -76,8 +76,8 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
     try {
       // v158: the Korber Inventory for every Pick (24 hours)
       const r = await uploadPickFile(src, f, forAll ? 'ALL' : rid || null);
-      if (forAll) { toast(`Korber Inventory for all Picks: ${fmt(r.rows)} rows saved — every Pick reads it for 24 hours (a Pick's own Korber uploaded later wins)`); loadStatus(); return; }
-      toast(`${PICK_SRCS.find((x) => x.src === src)!.title}: ${fmt(r.rows)} rows saved${r.total > r.rows ? ` (of ${fmt(r.total)} in the file${src === 'korber' ? ' — only plan items kept' : src === 'zcoment' ? ' — Shade Report only' : ''})` : ''}`);
+      if (forAll) { toast(`Korber Inventory for all Picks: ${fmt(r.rows)} rows saved — every Pick reads it for 24 hours (a Pick's own Korber uploaded later wins)${korberCheckText(r.check)}`); loadStatus(); return; }
+      toast(`${PICK_SRCS.find((x) => x.src === src)!.title}: ${fmt(r.rows)} rows saved${r.total > r.rows ? ` (of ${fmt(r.total)} in the file${src === 'korber' ? ' — only plan items kept' : src === 'zcoment' ? ' — Shade Report only' : ''})` : ''}${korberCheckText(r.check)}`);
       loadStatus();
     } catch (e) { toast(e instanceof Error ? e.message : 'Upload failed.'); }
     finally { setBusy(null); }
@@ -859,6 +859,20 @@ export function autoPlan(c: Candidates, withPool = false): { sel: Sel; last: Las
     }
   };
   const tnGroups = (rs: Candidate[]) => { const m = new Map<string, Candidate[]>(); for (const r of rs) { const k = tnK(r.tn!); m.set(k, [...(m.get(k) ?? []), r]); } return Array.from(m.values()); };
+  // v184: the rest is in several ZINSR lots (each with less room than the rest): cut one roll per lot — the lot with the most
+  // room first, in it a roll already cut (no new cut roll on the shelf), else the smallest that covers the lot's room
+  const cutPerLot = (tgt: () => number, pool: () => Candidate[], part: ((r: Candidate) => number) | null, nd: Map<string, number> | null) => {
+    for (let guard = 0; guard < 30; guard++) {
+      const t = tgt(); if (t <= 1e-9) return;
+      const qOf = (r: Candidate) => r3(Math.min(t, room(r), r.available, part ? part(r) : Infinity));
+      const os = pool().filter((r) => !sel[r.pallet] && r.available > 1e-9 && qOf(r) > 1e-9);
+      if (!os.length) return;
+      const r = os.sort((a, b) => qOf(b) - qOf(a) || Number(b.picked_before > 0) - Number(a.picked_before > 0) || a.available - b.available)[0];
+      const q = qOf(r);
+      if (q < r.available - 1e-9) last = { pallet: r.pallet, hu: r.supplier_hu, full: r3(r.available), cut: q };
+      take(r, q, nd);
+    }
+  };
   if (need) {
     // v162: a TRANSFER NOTE batch first (its TN rolls before any other roll), then the smallest need first
     const tnB = new Set(avail.filter((r) => r.tn).flatMap((r) => rollParts(r).map((p) => p.batch)));
@@ -887,6 +901,8 @@ export function autoPlan(c: Candidates, withPool = false): { sel: Sel; last: Las
         // the roll to cut: one already cut (no new cut roll on the shelf), else the smallest that covers the rest
         const fit = rs().filter((r) => partOf(r) >= nb - 1e-9 && room(r) >= nb - 1e-9).sort((a, b) => Number(b.picked_before > 0) - Number(a.picked_before > 0) || partOf(a) - partOf(b) || a.available - b.available)[0];
         if (fit) { last = { pallet: fit.pallet, hu: fit.supplier_hu, full: r3(fit.available), cut: r3(nb) }; take(fit, nb, need); }
+        // v184: no one roll covers the rest inside its lot (the rest is in two or more ZINSR lots): one cut roll per lot
+        else cutPerLot(() => Math.min(need.get(batch) ?? 0, left), () => rs().filter((r) => partOf(r) > 1e-9), partOf, need);
       }
     }
   }
@@ -905,11 +921,8 @@ export function autoPlan(c: Candidates, withPool = false): { sel: Sel; last: Las
   if (left > 1e-9) {
     const fit = avail.filter((r) => !r.tn && !sel[r.pallet] && r.available >= left && room(r) >= left - 1e-9).sort((a, b) => Number(b.picked_before > 0) - Number(a.picked_before > 0) || a.available - b.available)[0];
     if (fit) { last = { pallet: fit.pallet, hu: fit.supplier_hu, full: r3(fit.available), cut: left }; take(fit, left, null); }
-    else {
-      // no roll covers the rest inside its lot: cut the one with the most room in its lot (only what that lot still gives)
-      const f2 = avail.filter((r) => !r.tn && !sel[r.pallet] && r.available > 1e-9 && room(r) > 1e-9).sort((a, b) => room(b) - room(a))[0];
-      if (f2) { const q = r3(Math.min(left, room(f2), f2.available)); if (q > 1e-9) { if (q < f2.available - 1e-9) last = { pallet: f2.pallet, hu: f2.supplier_hu, full: r3(f2.available), cut: q }; take(f2, q, null); } }
-    }
+    // no roll covers the rest inside its lot: cut a roll in each lot that still gives some (v184: every lot, not only one)
+    else cutPerLot(() => left, () => avail.filter((r) => !r.tn && !sel[r.pallet] && r.available > 1e-9), null, null);
   }
   return { sel, last };
 }

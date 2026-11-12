@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, getSession, isBossRole, userParam } from '@/lib/api';
 import { ago, fmt, fmtDate, fmtQty, type WeekInfo } from '@/lib/calc';
 import { applyMapping, detectMapping, guessSrc, isHelpSheet, readWorkbook, type Grid } from '@/lib/mapping';
-import { PICK_SRCS, PLAN_SHEET, pickSrcOfSheet, squash, uploadPickSheets, type PickSrc } from '@/lib/pick';
+import { PICK_SRCS, PLAN_SHEET, pickSrcOfSheet, squash, uploadPickSheets, korberCheckText, type PickSrc } from '@/lib/pick';
 import { todayLocal, weekDays, weekIdOf, weekOptions } from '@/lib/smart';
 import PlanReport from '@/components/PlanReport';
 import { keepFile } from '@/lib/files';
@@ -170,7 +170,7 @@ export default function WeekPlanManager({ toast, onChanged }: { toast: (m: strin
           } else {
             const sh = file!.sheets.filter((s) => s.name === j.name);
             const r = await uploadPickSheets(j.pick!, sh, file!.name, target);
-            setJob(j.name, { state: 'ok', msg: `${fmt(r.rows)} rows${r.total > r.rows ? ` (of ${fmt(r.total)} — only the week plan's items)` : ''}` });
+            setJob(j.name, { state: 'ok', msg: `${fmt(r.rows)} rows${r.total > r.rows ? ` (of ${fmt(r.total)} — only the week plan's items)` : ''}${korberCheckText(r.check)}` });
           }
         } catch (e) { setJob(j.name, { state: 'err', msg: e instanceof Error ? e.message : 'failed' }); }
       }

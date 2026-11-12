@@ -686,7 +686,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 124; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 126; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -2562,7 +2562,7 @@ async function tallyInfo(env: Env, pallet: string, src: Row, used: Map<string, n
   const lrid = weekPlantRid(String(src.week), src.plant);
   const kenv = await envFor(E, lrid);
   const k = await kenv.DB.prepare('SELECT * FROM korber WHERE pallet = ?').bind(up(pallet)).first<Row>();
-  const pp = await palletPicks(E, pallet);
+  const pp = await palletPicks(E, pallet, kenv);
   // what the roll really has: the Korber QTY, at most its ZROLLMGT Available
   const zr = await kenv.DB.prepare('SELECT qty, batch, rid FROM zroll WHERE barcode = ? ORDER BY COALESCE(qty, 0) DESC').bind(up(pallet)).first<Row>();
   const base0 = pp.base ?? Number(k?.qty ?? 0);
@@ -2651,7 +2651,7 @@ async function tallyInfo(env: Env, pallet: string, src: Row, used: Map<string, n
       if (take) { used.set(uk, r3((used.get(uk) ?? 0) + take)); used.set(lk, r3((used.get(lk) ?? 0) + take)); }
     }
   }
-  return { k, kenv, lrid, balance, base, vb, targets, plants: Array.from(srcPlants), pickPlant, plantSet: !!pinfo, trim };
+  return { k, kenv, lrid, balance, base, full: pp.full ?? base, korberLow: pp.korberLow, vb, targets, plants: Array.from(srcPlants), pickPlant, plantSet: !!pinfo, trim };
 }
 
 /**
@@ -2672,7 +2672,7 @@ async function saveTallyPick(env: Env, user: string, src: Row, pallet: string, t
   const kk = { pallet: info.k.pallet, item: info.k.item, lot: info.k.lot, supplier_hu: info.k.supplier_hu }, tl = (t.lots as Row[]).map((l) => String(l.lot));
   const shade = (await zrollShades(info.kenv, [pallet])).get(pallet) ?? (await zcomentShade(info.kenv, kk, tl)) ?? (await zcomentShade(env, kk, tl));
   const note = noteIn ?? `Cut roll balance tallied — roll ${pallet} cut for ${src.so} / ${src.li}; ${qty} to ${t.same ? 'the same SO line ' : ''}${normId(tso)} / ${normId(tli)} (${info.trim ? `${info.trim === true ? 'INTERLINING / FUSIBLE' : info.trim} — no ZINSR check, batch ${t.batch}` : `ZINSR lot ${(t.lots as Row[]).map((l) => l.lot).join(', ')}, Vendor Batch ${info.vb}`}) by ${user}`;
-  const pick = { day, week: src.week, line: lineId, so: normId(tso), li: normId(tli), item: normId(titem), pallet, qty, roll_qty: info.base, partial: 1, shade, lot: info.k.lot, insp_lot: (t.lots as Row[]).map((l) => l.lot).join(','), batch: t.batch, note, by_user: user, at, korber: info.k.raw ?? null };
+  const pick = { day, week: src.week, line: lineId, so: normId(tso), li: normId(tli), item: normId(titem), pallet, qty, roll_qty: info.full, partial: 1, shade, lot: info.k.lot, insp_lot: (t.lots as Row[]).map((l) => l.lot).join(','), batch: t.batch, note, by_user: user, at, korber: info.k.raw ?? null };
   let reqId = 0;
   for (let attempt = 0; ; attempt++) {
     let next = Number((await env.DB.prepare('SELECT COALESCE(MAX(id), 0) + 1 n FROM pick_req').first<{ n: number }>())?.n ?? 1);
@@ -2902,7 +2902,9 @@ async function handlePick(env: Env, req: Request, p: string) {
     await batchSized(env, stmts);
     if (rid === ALL_RID) allKorber.delete(env.DIV || 'active');
     await broadcast(env, { type: 'data', src: b.src, by: s.u, rows: rows.length });
-    return json({ ok: true, rows: rows.length, skipped, rid, ...(rid === ALL_RID ? { expires: new Date(Date.now() + KORBER_TTL).toISOString() } : {}) });
+    // v185: the new Korber Inventory against the pick history, pallet by pallet
+    const check = b.src === 'korber' ? await korberUploadCheck(env, rows).catch(() => undefined) : undefined;
+    return json({ ok: true, rows: rows.length, skipped, rid, ...(rid === ALL_RID ? { expires: new Date(Date.now() + KORBER_TTL).toISOString() } : {}), ...(check ? { check } : {}) });
   }
 
   // the rolls that can be picked for one plan line, with every check of the chain
@@ -3884,7 +3886,7 @@ async function handlePick(env: Env, req: Request, p: string) {
     const q = r3(Math.min(Number(b.qty) > 0 ? Number(b.qty) : Number(rj.qty), avail));
     const at = now();
     const shade = await zcomentShade(senv, { pallet, item: k.item, lot: k.lot, supplier_hu: k.supplier_hu }, String(rj.insp_lot ?? '').split(','));
-    const row = { req_id: rj.req_id, day: colomboDay(), week: rj.week, line: rj.line, so: rj.so, li: rj.li, item: rj.item, pallet, qty: q, roll_qty: base,
+    const row = { req_id: rj.req_id, day: colomboDay(), week: rj.week, line: rj.line, so: rj.so, li: rj.li, item: rj.item, pallet, qty: q, roll_qty: pp.full ?? base,
       partial: q < avail - 1e-6 || pp.before > 0 ? 1 : 0, shade, lot: k.lot, insp_lot: rj.insp_lot, batch: rj.batch,
       note: `Replacement for rejected ${rj.pallet} (${rj.reason}) — assigned by ${s.u}`, by_user: s.u, at, korber: k.raw };
     await env.DB.batch([
@@ -3957,7 +3959,10 @@ async function handlePick(env: Env, req: Request, p: string) {
       const k = (kb.results as Row[])[0] ?? null;
       const picked = r3(rows.reduce((t, x) => t + Number(x.qty), 0));
       const base = rows.length ? Number(rows[0].roll_qty ?? k?.qty ?? 0) : Number(k?.qty ?? 0);
-      return json({ pallet: pal, korber: k, picks: rows, rejects: (rj.results as Row[]).map((x) => ({ ...x, plan: periodLabel(x.week) })), picked, base, left: Math.max(0, r3(base - picked)) });
+      // v185: less in the Korber Inventory than the history leaves: the Korber QTY
+      const pp = rows.length ? await palletPicks(env, pal) : null;
+      const left = pp && pp.base !== null ? Math.max(0, r3(pp.base - pp.before)) : Math.max(0, r3(base - picked));
+      return json({ pallet: pal, korber: k, picks: rows, rejects: (rj.results as Row[]).map((x) => ({ ...x, plan: periodLabel(x.week) })), picked, base, left, ...(pp?.korberLow ? { korberLow: pp.korberLow, note: lowText(pp.korberLow) } : {}) });
     }
     if (req.method === 'DELETE') {
       const s = await requireUser(env, req, 'editor');
@@ -4637,12 +4642,57 @@ async function candCached<T>(env: Env, id: string, make: () => Promise<T>): Prom
   return revCached(env, 'cand|' + id, [normId(String(id).split('|')[3] ?? '')], make);
 }
 function hashStr(t: string) { let h = 2166136261; for (let i = 0; i < t.length; i++) { h ^= t.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36); }
-async function palletPicks(env: Env, pallet: unknown) {
+async function palletPicks(env: Env, pallet: unknown, kenv?: Env) {
   const ph = (await env.DB.prepare(`SELECT p.day, p.by_user, p.qty, p.roll_qty, p.week, p.so, p.li, p.at, p.req_id, r.pick_no FROM picks p LEFT JOIN pick_req r ON r.id = p.req_id
     WHERE p.pallet = ? AND p.cancelled_at IS NULL ORDER BY p.id`).bind(String(pallet ?? '')).all<Row>()).results;
   const picks: PalletPick[] = ph.map((x) => ({ day: String(x.day), by_user: String(x.by_user), qty: Number(x.qty), plan: periodLabel(x.week), so: String(x.so ?? ''), li: String(x.li ?? ''), pick_no: (x.pick_no as string | null) ?? null, at: String(x.at ?? ''), req: Number(x.req_id) }));
-  return { picks, base: ph.length ? Number(ph[0].roll_qty) : null, before: r3(picks.reduce((t, x) => t + x.qty, 0)) };
+  const full = ph.length ? Number(ph[0].roll_qty) : null;
+  const before = r3(picks.reduce((t, x) => t + x.qty, 0));
+  let base = full, korberLow: KorberLow | null = null;
+  // v185: the Korber Inventory as uploaded — its Actual Qty the same as (or more than) what the history leaves: the history
+  // stays; LESS than the history leaves (taken off the roll outside this system): the Korber Actual Qty is used, less what
+  // was picked here after that Korber upload (base lowered, so base − before = what the roll really has)
+  if (ph.length && full !== null && Number.isFinite(full)) {
+    const k = await (kenv ?? env).DB.prepare(`SELECT k.qty, (SELECT MAX(u.uploaded_at) FROM uploads u WHERE u.src = 'korber' AND u.rid = k.rid) up_at FROM korber k WHERE k.pallet = ? ORDER BY up_at DESC LIMIT 1`).bind(up(pallet)).first<Row>();
+    if (k && k.qty !== null && k.qty !== undefined && Number.isFinite(Number(k.qty))) {
+      const upAt = String(k.up_at ?? '');
+      const after = upAt ? r3(ph.filter((x) => String(x.at ?? '') > upAt).reduce((t, x) => t + Number(x.qty || 0), 0)) : 0;
+      const kLeft = Math.max(0, r3(Number(k.qty) - after));
+      const hLeft = Math.max(0, r3(full - before));
+      if (kLeft < hLeft - 0.0005) { base = r3(before + kLeft); korberLow = { korber: r3(Number(k.qty)), after, history: hLeft, left: kLeft, at: upAt || null }; }
+    }
+  }
+  return { picks, base, full, before, korberLow };
 }
+/**
+ * v185: a Korber Inventory just uploaded, against the pick history (every user, every Pick), pallet by pallet:
+ *   same   — Korber Actual Qty = what the history leaves (the WMS took the picks off): nothing changes
+ *   notOut — Korber has MORE than the history leaves (the picks are not out of Korber yet): the history stays
+ *   low    — Korber has LESS than the history leaves (taken off outside this system): the Korber Actual Qty is used
+ */
+async function korberUploadCheck(env: Env, rows: Row[]) {
+  const kBy = new Map(rows.map((r) => [up(r.pallet), r]));
+  const hist = (await env.DB.prepare(`SELECT g.pallet, g.q, f.roll_qty base, g.day, g.lines, g.weeks FROM (SELECT p.pallet, SUM(p.qty) q, MIN(p.id) fid, MAX(p.day) day,
+    GROUP_CONCAT(DISTINCT p.so || ' / ' || p.li) lines, GROUP_CONCAT(DISTINCT p.week) weeks FROM picks p WHERE p.cancelled_at IS NULL GROUP BY p.pallet) g JOIN picks f ON f.id = g.fid`).all<Row>()).results;
+  const out = { pallets: 0, same: 0, notOut: [] as Row[], low: [] as Row[] };
+  for (const h of hist) {
+    const k = kBy.get(up(h.pallet));
+    if (!k || k.qty === null || k.qty === undefined || !Number.isFinite(Number(k.qty))) continue;
+    out.pallets++;
+    const roll = Number(h.base ?? k.qty), picked = r3(Number(h.q) || 0), left = Math.max(0, r3(roll - picked)), kq = r3(Number(k.qty));
+    const row = { pallet: up(h.pallet), item: k.item ?? null, lot: k.lot ?? null, location: k.location ?? null, roll, picked, left, korber: kq, used: Math.min(left, kq), diff: r3(kq - left),
+      lines: h.lines ?? null, picks: String(h.weeks ?? '').split(',').filter(Boolean).map(periodLabel).join(', '), day: h.day ?? null };
+    if (Math.abs(kq - left) <= 0.0005) out.same++;
+    else if (kq < left) out.low.push(row);
+    else out.notOut.push(row);
+  }
+  out.low.sort((a, b) => Number(a.diff) - Number(b.diff));
+  out.notOut.sort((a, b) => Number(b.diff) - Number(a.diff));
+  return { pallets: out.pallets, same: out.same, lowN: out.low.length, notOutN: out.notOut.length, low: out.low.slice(0, 3000), notOut: out.notOut.slice(0, 3000) };
+}
+/** v185: the roll has less in the Korber Inventory than its pick history leaves — the Korber QTY is used */
+interface KorberLow { korber: number; after: number; history: number; left: number; at: string | null }
+const lowText = (l: KorberLow) => `Korber Actual Qty ${l.korber}${l.after ? ` (less ${l.after} picked after the Korber upload)` : ''} is less than the pick history leaves (${l.history}) — ${l.left} used`;
 /** "64.46 on 2026-10-20 · 2026-10-20 C051 Pick 1 · E101698226 / 10 · HJ 5501 · admin" */
 const pickText = (k: PalletPick) => `${k.qty} on ${k.day} · ${k.plan} · ${k.so} / ${k.li}${k.pick_no ? ` · HJ ${k.pick_no}` : ''} · ${k.by_user}`;
 
@@ -4669,9 +4719,10 @@ async function manualCandidate(env: Env, pallet: string, m: ManualFor, lineItem:
   const pp = await palletPicks(env, k.pallet);
   const base = pp.base ?? Number(k.qty);
   const before = pp.before;
+  if (pp.korberLow) warnings.push(lowText(pp.korberLow));
   return {
     pallet: String(k.pallet), item: String(k.item), lot: k.lot as string | null, supplier_hu: k.supplier_hu as string | null, location: k.location as string | null, uom: k.uom as string | null,
-    invoice: k.invoice as string | null, fifo: (k.fifo as string | null) ?? null, actual_qty: Number(k.qty), base_qty: base, picked_before: before, available: Math.max(0, r3(base - before)), roll_qty: Number(m.roll_qty ?? k.qty),
+    invoice: k.invoice as string | null, fifo: (k.fifo as string | null) ?? null, actual_qty: Number(k.qty), base_qty: pp.full ?? base, picked_before: before, available: Math.max(0, r3(base - before)), roll_qty: Number(m.roll_qty ?? k.qty),
     shade: m.shade ?? null, insp_lots: m.lot ? [String(m.lot)] : [], batches: m.batch ? [String(m.batch)] : [], checks, warnings, needsConfirm: true, raw: k.raw as string | null,
     picks: pp.picks,
   };
@@ -5407,10 +5458,11 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
   for (const r of rolls.values()) {
     const pp = await palletPicks(env, r.pallet);
     if (!pp.picks.length) continue;
-    r.base_qty = pp.base ?? r.actual_qty;
+    r.base_qty = pp.full ?? r.actual_qty;
     r.picked_before = pp.before;
-    r.available = Math.max(0, r3(r.base_qty - r.picked_before));
+    r.available = Math.max(0, r3((pp.base ?? r.actual_qty) - r.picked_before));
     r.picks = pp.picks;
+    if (pp.korberLow) r.qtyNote = [r.qtyNote, lowText(pp.korberLow)].filter(Boolean).join(' · ');
   }
   // The same physical roll in the inspection lots of several SO lines (SAP lists a shared batch's rolls in each SO line's
   // lot): it is not this line's alone. Such rolls are offered, not selected — and split over the SO lines the same way for
@@ -5421,37 +5473,84 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
     const sol = (x: Row) => `${normId(x.so)}/${normId(x.li)}`;
     const me = `${normId(line.so)}/${normId(line.li)}`;
     if (new Set(lotsAll.map(sol)).size < 2) continue;
-    // each barcode → the SO lines whose lots have it
+    // each barcode → the SO lines whose lots have it (and the lots that list it)
     const owners = new Map<string, Set<string>>();
-    for (const l0 of lotsAll) for (const z of (await env.DB.prepare('SELECT barcode FROM zcoment WHERE lot = ? AND barcode IS NOT NULL').bind(l0.lot).all<Row>()).results) {
-      const b0 = up(z.barcode); if (!owners.has(b0)) owners.set(b0, new Set()); owners.get(b0)!.add(sol(l0));
+    const lotBcs = new Map<string, string[]>();
+    const byBc = new Map<string, string[]>();
+    for (const l0 of lotsAll) {
+      const bcs = (await env.DB.prepare('SELECT barcode FROM zcoment WHERE lot = ? AND barcode IS NOT NULL').bind(l0.lot).all<Row>()).results.map((z) => up(z.barcode));
+      lotBcs.set(String(l0.lot), bcs);
+      for (const b0 of bcs) {
+        if (!owners.has(b0)) owners.set(b0, new Set()); owners.get(b0)!.add(sol(l0));
+        if (!byBc.has(b0)) byBc.set(b0, []); if (!byBc.get(b0)!.includes(String(l0.lot))) byBc.get(b0)!.push(String(l0.lot));
+      }
     }
-    const mineShared = Array.from(rolls.values()).filter((r) => !r.tn && r.batches.some((x) => normId(x) === bt) && ((owners.get(up(r.pallet))?.size ?? 0) > 1 || (owners.get(up(r.barcode ?? ''))?.size ?? 0) > 1));
+    const sharedKey = (r: Candidate) => [up(r.pallet), up(r.barcode ?? '')].find((x) => x && (owners.get(x)?.size ?? 0) > 1);
+    const mineShared = Array.from(rolls.values()).filter((r) => !r.tn && r.batches.some((x) => normId(x) === bt) && !!sharedKey(r));
     if (!mineShared.length) continue;
-    // the pool: every shared roll of the batch that can be picked now (the same list for every SO line)
-    const sharedBc = Array.from(owners).filter(([, o]) => o.size > 1).map(([b0]) => b0).sort();
-    const pool: { id: string; q: number }[] = [];
-    for (const b0 of sharedBc) {
-      const k = await env.DB.prepare(`SELECT pallet, qty FROM korber WHERE pallet = ? AND ${PICKABLE}`).bind(b0).first<Row>();
-      if (!k || rejected.has(up(k.pallet)) || (await gate.check(String(k.pallet), b0))) continue;
-      const pp = await palletPicks(env, String(k.pallet));
-      const a = Math.max(0, r3((pp.base ?? Number(k.qty)) - pp.before));
-      if (a > 1e-9) pool.push({ id: up(k.pallet), q: a });
+    // v184: split LOT GROUP by lot group — the lots that list the same rolls (one Vendor Batch split over SO lines) — not over
+    // every SO line of the batch: each SO line its lots' QTY (less what it picked and its own rolls) from the shared rolls left
+    const parent = new Map<string, string>(Array.from(lotBcs.keys()).map((l) => [l, l]));
+    const find = (x: string): string => { let y = x; while (parent.get(y) !== y) y = parent.get(y)!; parent.set(x, y); return y; };
+    for (const ls of byBc.values()) for (let i = 1; i < ls.length; i++) { const r0 = find(ls[0]), r1 = find(ls[i]); if (r0 !== r1) parent.set(r1, r0); }
+    const groups = new Map<string, Candidate[]>();
+    for (const r of mineShared) { const g = find(byBc.get(sharedKey(r)!)![0]); if (!groups.has(g)) groups.set(g, []); groups.get(g)!.push(r); }
+    for (const [g, mineRolls] of groups) {
+      const gLots = lotsAll.filter((l) => find(String(l.lot)) === g);
+      const gBcs = Array.from(new Set(gLots.flatMap((l) => lotBcs.get(String(l.lot)) || []))).sort();
+      // the Korber roll of each barcode and the QTY it has left
+      const left = new Map<string, { pallet: string; a: number }>();
+      for (const b0 of gBcs) {
+        const k = await env.DB.prepare(`SELECT pallet, qty FROM korber WHERE pallet = ? AND ${PICKABLE}`).bind(b0).first<Row>();
+        if (!k || rejected.has(up(k.pallet)) || (await gate.check(String(k.pallet), b0))) continue;
+        const pp = await palletPicks(env, String(k.pallet));
+        const a = Math.max(0, r3((pp.base ?? Number(k.qty)) - pp.before));
+        if (a > 1e-9) left.set(b0, { pallet: up(k.pallet), a });
+      }
+      // each SO line of the group: its lots' QTY, what it picked from the group's rolls, its own (not shared) rolls
+      const lines = new Map<string, { qty: number; picked: number; own: number }>();
+      for (const l0 of gLots) { const e = lines.get(sol(l0)) ?? { qty: 0, picked: 0, own: 0 }; e.qty = r3(e.qty + Number(l0.qty || 0)); lines.set(sol(l0), e); }
+      const gPals = Array.from(new Set([...gBcs, ...Array.from(left.values()).map((x) => x.pallet)]));
+      for (const p0 of (await env.DB.prepare('SELECT so, li, SUM(qty) q FROM picks WHERE cancelled_at IS NULL AND pallet IN (SELECT value FROM json_each(?)) GROUP BY so, li').bind(JSON.stringify(gPals)).all<Row>()).results) {
+        const e = lines.get(sol(p0)); if (e) e.picked = r3(e.picked + Number(p0.q || 0));
+      }
+      for (const b0 of gBcs) { const o = owners.get(b0); const x = left.get(b0); if (x && o && o.size === 1) { const e = lines.get(Array.from(o)[0]); if (e) e.own = r3(e.own + x.a); } }
+      const needs = new Map(Array.from(lines).map(([k0, e]) => [k0, Math.max(0, r3(e.qty - e.picked - e.own))] as [string, number]));
+      const lineKeys = Array.from(lines.keys()).sort();
+      const free0 = gBcs.filter((b0) => (owners.get(b0)?.size ?? 0) > 1 && left.has(b0)).map((b0) => ({ id: left.get(b0)!.pallet, q: left.get(b0)!.a, own: owners.get(b0)! }));
+      const total = r3(free0.reduce((t, x) => t + x.q, 0));
+      const sumNeed = r3(Array.from(needs.values()).reduce((t, x) => t + x, 0));
+      // the same rolls are in every lot of the group and they cover every SO line: this line's share can be picked (a cut
+      // leaves the balance for the others) — else the rolls are only offered and the user ticks them
+      const safe = free0.length > 0 && free0.every((x) => lineKeys.every((k0) => x.own.has(k0))) && total >= sumNeed - 1e-6 && (needs.get(me) ?? 0) > 1e-9;
+      let free = free0.map((x) => ({ ...x })), mineSet = new Set<string>();
+      for (const sl of lineKeys) {
+        const n = needs.get(sl) ?? 0;
+        if (!(n > 1e-9)) continue;
+        const cand = free.filter((x) => x.own.has(sl));
+        const set = subsetToQty(cand.map(({ id, q }) => ({ id, q })), n);
+        if (sl === me) { mineSet = set; break; }
+        // what the set gives over the line's QTY stays on one of its rolls (the cut roll's balance) for the next lines
+        const took = cand.filter((x) => set.has(x.id)).sort((x, y) => x.q - y.q);
+        const over = r3(took.reduce((t, x) => t + x.q, 0) - n);
+        free = free.filter((x) => !set.has(x.id));
+        if (over > 1e-6 && took.length) { const c0 = took.find((x) => x.q > over + 1e-9) ?? took[took.length - 1]; free.push({ ...c0, q: over }); }
+      }
+      const nLines = lines.size;
+      const lotList = gLots.map((l) => `${sol(l)} lot ${l.lot} ${r3(Number(l.qty || 0))}`).slice(0, 4).join(', ') + (gLots.length > 4 ? '…' : '');
+      for (const r of mineRolls) {
+        const sug = mineSet.has(up(r.pallet));
+        if (safe && sug) {
+          r.pool = undefined; r.suggested = true;
+          r.qtyNote = [r.qtyNote, `This roll is in the inspection lots of ${nLines} SO lines (${lotList}) — the shared rolls (${total}) cover every line (${sumNeed}): picked for this line, a cut leaves the balance for the others`].filter(Boolean).join(' · ');
+        } else {
+          r.pool = nLines; r.suggested = sug;
+          r.qtyNote = [r.qtyNote, `This roll is in the inspection lots of ${nLines} SO lines (${lotList}) — ${sug ? 'suggested for this line' : 'suggested for another line'}`].filter(Boolean).join(' · ')
+            + (sug && !safe ? ` (the shared rolls ${total} do not cover every line ${sumNeed}, or not every lot lists them: tick by hand)` : '');
+        }
+      }
+      steps.push(`Batch ${bt}: ${mineRolls.length} roll${mineRolls.length === 1 ? ' is' : 's are'} in the inspection lots of ${nLines} SO lines (${lotList}) — shared rolls ${total}, the lines need ${sumNeed} (this line ${needs.get(me) ?? 0}): ${mineSet.size} ${safe ? 'picked for this line (a cut leaves the balance for the others)' : 'suggested for this line: tick them with “Select suggested”'}.`);
     }
-    // SO line by SO line: its lots' QTY from the rolls still free
-    const perLine = new Map<string, number>(); for (const l0 of lotsAll) perLine.set(sol(l0), r3((perLine.get(sol(l0)) ?? 0) + Number(l0.qty || 0)));
-    let free = pool, mineSet = new Set<string>();
-    for (const [sl, q0] of perLine) {
-      const set = subsetToQty(free, q0);
-      if (sl === me) { mineSet = set; break; }
-      free = free.filter((x) => !set.has(x.id));
-    }
-    const nLines = perLine.size;
-    for (const r of mineShared) {
-      r.pool = nLines; r.suggested = mineSet.has(up(r.pallet));
-      r.qtyNote = [r.qtyNote, `This roll is in the inspection lots of ${nLines} SO lines (batch ${bt}) — ${r.suggested ? 'suggested for this line' : 'suggested for another line'}`].filter(Boolean).join(' · ');
-    }
-    steps.push(`Batch ${bt}: ${mineShared.length} roll${mineShared.length === 1 ? ' is' : 's are'} in the inspection lots of ${nLines} SO lines (${Array.from(perLine.keys()).slice(0, 4).join(', ')}${nLines > 4 ? '…' : ''}) — ${mineSet.size} suggested for this line (lot QTY ${perLine.get(me) ?? 0}): tick them with “Select suggested rolls”.`);
   }
   // Settings → blocked Korber Wh Id + Location Id: those rolls are not picked by any Pick (shown under "Not pickable")
   {
@@ -6039,8 +6138,10 @@ async function reconOf(env: Env, rid: string) {
   const pickedPlan = new Map<string, number>();
   for (const x of (await env.DB.prepare('SELECT item, SUM(qty) q FROM picks WHERE week = ? AND cancelled_at IS NULL GROUP BY item').bind(rid).all<Row>()).results) pickedPlan.set(normId(x.item), Number(x.q) || 0);
   const zBatch = batches.length ? (await kenv.DB.prepare('SELECT /*exact*/ barcode, bin, batch, status, qty, material FROM zroll WHERE batch IN (SELECT value FROM json_each(?))').bind(JSON.stringify(batches)).all<Row>()).results : [];
-  const picked = new Map<string, { q: number; base: number | null }>();
-  if (pals.length) for (const x of (await env.DB.prepare('SELECT pallet, SUM(qty) q, MAX(roll_qty) base FROM picks WHERE pallet IN (SELECT value FROM json_each(?)) AND cancelled_at IS NULL GROUP BY pallet').bind(JSON.stringify(pals)).all<Row>()).results) picked.set(up(x.pallet), { q: Number(x.q) || 0, base: x.base === null ? null : Number(x.base) });
+  const picked = new Map<string, { q: number; base: number | null; after: number }>();
+  // v185: the Korber upload time — what was picked after it is not out of its Actual Qty yet
+  const kUpAt = String((await kenv.DB.prepare(`SELECT (SELECT MAX(u.uploaded_at) FROM uploads u WHERE u.src = 'korber' AND u.rid = k.rid) at FROM korber k LIMIT 1`).first<Row>())?.at ?? '');
+  if (pals.length) for (const x of (await env.DB.prepare('SELECT pallet, SUM(qty) q, MAX(roll_qty) base, SUM(CASE WHEN at > ?2 THEN qty ELSE 0 END) aq FROM picks WHERE pallet IN (SELECT value FROM json_each(?1)) AND cancelled_at IS NULL GROUP BY pallet').bind(JSON.stringify(pals), kUpAt || '9999').all<Row>()).results) picked.set(up(x.pallet), { q: Number(x.q) || 0, base: x.base === null ? null : Number(x.base), after: Number(x.aq) || 0 });
   const rej = new Set((await env.DB.prepare('SELECT pallet FROM pick_reject WHERE pallet IN (SELECT value FROM json_each(?))').bind(JSON.stringify(pals.length ? pals : [''])).all<Row>()).results.map((x) => up(x.pallet)));
   const res: Row[] = [];
   const tot: Record<string, number> = {};
@@ -6061,7 +6162,9 @@ async function reconOf(env: Env, rid: string) {
       const pal = up(k.pallet), z = zByPal.get(pal) ?? null;
       if (z) seenZ.add(up(z.barcode));
       const pk = picked.get(pal);
-      const left = Math.max(0, r3((pk?.base ?? Number(k.qty || 0)) - (pk?.q ?? 0)));
+      let left = Math.max(0, r3((pk?.base ?? Number(k.qty || 0)) - (pk?.q ?? 0)));
+      // v185: Korber has less than the history leaves: the Korber QTY (less what was picked after its upload)
+      if (pk && Number.isFinite(Number(k.qty))) left = Math.min(left, Math.max(0, r3(Number(k.qty) - pk.after)));
       if (left <= 1e-9) { if (z) doneZ.add(up(z.barcode)); continue; } // picked in full already (not counted on either side)
       const b = z?.batch ? normId(z.batch) : null;
       const base = { pallet: pal, batch: b, korber: left, sap: z && z.qty !== null ? Number(z.qty) : null, bin: z ? String(z.bin ?? '') : null, location: k.location ? String(k.location) : null };
