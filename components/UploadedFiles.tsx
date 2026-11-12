@@ -48,7 +48,6 @@ export default function UploadedFiles({ toast, rid, title = 'Uploaded files' }: 
         <h2 id="uf-title" style={{ margin: 0 }}>{title}</h2>
         {res && <span className="muted small">{res.total.n} file{res.total.n === 1 ? '' : 's'} · {fmtSize(Number(res.total.size) || 0)} kept</span>}
       </div>
-      <p className="sub">Every Excel file uploaded is kept exactly as it was — the same file downloads again (same sheets, columns and name). The newest {res?.keep ?? 15} of each report and Pick / week are kept. Internal data: share only inside the team.</p>
       {files.length > 0 && (
         <div className="uf-bar">
           <div className="chips">

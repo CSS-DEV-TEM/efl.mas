@@ -89,7 +89,6 @@ export default function PlantSummary({ rows, plants, received = [], week, day, c
         <div>
           <h2 id="psum-title">Plant summary{day ? <span className="pill accent" style={{ marginLeft: 8, fontSize: 12 }}>Day plan · {day}</span> : ''}
             <span className={`psum-live ${live ? 'on' : ''}`} title={live ? 'Updates the moment someone picks, uploads or changes a line' : 'Updates when you use the page and every minute'}><i />{live ? 'Live' : 'Auto'}{updatedAt ? ` · ${fmtTime(updatedAt)}` : ''}</span></h2>
-          <p className="sub" style={{ margin: 0 }}>QTY still to send split by what covers it: UR → QI → Block → NIH (not in house). SOLI = SO/LI lines. W/H = UR SOLI ÷ {time?.soliPerHour || SOLI_PER_HOUR} per hour. Total = UR + Adhoc. Picked = saved picks; Pending and Progress follow every pick. Click a plant to see its lines.</p>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           {canTarget && <button className="btn sm" onClick={() => setSetup(true)}>Plant settings</button>}

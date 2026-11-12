@@ -696,7 +696,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 128; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 129; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -2928,7 +2928,10 @@ async function handlePick(env: Env, req: Request, p: string) {
     await broadcast(env, { type: 'data', src: b.src, by: s.u, rows: rows.length });
     // v185: the new Korber Inventory against the pick history, pallet by pallet
     const check = b.src === 'korber' ? await korberUploadCheck(env, rows).catch(() => undefined) : undefined;
-    return json({ ok: true, rows: rows.length, skipped, rid, ...(derived !== null ? { derived } : {}), ...(rid === ALL_RID ? { expires: new Date(Date.now() + KORBER_TTL).toISOString() } : {}), ...(check ? { check } : {}) });
+    // v193: say so when the file has no Material Document / Mat. Doc column — then no roll gets its inspection lot from ZROLLMGT
+    const docWarn = b.src === 'zinr' && rows.length && !rows.some((r) => r.mat_doc) ? 'ZINSR has no Material Document column — rolls cannot get their inspection lot from ZROLLMGT Mat. Doc'
+      : b.src === 'zroll' && rows.length && !docRows.length ? 'ZROLLMGT has no Mat. Doc column — rolls cannot get their inspection lot (upload ZCMNTVIEW, or a ZROLLMGT with Mat. Doc)' : '';
+    return json({ ok: true, rows: rows.length, skipped, rid, ...(derived !== null ? { derived } : {}), ...(docWarn ? { docWarn } : {}), ...(rid === ALL_RID ? { expires: new Date(Date.now() + KORBER_TTL).toISOString() } : {}), ...(check ? { check } : {}) });
   }
 
   // the rolls that can be picked for one plan line, with every check of the chain

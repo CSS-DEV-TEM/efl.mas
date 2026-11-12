@@ -17,7 +17,7 @@ import PlanReport from '@/components/PlanReport';
 import { todayLocal, weekDays, weekIdOf, weekOptions } from '@/lib/smart';
 import { keepFile } from '@/lib/files';
 import UploadedFiles from '@/components/UploadedFiles';
-import { PICK_SRCS, PLAN_SHEET, pickSrcOfSheet, squash, uploadPickSheets, korberCheckText, type PickSrc } from '@/lib/pick';
+import { PICK_SRCS, PLAN_SHEET, pickSrcOfSheet, squash, uploadPickSheets, korberCheckText, docText, type PickSrc } from '@/lib/pick';
 import {
   FIELDS, SRC_INFO, SRC_ORDER, applyMapping, colLetter, detectMapping, guessSrc, guessSrcFromGrid, isHelpSheet, readWorkbook, usableCount,
   type Grid, type Mapping, type Src,
@@ -206,7 +206,7 @@ function Uploads() {
         const msgs: string[] = [];
         for (const to of targetsOf(to0)) {
           const r = await uploadPickSheets(j.pickSrc, [{ name: j.sheet, grid: j.grid }], j.file, to);
-          msgs.push(`${fmt(r.rows)} rows → ${roundName(to, plantNames)}${r.total > r.rows ? ` (of ${fmt(r.total)})` : ''}${korberCheckText(r.check)}`);
+          msgs.push(`${fmt(r.rows)} rows → ${roundName(to, plantNames)}${r.total > r.rows ? ` (of ${fmt(r.total)})` : ''}${korberCheckText(r.check)}${docText(r)}`);
           await keepFile(fileObj.current[j.file], [j.pickSrc], to);
         }
         setJob(j.id, { state: 'done', msg: `${PICK_SRCS.find((x) => x.src === j.pickSrc)!.title}: ${msgs.join(' · ')}.` });
@@ -337,7 +337,6 @@ function Uploads() {
       <div className="page-head">
         <div>
           <h1>Upload reports</h1>
-          <p>Dispatch / pick files (JAN0190…) go on the <Link href="/dispatch/">Dispatch page</Link>. First create the day and the Pick, then upload the Pick's Plan and ZMMBE (drop them below) and its ZINSR, ZCOMENT VIEW, Korber Inventory and ZROLLMGT (in the Pick card, ZROLLMGT also on the Data tab). Each upload replaces that report's previous data, the calculation runs again and every open dashboard updates live.</p>
         </div>
       </div>
 
@@ -352,7 +351,6 @@ function Uploads() {
       {weeks.length > 0 && (
         <section className="card" aria-labelledby="wk-title">
           <h2 id="wk-title">Day plans in the system</h2>
-          <p className="sub">One plan per day, plant and Pick No. Uploading a Pick again replaces only that Pick; the others stay.</p>
           <div className="wk-list">
             {weeks.slice(0, 30).map((w, i) => (
               <div key={w.week} className="wk-row">
@@ -374,7 +372,6 @@ function Uploads() {
 
       <section className="card" aria-labelledby="tpl-title">
         <h2 id="tpl-title">Sample formats</h2>
-        <p className="sub">Download a format, paste your data under the headers and upload it here. Each file has a "How to use" sheet.</p>
         <div className="tpl-grid">
           {SRC_ORDER.map((s) => (
             <button key={s} type="button" className="tpl" onClick={() => downloadTemplate(s)}>

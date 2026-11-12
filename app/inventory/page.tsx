@@ -84,11 +84,6 @@ function InventoryPage() {
     <div className="inv-page">
       <section className="card">
         <h1 style={{ marginTop: 0 }}>Inventory reconciliation</h1>
-        <p className="muted" style={{ marginTop: 0 }}>
-          SAP stock and the Korber Inventory, tallied by <b>Unic</b> = Plant-Location-Material (SAP <code>C065-0042-W1000272692</code> = Korber <code>C065-0042-1000272692</code>),
-          with a separate report for <b>PFC</b> (Korber MASKTR · SAP 0041 / OFST / OMET / XLLT) and <b>KFC</b> (Korber MASKRE · SAP 0042 and the others).
-          Worked out in your browser — nothing goes into the database; the report and the files are kept here.
-        </p>
         <div className="inv-slots">
           {(['sap', 'pfc', 'korber'] as Slot[]).map((k) => (
             <label key={k} className={`inv-slot${files[k] ? ' has' : ''}`} htmlFor={`inv-${k}`}>

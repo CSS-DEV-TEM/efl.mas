@@ -3,7 +3,7 @@ import { downloadLatest } from '@/lib/files';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, getSession, isBossRole } from '@/lib/api';
 import { ago, fmt, fmtDate } from '@/lib/calc';
-import { uploadPickFile, korberCheckText, type PickSrc } from '@/lib/pick';
+import { uploadPickFile, korberCheckText, docText, type PickSrc } from '@/lib/pick';
 import PlanReport from '@/components/PlanReport';
 import { todayLocal } from '@/lib/smart';
 
@@ -11,7 +11,7 @@ export interface DayRow { day: string; picks: number; lines: number }
 export interface PickRound { id: string; plant: string | null; round: number; lines: number; qty: number; src_at?: string | null; created_by?: string; reports: string[]; /** made from a Packing List (Import Packing List) */ imported?: number }
 interface Report { src: string; uses: 'own' | 'shared' | 'none'; rows: number; missing?: string[]; own: { file_name: string | null; uploaded_by: string; uploaded_at: string } | null; shared: { file_name: string | null; uploaded_by: string; uploaded_at: string } | null }
 
-const REPORT_NAME: Record<string, string> = { plan: 'Plan', zmmbe: 'ZMMBE', zinr: 'ZINSR / ZINR', zcoment: 'ZCOMENT VIEW', korber: 'Korber Inventory', zroll: 'ZROLLMGT', ztrr: 'ZMM_TRR' };
+const REPORT_NAME: Record<string, string> = { plan: 'Plan', zmmbe: 'ZMMBE', zinr: 'ZINSR / ZINR', zcoment: 'ZCOMENT VIEW (optional)', korber: 'Korber Inventory', zroll: 'ZROLLMGT', ztrr: 'ZMM_TRR' };
 const KEY_DAY = 'mas-day', KEY_RID = 'mas-rid';
 export const pickLabel = (r: { plant: string | null; round: number }, names: Record<string, string> = {}) => `${(r.plant && names[r.plant]) || r.plant || 'No plant'} · Pick ${r.round}`;
 
@@ -89,7 +89,7 @@ export default function DayPickBar({ day, setDay, rid, setRid, toast, refreshKey
     setBusy(src);
     try {
       const r = await uploadPickFile(src, f, rid);
-      toast(`${REPORT_NAME[src]} → ${pickLabel(rounds.find((x) => x.id === rid) || { plant: null, round: 0 }, names)}: ${fmt(r.rows)} rows${r.total > r.rows ? ` (of ${fmt(r.total)} in the file${src === 'korber' ? ' — only this Pick\'s plan items kept' : src === 'zcoment' ? ' — Shade Report only' : ''})` : ''}${korberCheckText(r.check)}`);
+      toast(`${REPORT_NAME[src]} → ${pickLabel(rounds.find((x) => x.id === rid) || { plant: null, round: 0 }, names)}: ${fmt(r.rows)} rows${r.total > r.rows ? ` (of ${fmt(r.total)} in the file${src === 'korber' ? ' — only this Pick\'s plan items kept' : src === 'zcoment' ? ' — Shade Report only' : ''})` : ''}${korberCheckText(r.check)}${docText(r)}`);
       await loadReports(); onUploaded?.();
     } catch (e) { toast(e instanceof Error ? e.message : 'Upload failed.'); } finally { setBusy(''); }
   };
@@ -104,7 +104,6 @@ export default function DayPickBar({ day, setDay, rid, setRid, toast, refreshKey
   return (
     <section className="card dpb" aria-labelledby="dpb-title">
       <h2 id="dpb-title">1 · Day &nbsp;→&nbsp; 2 · Pick &nbsp;→&nbsp; 3 · Reports</h2>
-      <p className="sub">Create the day, then a Pick (a plant&apos;s Pick 1, 2 …). Every Pick has its own Plan, ZMMBE, ZINSR, ZCOMENT VIEW and Korber Inventory, and its matching uses only those. The pick history is one for all Picks: a pallet is never picked twice, only a cut roll&apos;s balance.</p>
       <div className="dpb-row">
         <label>Day
           <select value={day} onChange={(e) => { setDay(e.target.value); setRid(''); }}>
@@ -138,9 +137,9 @@ export default function DayPickBar({ day, setDay, rid, setRid, toast, refreshKey
             const pickSrc = ['zinr', 'zcoment', 'korber', 'zroll', 'ztrr'].includes(r.src);
             return (
               <div key={r.src} className={`dpb-rep ${r.uses}`}>
-                <div className="dpb-h"><b>{REPORT_NAME[r.src]}</b><span className={`pill ${r.uses === 'own' ? 'ok' : r.uses === 'shared' ? 'warn' : 'bad'}`}>{r.uses === 'own' ? 'this Pick' : r.uses === 'shared' ? 'shared' : 'missing'}</span></div>
+                <div className="dpb-h"><b>{REPORT_NAME[r.src]}</b><span className={`pill ${r.uses === 'own' ? 'ok' : r.uses === 'shared' ? 'warn' : r.src === 'zcoment' ? 'mute' : 'bad'}`}>{r.uses === 'own' ? 'this Pick' : r.uses === 'shared' ? 'shared' : r.src === 'zcoment' ? 'optional' : 'missing'}</span></div>
                 <div className="dpb-n">{fmt(r.rows)} <span className="muted">{r.src === 'plan' ? 'lines' : 'rows'}</span></div>
-                <div className="muted small">{u ? `${u.file_name || ''} · ${u.uploaded_by} · ${ago(u.uploaded_at)}` : r.src === 'plan' || r.src === 'zmmbe' ? 'Drop the file in the upload list below' : 'Not uploaded yet'}</div>
+                <div className="muted small">{u ? `${u.file_name || ''} · ${u.uploaded_by} · ${ago(u.uploaded_at)}` : r.src === 'plan' || r.src === 'zmmbe' ? 'Drop the file in the upload list below' : r.src === 'zcoment' ? 'Not needed — rolls get their lot from ZROLLMGT Mat. Doc' : 'Not uploaded yet'}</div>
                 {r.uses === 'shared' && <div className="muted small">Uses the shared report until this Pick gets its own.</div>}
                 {r.missing?.length ? <div className="notice warn small" style={{ margin: '4px 0 0', padding: '4px 8px' }}>{r.missing.length} plan item{r.missing.length === 1 ? ' has' : 's have'} no rolls in this Pick&apos;s Korber ({r.missing.slice(0, 3).join(', ')}{r.missing.length > 3 ? '…' : ''}). If they were added to the plan after the Korber upload, upload the Korber again.</div> : null}
                 <div className="dpb-act">

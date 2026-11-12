@@ -51,7 +51,6 @@ export default function DataManager({ toast }: { toast: (m: string) => void }) {
   return (
     <section className="card set-card dm">
       <h2>Data manager</h2>
-      <p className="sub">Keeps the month&apos;s Cloudflare D1 <b>rows read</b> inside the plan. When the month is heading over it, pages reload less often (Saver / Strict). Pick rules, checks and saves never change — a pick is always checked against the database when it is saved.</p>
       <p className="sub si" lang="si">මාසයේ D1 rows read ගණන plan එක ඇතුලේ තියාගන්නවා. මාසය plan එකට වඩා යන වේගයක් නම් pages reload වෙන වාර අඩු කරනවා (Saver / Strict). Pick rules, checks, save කිරීම කවදාවත් වෙනස් වෙන්නේ නැහැ.</p>
 
       <div className={`dm-gauge tone-${tone}`}>

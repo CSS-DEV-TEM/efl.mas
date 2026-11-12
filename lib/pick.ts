@@ -8,12 +8,12 @@ import { api } from './api';
 import { readWorkbook, type Grid } from './mapping';
 
 export type PickSrc = 'zinr' | 'zcoment' | 'korber' | 'zroll' | 'ztrr';
-export const PICK_SRCS: { src: PickSrc; title: string; hint: string; needs: string[] }[] = [
-  { src: 'zinr', title: 'ZINR', hint: 'Inspection lots: Sales Order, Line Item, Material, Batch, Insp. Lot Quantity, Vendor Invoice No', needs: ['inspection lot', 'insp lot quantity'] },
+export const PICK_SRCS: { src: PickSrc; title: string; hint: string; needs: string[]; optional?: boolean }[] = [
+  { src: 'zinr', title: 'ZINR', hint: 'Inspection lots: Sales Order, Line Item, Material, Batch, Vendor Batch, Insp. Lot Quantity, Material Document, Vendor Invoice No', needs: ['inspection lot', 'insp lot quantity'] },
   // either layout: the detail export (Inspection lot, Report Name, Roll qty.) or the roll view (Inspection #, Vendor Roll No, Shade, Barcode Number)
-  { src: 'zcoment', title: 'ZCOMENT VIEW', hint: 'One row per roll: Inspection # / Inspection lot, Vendor Batch, Vendor Roll No, Shade, Barcode Number (only "Shade Report" rows when there is a Report Name)', needs: ['vendor roll no', 'shade'] },
+  { src: 'zcoment', title: 'ZCOMENT VIEW (optional)', hint: 'Not needed (v189): each roll gets its inspection lot from ZROLLMGT Mat. Doc = ZINSR Material Document. Upload only to look up rolls already issued (Plan Check) or the re-inspection shades', needs: ['vendor roll no', 'shade'], optional: true },
   { src: 'ztrr', title: 'ZMM_TRR', hint: 'Transfer requests: Transfer Request Number, To Sales Order, Sales Document Item, Material, Batch, Transfer Quantity, From SO Report No (= ZROLLMGT QM Comment 1 of its rolls)', needs: ['transfer request number', 'to sales order'] },
-  { src: 'zroll', title: 'ZROLLMGT', hint: 'Roll management: Barcode Number and StorageBin (the StorageBin rule in Settings → Pick rules decides which rolls can be picked)', needs: ['barcode number|barcode|barcode no|barcode no.', 'storagebin|storage bin|bin|bin location'] },
+  { src: 'zroll', title: 'ZROLLMGT', hint: 'Roll management: Barcode Number, StorageBin, Material, System Batch, Vendor Batch, Mat. Doc (= ZINSR Material Document — the roll\'s inspection lot). The StorageBin rule in Settings → Pick rules decides which rolls can be picked', needs: ['barcode number|barcode|barcode no|barcode no.', 'storagebin|storage bin|bin|bin location'] },
   { src: 'korber', title: 'Korber Inventory', hint: 'Only rolls of items in the plan are uploaded: Pallet, Item Number, Lot Number, Actual Qty, Supplier Hu', needs: ['pallet', 'item number', 'actual qty'] },
 ];
 
@@ -153,13 +153,18 @@ export async function uploadPickSheets(src: PickSrc, sheets: ReturnType<typeof r
     const ri = t.header.map(hn).indexOf('report name');
     if (ri >= 0) rows = rows.filter((r) => hn(r[ri]) === 'shade report');
   }
-  const r = await api<{ rows: number; skipped: number; check?: KorberCheck }>('/api/pick/upload', { method: 'POST', body: { src, header: t.header, rows, fileName: file.name, total, ...(rid ? { rid } : {}) } });
+  const r = await api<{ rows: number; skipped: number; check?: KorberCheck; derived?: number; docWarn?: string }>('/api/pick/upload', { method: 'POST', body: { src, header: t.header, rows, fileName: file.name, total, ...(rid ? { rid } : {}) } });
   // v185: the Korber Inventory is checked against the pick history, pallet by pallet (v186: the report is not downloaded — the upload message says it)
   return { ...r, total, sheet: t.sheet };
 }
 /** v185: a Korber Inventory upload against the pick history (every user and Pick), pallet by pallet */
 export interface KCRow { pallet: string; item: string | null; lot: string | null; location: string | null; roll: number; picked: number; left: number; korber: number; used: number; diff: number; lines: string | null; picks: string; day: string | null }
 export interface KorberCheck { pallets: number; same: number; lowN: number; notOutN: number; low: KCRow[]; notOut: KCRow[] }
+/** v193: the rolls that got their inspection lot from ZROLLMGT Mat. Doc = ZINSR Material Document (or why none did) */
+export function docText(r: { derived?: number; docWarn?: string }) {
+  if (r.docWarn) return ` · ⚠ ${r.docWarn}`;
+  return typeof r.derived === 'number' ? ` · ${r.derived.toLocaleString()} roll + lot rows from ZROLLMGT Mat. Doc` : '';
+}
 /** one line for the upload toast */
 export function korberCheckText(c?: KorberCheck) {
   if (!c || !c.pallets) return '';
@@ -294,8 +299,8 @@ export function notPickedWhy(c: Candidates | null, l: { hold?: string | null; st
   if (!(open > 1e-9)) return { reason: 'Nothing left to pick', detail: `Need ${r3n(c.need)}, picked ${r3n(c.picked)}` };
   if (!c.lots.length) return { reason: 'No ZINSR inspection lot', detail: 'ZINSR has no lot for this SO / LI / Material and its ZMMBE batch' };
   if (!avail.length) {
-    if ((c.nobarcode || []).some((m) => !m.done)) return { reason: 'Needs manual choice — no barcode', detail: `${(c.nobarcode || []).filter((m) => !m.done).length} ZCOMENT roll(s) without a Barcode Number: choose the Korber roll by hand` };
-    if ((c.manual || []).length) return { reason: 'Needs manual choice — not matched', detail: `${c.manual!.length} ZCOMENT roll(s) do not match a Korber pallet (Lot / HU / Invoice / Po differ)${blockedTxt ? ' · ' + blockedTxt : ''}` };
+    if ((c.nobarcode || []).some((m) => !m.done)) return { reason: 'Needs manual choice — no barcode', detail: `${(c.nobarcode || []).filter((m) => !m.done).length} inspection lot roll(s) with no Korber pallet by Barcode Number (no roll in ZROLLMGT Mat. Doc / ZCMNTVIEW, or its barcode is not in Korber): choose the Korber roll by hand` };
+    if ((c.manual || []).length) return { reason: 'Needs manual choice — not matched', detail: `${c.manual!.length} inspection lot roll(s) do not match a Korber pallet (Lot / HU / Invoice / Po differ, or not in Korber)${blockedTxt ? ' · ' + blockedTxt : ''}` };
     if (c.gate?.on && !c.gate.loaded) return { reason: 'No ZROLLMGT', detail: 'ZROLLMGT is not uploaded for this Pick' };
     if (blockedTxt) return { reason: 'Rolls blocked', detail: blockedTxt };
     return { reason: 'No matching roll', detail: 'No Korber roll matched ZINSR → ZCOMENT VIEW → Korber for this line' };

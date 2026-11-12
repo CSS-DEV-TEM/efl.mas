@@ -92,7 +92,6 @@ export default function PlanPicks({ rows, label, reloadKey, plantName }: { rows:
       <div className="table-head">
         <div>
           <h2 id="pp-title">Completed picks <span className="pill accent" style={{ marginLeft: 8, fontSize: 12 }}>{label}</span></h2>
-          <p className="sub" style={{ margin: 0 }}>Every saved pick of this plan&apos;s lines, newest first, with the time it was saved. Mark picks (none marked = all shown) and download the Packing List or the Korber rows.</p>
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
           <label className="pp-opt"><input type="radio" checked={oneSheet} onChange={() => setOne(true)} /> One sheet</label>

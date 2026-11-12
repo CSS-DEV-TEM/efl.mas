@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, getSession, isBossRole, userParam } from '@/lib/api';
 import { ago, fmt, fmtDate, fmtQty, type WeekInfo } from '@/lib/calc';
 import { applyMapping, detectMapping, guessSrc, isHelpSheet, readWorkbook, type Grid } from '@/lib/mapping';
-import { PICK_SRCS, PLAN_SHEET, pickSrcOfSheet, squash, uploadPickSheets, korberCheckText, type PickSrc } from '@/lib/pick';
+import { PICK_SRCS, PLAN_SHEET, pickSrcOfSheet, squash, uploadPickSheets, korberCheckText, docText, type PickSrc } from '@/lib/pick';
 import { todayLocal, weekDays, weekIdOf, weekOptions } from '@/lib/smart';
 import PlanReport from '@/components/PlanReport';
 import { keepFile } from '@/lib/files';
@@ -170,7 +170,7 @@ export default function WeekPlanManager({ toast, onChanged }: { toast: (m: strin
           } else {
             const sh = file!.sheets.filter((s) => s.name === j.name);
             const r = await uploadPickSheets(j.pick!, sh, file!.name, target);
-            setJob(j.name, { state: 'ok', msg: `${fmt(r.rows)} rows${r.total > r.rows ? ` (of ${fmt(r.total)} — only the week plan's items)` : ''}${korberCheckText(r.check)}` });
+            setJob(j.name, { state: 'ok', msg: `${fmt(r.rows)} rows${r.total > r.rows ? ` (of ${fmt(r.total)} — only the week plan's items)` : ''}${korberCheckText(r.check)}${docText(r)}` });
           }
         } catch (e) { setJob(j.name, { state: 'err', msg: e instanceof Error ? e.message : 'failed' }); }
       }
@@ -195,7 +195,6 @@ export default function WeekPlanManager({ toast, onChanged }: { toast: (m: strin
       <div className="sheet-top">
         <div>
           <h2 id="wk-title">Week plans</h2>
-          <p className="sub" style={{ margin: 0 }}>Kept apart from the day plans and Picks. Upload the week plan file (e.g. ASIA LINE PENDING: the plan sheet + ZMMBE, ZMM_TRR, ZINSR, SHADE, ZROLLMGT, KORBER) — or the reports alone later: they replace the chosen week&apos;s reports and the week plan is refreshed from them.</p>
         </div>
         {canEdit && <>
           <button className="btn primary" onClick={() => fileRef.current?.click()}>⤒ Upload week plan / reports</button>
@@ -291,8 +290,8 @@ export default function WeekPlanManager({ toast, onChanged }: { toast: (m: strin
         <div className="wk-reps" aria-label={`Reports of ${repRid}`}>
           <span className="pick-tab-label">Reports of {sel} · {selPlant}</span>
           {reps.filter((r) => r.src !== 'plan').map((r) => (
-            <span key={r.src} className={`pill ${r.uses === 'own' ? 'ok' : r.uses === 'shared' ? 'warn' : 'bad'}`} title={r.own ? `${r.own.file_name || ''} · ${r.own.uploaded_by} · ${ago(r.own.uploaded_at)}` : r.uses === 'shared' ? 'No upload for this week: the shared report is used' : 'Not uploaded'}>
-              {REP_NAME[r.src] || r.src} · {r.uses === 'own' ? `${fmt(r.rows)} rows · ${r.own ? ago(r.own.uploaded_at) : ''}` : r.uses === 'shared' ? 'shared' : 'missing'}
+            <span key={r.src} className={`pill ${r.uses === 'own' ? 'ok' : r.uses === 'shared' ? 'warn' : r.src === 'zcoment' ? 'mute' : 'bad'}`} title={r.own ? `${r.own.file_name || ''} · ${r.own.uploaded_by} · ${ago(r.own.uploaded_at)}` : r.uses === 'shared' ? 'No upload for this week: the shared report is used' : 'Not uploaded'}>
+              {REP_NAME[r.src] || r.src} · {r.uses === 'own' ? `${fmt(r.rows)} rows · ${r.own ? ago(r.own.uploaded_at) : ''}` : r.uses === 'shared' ? 'shared' : r.src === 'zcoment' ? 'optional' : 'missing'}
             </span>
           ))}
         </div>

@@ -91,13 +91,6 @@ function PlanCheckPage() {
     <div className="pc-page">
       <section className="card">
         <h1 style={{ marginTop: 0 }}>Plan_Format check</h1>
-        <p className="muted" style={{ marginTop: 0 }}>
-          Upload a Plan_Format (SO, LI, Item Code, Date, QTY). Every line is checked against the picks the system has already sent for the same
-          <b> SO / LI / Item Code</b> (cancelled picks left out): <span className="pill ok">Sent</span> <span className="pill warn">Partly sent</span> <span className="pill bad">Not sent</span>,
-          the QTY sent and the balance. The report gives the Plan_Format back with these columns, and every roll that was sent (Pick date and No, pallet,
-          Korber Lot Number, SAP batch, Vendor Batch).
-          It also checks every roll SAP inspected for the SO line: <b>ZINSR lot → ZCMNTVIEW Barcode Number → Korber Pallet</b> — was that pallet picked, for this SO line or another?
-        </p>
         <label className={`inv-slot${file ? ' has' : ''}`} htmlFor="pc-file" style={{ maxWidth: 520 }}>
           <b>Plan_Format</b>
           <small>The first sheet with SO, LI and Item Code columns is read.</small>
@@ -114,11 +107,6 @@ function PlanCheckPage() {
 
       <section className="card">
         <h2 style={{ marginTop: 0 }}>🩺 Pick diagnosis — pick නොවෙන්නේ ඇයි?</h2>
-        <p className="muted" style={{ marginTop: 0 }}>
-          Plan_Format එකේ හැම line එකක්ම Pick &amp; Dispatch එකේ roll matching එකෙන්ම check කරලා, <b>pick වෙනවද, නැත්නම් ඇයි, මොකක්ද කරන්න ඕනේ</b> කියලා සිංහලෙන් පෙන්නනවා
-          (ZMMBE UR / QI / Block, ZINSR lot, ZCMNTVIEW barcode → Korber, ZROLLMGT bin / status). System එකට upload කරලා තියෙන reports පාවිච්චි කරනවා —
-          line එක plan එකක තියෙනවා නම් ඒ Pick එකේ reports, නැත්නම් shared reports. Reports අලුත් කරන්න <a href="/upload/">Uploads</a> එකට යන්න.
-        </p>
         <div className="row" style={{ gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
           <button className="btn primary" disabled={!!dBusy || !!busy || !file} onClick={() => void runDiag()}>{dBusy ? 'Checking…' : '🩺 Check why (සිංහලෙන්)'}</button>
           {diag && <button className="btn" onClick={downloadDiag}>⤓ Download diagnosis (Excel)</button>}

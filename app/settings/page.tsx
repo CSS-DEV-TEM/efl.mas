@@ -33,7 +33,6 @@ function Settings() {
       <div className="page-head">
         <div>
           <h1>Settings</h1>
-          <p>System settings — only the Admin can change them. Head accounts can do everything else (all users&apos; plans and picks); User accounts work on their own plan only.</p>
         </div>
       </div>
       <div className="tabs" role="tablist" style={{ marginBottom: 14 }}>
@@ -71,7 +70,6 @@ function PickRules({ toast }: { toast: (m: string) => void }) {
   return (
     <section className="card set-card">
       <h2>Pick rules</h2>
-      <p className="sub">How the Pick window behaves for everyone.</p>
       <div className="set-grid">
         <label className="set-row">
           <span><b>Default pick type</b><small>What a new Pick window starts with.</small></span>
@@ -173,7 +171,6 @@ function BlockedLocations({ list, ver, onChange }: { list: BlockLoc[]; ver: numb
   return (
     <div className="block-locs">
       <h3>Blocked Korber locations</h3>
-      <p className="sub" style={{ marginTop: 0 }}>A roll whose Korber <b>Wh Id</b> + <b>Location Id</b> is in this list is never picked by any Pick — not offered, not selected by Pick all matched, and refused when saved by hand. Leave Wh Id empty for every Wh Id; end the Location Id with <b>*</b> for every location starting so (e.g. <code>STAGE*</code>). Click <b>Save pick rules</b> after a change.</p>
       <div className="bl-add">
         <label>Wh Id<input className="as-search" list="bl-whs" value={wh} onChange={(e) => setWh(e.target.value)} placeholder="any" style={{ width: 110 }} /></label>
         <datalist id="bl-whs">{(info?.whs || []).filter((x) => x.wh).map((x) => <option key={x.wh} value={x.wh}>{x.n} rolls</option>)}</datalist>
@@ -214,7 +211,6 @@ function PlantsSettings({ toast }: { toast: (m: string) => void }) {
   return (
     <form className="card set-card" onSubmit={save}>
       <h2>Plants &amp; target times</h2>
-      <p className="sub">The plant code from the plan → the name in the Plant summary, who is responsible and the target time (e.g. 10:00 AM, or Weekly). A plan received after the target time shows red. Users type the received time on the dashboard.</p>
       {!list ? <Loader /> : (
         <div className="ps-grid">
           <span>Plant code</span><span>Name</span><span>Responsible</span><span>Target time</span><span>Order</span><span />
@@ -259,7 +255,6 @@ function ReportRules({ toast }: { toast: (m: string) => void }) {
   return (
     <section className="card set-card">
       <h2>Locations: reports from ZMMBE</h2>
-      <p className="sub">Like the Pull Plan workbook: one ZMMBE upload also fills ZMMBE KFC and ZMMBE PFC, split by storage location. A KFC / PFC / PLANT file uploaded on its own still replaces that report until the next ZMMBE upload.</p>
       <div className="set-grid">
         <label className="set-row">
           <span><b>Build KFC, PFC (and PLANT) from ZMMBE</b><small>Turn off to upload the four reports separately as before.</small></span>
@@ -298,7 +293,6 @@ function TimeSetup({ toast }: { toast: (m: string) => void }) {
   return (
     <section className="card set-card">
       <h2>Time setup</h2>
-      <p className="sub">Each plant&apos;s own target time is set under Plants. These apply to every plant.</p>
       <div className="set-grid">
         <label className="set-row">
           <span><b>Default target time</b><small>Used for a plant without its own target time (e.g. 10:00 AM). Empty = none.</small></span>
@@ -443,7 +437,6 @@ function ZmmbePlants({ toast }: { toast: (m: string) => void }) {
   return (
     <section className="card set-card">
       <h2>ZMMBE plants</h2>
-      <p className="sub">For each plant (Settings → Plants &amp; target times): <b>the SO Plants</b> its Picks take stock from (add as many as needed — type them with a comma, e.g. <span className="mono">C068, C050</span>). The ZMMBE <b>Plant</b> is not set up — a row of <b>any Plant</b> in the uploaded ZMMBE counts for UR, but a Pick takes stock <b>only from the SO Plants of its own plant</b>; rows of other SO Plants are left out and listed when the ZMMBE is uploaded. <b>*</b> = any SO Plant. A plant with nothing set up takes every SO Plant set up here (nothing set up at all: every row counts).</p>
       <div className="table-wrap" style={{ maxHeight: 'none' }}>
         <table className="mini" data-nofilter>
           <thead><tr><th>Plant (linked)</th><th>SO Plants</th><th /></tr></thead>

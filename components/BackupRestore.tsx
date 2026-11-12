@@ -85,7 +85,6 @@ export default function BackupRestore({ toast }: { toast: (m: string) => void })
   return (
     <section className="card" aria-labelledby="bk-title">
       <h2 id="bk-title">Backup &amp; Restore · <span className={`div-tag ${getDiv()}`}>{DIV_NAME[getDiv()]}</span></h2>
-      <p className="sub">A backup is one .json file with every plan (all Picks), the pick history and Packing List data, statuses, the reports (ZMMBE, ZINR, ZCOMENT, Korber…), plants and settings. <b>Users and passwords are never in it</b> and a restore never changes them. Keep backups internal — they hold real SO data.</p>
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', margin: '12px 0' }}>
         <button className="btn primary" disabled={!!busy} onClick={backup}>Download backup</button>
         <button className="btn" disabled={!!busy} onClick={() => input.current?.click()}>Restore from a backup…</button>

@@ -1804,3 +1804,32 @@ input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, te
 .orb-count { color: #fff; background: var(--grad); }
 .kpi:hover { box-shadow: var(--neu), 0 16px 34px -18px rgba(242, 70, 60, .45) !important; }
 .gl-gauge svg { overflow: visible; }
+/* v191: the turning 3PL badge, back beside the name (and under the logo when the menu is collapsed) */
+.side-name small { display: flex; align-items: center; gap: 6px; }
+.side-name .tpl-badge > span { font-size: 10px; padding: 1px 5px; }
+.side-3pl-min { display: none; }
+.app.side-min .side-3pl-min { display: inline-grid; }
+.app.side-min .side-brand { flex-direction: column; gap: 6px; }
+.side-3pl-min > span { font-size: 9.5px; padding: 1px 4px; }
+@media (max-width: 900px) { .app.side-min .side-3pl-min { display: none; } .app.side-min .side-brand { flex-direction: row; } }
+/* v192: README */
+.rm-tools { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.rm-tools input[type="search"] { min-width: 220px; height: 36px; padding: 0 14px; border-radius: 999px; }
+.rm-grid { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 18px; align-items: start; }
+.rm-toc { position: sticky; top: 130px; display: grid; gap: 2px; padding: 10px; }
+.rm-toc a { display: flex; gap: 10px; align-items: center; padding: 8px 12px; border-radius: 12px; text-decoration: none; color: var(--ink-2); font-family: var(--font-head); font-weight: 500; font-size: 13.5px; }
+.rm-toc a:hover { background: var(--panel-2); color: var(--ink); }
+.rm-toc a.on { color: #fff; background: var(--grad); box-shadow: 0 6px 16px -8px rgba(242, 70, 60, .7); }
+.rm-ver { margin: 8px 12px 2px; font-family: var(--font-mono); font-size: 11px; color: var(--ink-3); }
+.rm-body { display: grid; gap: 16px; min-width: 0; }
+.rm-sec { padding: 20px 24px; scroll-margin-top: 130px; line-height: 1.65; }
+.rm-sec h2 { margin: 0; font-size: 19px; }
+.rm-h { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+.rm-sec ul, .rm-sec ol { margin: 6px 0; padding-left: 22px; display: grid; gap: 6px; }
+.rm-sec p { margin: 8px 0; }
+.rm-si { font-family: "Noto Sans Sinhala", var(--font-sans); }
+.rm-chain { padding: 10px 14px; border-radius: 14px; background: var(--panel-2); box-shadow: var(--neu-in); font-size: 13.5px; }
+.rm-t { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.rm-t th, .rm-t td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+.rm-t th { font-family: var(--font-head); font-size: 12.5px; color: var(--ink-3); }
+@media (max-width: 900px) { .rm-grid { grid-template-columns: minmax(0, 1fr); } .rm-toc { position: static; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); } .rm-t { display: block; overflow-x: auto; } }

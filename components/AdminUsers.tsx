@@ -61,7 +61,6 @@ export function UsersAdmin() {
     <>
       <section className="card" id="users">
         <h2>Users &amp; roles</h2>
-        <p className="sub">Add people who can sign in. Entering an existing username with a new password resets that password. Passwords are stored hashed (PBKDF2).</p>
         <form className="form" onSubmit={save} style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', alignItems: 'end' }}>
           <label htmlFor="nu">Username<input id="nu" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} required /></label>
           <label htmlFor="np">Password<input id="np" type="password" autoComplete="new-password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="min 6 characters" /></label>

@@ -74,7 +74,6 @@ function WeekDispatch({ toggle }: { toggle: React.ReactNode }) {
       <div className="page-head">
         <div>
           <h1>Pick &amp; Dispatch</h1>
-          <p>Week plan: choose the <b>week</b>, the <b>day</b> and the <b>plant</b> — that day&apos;s lines are picked with the same matching as a Pick, from the week&apos;s own reports (Week plan tab or the Pick data card below), else the shared ones.</p>
           {toggle}
         </div>
         <div className="week-pick" style={{ margin: 0, display: 'flex', gap: 8, alignItems: 'end', flexWrap: 'wrap' }}>
@@ -154,7 +153,6 @@ function Dispatch({ toggle }: { toggle: React.ReactNode }) {
       <div className="page-head">
         <div>
           <h1>Pick &amp; Dispatch</h1>
-          <p>Choose the <b>day</b> and the <b>Pick</b> (Pick No of a plant): only that plan&apos;s lines show. Pick the matched Korber rolls; what is picked counts as <b>Dispatched</b>, and the Packing List is built from the picks.</p>
           {toggle}
         </div>
         <div className="week-pick" style={{ margin: 0, display: 'flex', gap: 8, alignItems: 'end', flexWrap: 'wrap' }}>

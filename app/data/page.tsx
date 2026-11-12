@@ -70,7 +70,6 @@ function DataPage() {
       <div className="page-head">
         <div>
           <h1>Data</h1>
-          <p>The Pick&apos;s ZROLLMGT (roll management). A roll is picked only when its <b>Barcode Number</b> is in ZROLLMGT at {anyBut ? <>a StorageBin other than <b>{bin.replace(/^any bin except /i, '')}</b></> : <>StorageBin <b>{bin}</b></>}, is a <b>ZCOMENT VIEW Barcode Number</b> (of the line&apos;s ZMMBE batch) and is the <b>Korber Pallet</b> (Pick Id 0). A roll with no ZCOMENT barcode is matched on Invoice, Item and Lot, and its <b>Korber Pallet</b> must be in ZROLLMGT at {bin}. Every pick, manual roll and replacement is checked against it.</p>
         </div>
       </div>
 
@@ -169,7 +168,6 @@ function PalletHistory({ boss, toast }: { boss: boolean; toast: (m: string) => v
       <div className="sheet-top">
         <div>
           <h2 id="ph2-title">Pallet history</h2>
-          <p className="sub" style={{ margin: 0 }}>Scan or type a Korber pallet: every pick of it (all days, Picks and users) and its rejects.{boss ? ' Admin / Head can delete its history — the pallet is then pickable in full again.' : ''}</p>
         </div>
         <form style={{ display: 'flex', gap: 8 }} onSubmit={(e) => { e.preventDefault(); void find(); }}>
           <input className="as-search" autoComplete="off" placeholder="Pallet, e.g. CP000008064260" value={q} onChange={(e) => setQ(e.target.value.toUpperCase())} aria-label="Korber pallet" style={{ width: 230 }} />
@@ -216,7 +214,6 @@ function CutRolls({ rid }: { rid: string }) {
   return (
     <section className="card" aria-labelledby="cr-title">
       <h2 id="cr-title">Cut rolls on the shelf {res && <span className="pill accent" style={{ marginLeft: 6 }}>{res.rows.length} · {fmtQty(res.total)}</span>}</h2>
-      <p className="sub">Rolls picked in part (all days, Picks and users) and what is left of each. The pick window uses a cut roll&apos;s balance first and, when a roll has to be cut, cuts one that is already cut — so fewer rolls are cut.</p>
       {!res ? <Loader label="Loading cut rolls…" /> : !res.rows.length ? <p className="muted">No cut roll on the shelf.</p> : (
         <div className="table-wrap" style={{ maxHeight: 360 }}>
           <table className="mini">

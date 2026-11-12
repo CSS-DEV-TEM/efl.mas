@@ -15,7 +15,7 @@ import { downloadLatest } from '@/lib/files';
 import { smartBest, smartSuggest, type Suggestion } from '@/lib/rollSuggest';
 import { startTask } from '@/lib/progress';
 import {
-  PICK_SRCS, type PLIssue, type NotPicked, notPickedWhy, korberWorkbook, ordinal, packingListWorkbook, saveWorkbook, uploadPickFile, korberCheckText,
+  PICK_SRCS, type PLIssue, type NotPicked, notPickedWhy, korberWorkbook, ordinal, packingListWorkbook, saveWorkbook, uploadPickFile, korberCheckText, docText,
   pickNote, parsePackingListFile, planPickWorkbook, type PPLine, type PPRoll, type PLPiece, type Candidate, type Candidates, type KorberRow, type SapFit, type ManualRoll, type NbOption, type NoBarcodeRoll, type PickHistory, type PickSrc,
 } from '@/lib/pick';
 
@@ -76,8 +76,8 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
     try {
       // v158: the Korber Inventory for every Pick (24 hours)
       const r = await uploadPickFile(src, f, forAll ? 'ALL' : rid || null);
-      if (forAll) { toast(`Korber Inventory for all Picks: ${fmt(r.rows)} rows saved — every Pick reads it for 24 hours (a Pick's own Korber uploaded later wins)${korberCheckText(r.check)}`); loadStatus(); return; }
-      toast(`${PICK_SRCS.find((x) => x.src === src)!.title}: ${fmt(r.rows)} rows saved${r.total > r.rows ? ` (of ${fmt(r.total)} in the file${src === 'korber' ? ' — only plan items kept' : src === 'zcoment' ? ' — Shade Report only' : ''})` : ''}${korberCheckText(r.check)}`);
+      if (forAll) { toast(`Korber Inventory for all Picks: ${fmt(r.rows)} rows saved — every Pick reads it for 24 hours (a Pick's own Korber uploaded later wins)${korberCheckText(r.check)}${docText(r)}`); loadStatus(); return; }
+      toast(`${PICK_SRCS.find((x) => x.src === src)!.title}: ${fmt(r.rows)} rows saved${r.total > r.rows ? ` (of ${fmt(r.total)} in the file${src === 'korber' ? ' — only plan items kept' : src === 'zcoment' ? ' — Shade Report only' : ''})` : ''}${korberCheckText(r.check)}${docText(r)}`);
       loadStatus();
     } catch (e) { toast(e instanceof Error ? e.message : 'Upload failed.'); }
     finally { setBusy(null); }
@@ -454,14 +454,13 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
         <h2 id="pd-title">Pick data {rid ? <span className="pill accent" style={{ marginLeft: 6 }}>{label || rid}</span> : null}</h2>
         {!rid && isWk && <div className="notice warn" style={{ margin: '6px 0' }}>Week plan: choose the <b>Plant</b> at the top — each plant of a week has its own reports (ZMMBE, ZINSR, SHADE, ZROLLMGT, KORBER, ZMM_TRR). Every plant&apos;s lines are still picked from that plant&apos;s reports.</div>}
         {!rid && !isWk && <div className="notice warn" style={{ margin: '6px 0' }}>Choose a Pick at the top: every Pick has its own ZINSR, ZCOMENT VIEW and Korber Inventory. (All picks of the day: the reports shown are the shared ones.)</div>}
-        <p className="sub">Upload in any order; each upload replaces that Pick&apos;s previous one. Matching: ZMMBE → ZINR (SO, LI, Material, Batch, UR = Insp. Lot Qty) → ZCOMENT VIEW Shade Report (Inspection lot) → Korber — a roll is matched only when all agree: Barcode Number = Pallet, Vendor Batch = Lot Number, Vendor Roll No = Supplier Hu (ZCOMENT), Vendor Invoice No = Invoice Number and Purchasing Document = Po Number (ZINR). Qty differences need “Confirmed”.</p>
         <div className="pick-ups">
           {PICK_SRCS.map((p) => {
             const u = status?.uploads.find((x) => x.src === p.src);
             return (
               <div key={p.src} className="pick-up">
                 <div><b>{p.title}</b> <span className="pill mute">{fmt(cnt(p.src))} rows</span>{' '}
-                  {(() => { const u0 = status?.reports?.find((x) => x.src === p.src)?.uses; return rid && u0 ? <span className={`pill ${u0 === 'own' || u0 === 'all' ? 'ok' : u0 === 'shared' ? 'warn' : 'bad'}`}>{u0 === 'own' ? 'this Pick' : u0 === 'shared' ? 'shared' : u0 === 'all' ? 'all Picks · 24 h' : 'missing'}</span> : null; })()}</div>
+                  {(() => { const u0 = status?.reports?.find((x) => x.src === p.src)?.uses; return rid && u0 ? <span className={`pill ${u0 === 'own' || u0 === 'all' ? 'ok' : u0 === 'shared' ? 'warn' : p.optional ? 'mute' : 'bad'}`}>{u0 === 'own' ? 'this Pick' : u0 === 'shared' ? 'shared' : u0 === 'all' ? 'all Picks · 24 h' : p.optional ? 'optional' : 'missing'}</span> : null; })()}</div>
                 <span className="muted small">{u ? `${u.file_name || ''} · ${u.uploaded_by} · ${ago(u.uploaded_at)}` : p.hint}</span>
                 {p.src === 'korber' && (() => {
                   const a = status?.reports?.find((x) => x.src === 'korber')?.all;
@@ -488,7 +487,6 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
         <div className="sheet-top">
           <div>
             <h2 id="rp-title">Plan → Pick <span className="pill ok" style={{ marginLeft: 6 }}>{fmt(list.length)}</span></h2>
-            <p className="sub" style={{ margin: 0 }}>To pick now: Auto match = the matched rolls cover the QTY (⚡ Pick all matched picks them) · Needs manual = pick by hand, with the reason. Balance = QTY − picked. Picked QTY counts as Dispatched.</p>
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
             <input type="search" className="as-search" placeholder="Search SO, item…" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search lines" />
@@ -1832,7 +1830,6 @@ function PickHistoryCard({ canEdit, toast, onChanged, plApi }: { canEdit: boolea
       <div className="sheet-top">
         <div>
           <h2 id="ph-title">Pick history &amp; Packing List</h2>
-          <p className="sub" style={{ margin: 0 }}>Everyone&apos;s picks of the day. A fully picked roll can&apos;t be picked again by anyone; a part-picked roll keeps only its balance for the next pick. Cancel deletes a pick and frees its rolls — mark several picks to cancel them together.</p>
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
           <div className="seg" role="group" aria-label="Whose picks">
@@ -1950,7 +1947,6 @@ function RejectedRolls({ canEdit, toast, onChanged }: { canEdit: boolean; toast:
       <div className="sheet-top">
         <div>
           <h2 id="rj-title">Rejected rolls {open > 0 && <span className="pill bad" style={{ marginLeft: 6 }}>{open} to replace</span>}</h2>
-          <p className="sub" style={{ margin: 0 }}>Rolls taken off a pick for a problem (Reject in the pick history). A rejected pallet is never picked again. Assign a Korber roll of the same Material: it is picked into the same pick (Pick Id 0, not picked before — only a cut roll&apos;s balance).</p>
         </div>
         <div className="seg" role="group"><button className={!all ? 'on' : ''} onClick={() => setAll(false)}>To replace</button><button className={all ? 'on' : ''} onClick={() => setAll(true)}>All</button></div>
       </div>
@@ -2050,7 +2046,7 @@ function ImportPLDialog({ week, label, toast, onClose }: { week: string; label: 
       <div className="modal xwide" role="dialog" aria-modal="true" aria-labelledby="imp-title">
         <div className="modal-head">
           <div><h2 id="imp-title">Import Packing List</h2>
-            <p className="sub" style={{ margin: 0 }}>A Packing List in this system&apos;s format (KFC / PFC Packing List sheets: the rolls of each table and its SAP lines <b>SO | LI | Qty | Material | Batch</b>). Each roll is saved as a pick of that SO line in this Pick, with that SAP batch; a cut roll&apos;s pieces come from the <b>Cut Roll Balance</b> sheet when the file has one. Rolls already saved the same way are skipped.</p></div>
+            </div>
           <button className="btn sm" aria-label="Close" onClick={() => onClose(false)}>✕</button>
         </div>
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', margin: '4px 0 8px' }}>
@@ -2161,7 +2157,7 @@ function TallyDialog({ ids, toast, onClose }: { ids: number[]; toast: (m: string
       <div className="modal xwide" role="dialog" aria-modal="true" aria-labelledby="tally-title">
         <div className="modal-head">
           <div><h2 id="tally-title">Tally cut roll balances</h2>
-            <p className="sub" style={{ margin: 0 }}>A cut roll&apos;s balance goes first to the <b>SO line it was cut for</b> when that line still has UR (the whole roll for that SO), else to another SO line whose <b>SO Plant</b> is the Pick plant&apos;s code (Settings → Plants &amp; target times): same <b>Material</b> and <b>LI</b> number, UR in <b>ZMMBE</b>, and a <b>ZINSR</b> lot whose <b>Vendor Batch</b> is the roll&apos;s Korber Lot Number (always the same — never another Vendor Batch). Only the SAP batch may differ. Each one is saved as a pick of that SO line and goes on the Packing List with its SAP details.</p></div>
+            </div>
           <button className="btn sm" aria-label="Close" onClick={() => onClose(saved > 0)}>✕</button>
         </div>
         {!rolls && !err && <Loader label="Finding the cut rolls and the SO lines they can go to…" />}
@@ -2212,7 +2208,6 @@ function HistorySearch() {
   return (
     <section className="card" aria-labelledby="hs-title">
       <h2 id="hs-title">Search the pick history</h2>
-      <p className="sub">Every pick of every day and user. Type any value: pallet, SO, material, lot, batch, inspection lot, HJ Pick No, shade, user, plan (e.g. 2026-10-24, C064), invoice or any Korber field.</p>
       <input type="search" className="as-search" style={{ width: '100%', maxWidth: 520 }} placeholder="Search pallet, SO, item, lot, pick no, user…" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search pick history" />
       {busy && <Loader inline label="Searching…" />}
       {res && !busy && (

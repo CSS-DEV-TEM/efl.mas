@@ -208,6 +208,7 @@ export default function Shell({ children, admin, allowGuest }: { children: React
     { href: '/inventory/', label: 'Inventory', hint: 'SAP Korber reconciliation' },
     { href: '/plan-check/', label: 'Plan Check', hint: 'sent check pick diagnosis' },
     ...(user.role === 'admin' ? [{ href: '/settings/', label: 'Settings', hint: 'users backup' }] : []),
+    { href: '/readme/', label: 'README', hint: 'help how it works guide rules' },
   ];
   const here = nav.find((n) => isOn(n.href, path))?.label ?? '';
   const liveText = state === 'live' ? 'Live' : state === 'connecting' ? 'Connecting…' : 'Updates on activity';
@@ -219,7 +220,7 @@ export default function Shell({ children, admin, allowGuest }: { children: React
       <div className={`app${sideMin ? ' side-min' : ''}${sideOpen ? ' side-open' : ''}`}>
         <aside className="side" aria-label="Main menu">
           <div className="side-head">
-            <Link href="/" className="side-brand" title="MAS AUTOMATE PICK SYSTEM"><Logo size={34} /><span className="side-name"><b>MAS Automate Pick</b><small>EFL 3PL · {DIV_NAME[div]}</small></span></Link>
+            <Link href="/" className="side-brand" title="MAS AUTOMATE PICK SYSTEM"><Logo size={34} /><span className="side-name"><b>MAS Automate Pick</b><small><span className="tpl-badge" aria-label="3PL"><span>3PL</span></span>EFL · {DIV_NAME[div]}</small></span><span className="tpl-badge side-3pl-min" aria-hidden><span>3PL</span></span></Link>
             <button type="button" className="side-min-btn" onClick={toggleSide} title={sideMin ? 'Open the menu' : 'Collapse the menu'} aria-label={sideMin ? 'Open the menu' : 'Collapse the menu'} aria-expanded={!sideMin}><Icon d={ICON.collapse} size={17} /></button>
           </div>
           {/* the system open now: MAS Active or MAS Kreeda — a user with both switches here */}

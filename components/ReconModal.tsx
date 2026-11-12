@@ -43,7 +43,6 @@ export default function ReconModal({ rid, label, onClose }: { rid: string; label
         <div className="modal-head">
           <div>
             <h2 id="recon-t">🔄 Korber ↔ SAP tally · {label}</h2>
-            <p className="muted small">Each Material of this Pick: SAP UR (ZMMBE), the rolls SAP has (ZROLLMGT{r ? ` at ${r.bin}` : ''}) and the rolls on the shelf (Korber), matched roll by roll.<span className="si si-line" lang="si">මේ Pick එකේ හැම Material එකකටම SAP UR, SAP rolls (ZROLLMGT) සහ shelf එකේ rolls (Korber) roll එකින් එක match කරලා.</span></p>
           </div>
           <button className="btn sm" onClick={onClose} aria-label="Close">✕</button>
         </div>

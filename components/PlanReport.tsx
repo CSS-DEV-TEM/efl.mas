@@ -77,7 +77,6 @@ export default function PlanReport({ rid, onClose }: { rid: string; onClose: () 
         <div className="modal-head">
           <div>
             <h2 id="prr-title">{r ? r.name : 'Plan report'} {r && <span className="muted small" style={{ fontWeight: 400 }}>· {fmtDate(r.day)}</span>}</h2>
-            <p className="sub" style={{ margin: 0 }}>From this Pick&apos;s reports: AVALABALE = SO UR stock in ZMMBE (every storage location) · ALRADY SEND = the same at the plant storage locations · Pending = QTY − ALRADY SEND · POSIBAL PENDING = Pending the warehouse has free UR for (Assigned Qty is not free) · QI / BLOCK = SO QI / SO Blocked · TRANSFER NOTE = ZMM_TRR.</p>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="btn primary" disabled={!r} onClick={() => r && void downloadPlanReport(r)}>⤓ Excel</button>
