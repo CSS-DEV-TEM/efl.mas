@@ -197,7 +197,8 @@ const BASE_SCHEMA = [
   'CREATE TABLE IF NOT EXISTS upload_file_part (file_id INTEGER NOT NULL, n INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (file_id, n))',
   `CREATE TABLE IF NOT EXISTS uploads ( id INTEGER PRIMARY KEY AUTOINCREMENT, src TEXT NOT NULL, file_name TEXT, sheet_name TEXT, row_count INTEGER NOT NULL, uploaded_by TEXT NOT NULL, uploaded_at TEXT NOT NULL , mode TEXT, rid TEXT NOT NULL DEFAULT '')`,
   `CREATE TABLE IF NOT EXISTS zcoment (lot TEXT NOT NULL, material TEXT, batch TEXT, vendor_batch TEXT, roll_qty REAL, roll_no TEXT, barcode TEXT, shade TEXT, sys_roll TEXT, accept TEXT, description TEXT, rid TEXT NOT NULL DEFAULT '', tn TEXT)`,
-  `CREATE TABLE IF NOT EXISTS zinr (lot TEXT NOT NULL, plant TEXT, sloc TEXT, batch TEXT, material TEXT, qty REAL, uom TEXT, so TEXT, li TEXT, vendor_batch TEXT, invoice TEXT, created TEXT, style TEXT, po TEXT, rid TEXT NOT NULL DEFAULT '')`,
+  `CREATE TABLE IF NOT EXISTS zinr (lot TEXT NOT NULL, plant TEXT, sloc TEXT, batch TEXT, material TEXT, qty REAL, uom TEXT, so TEXT, li TEXT, vendor_batch TEXT, invoice TEXT, created TEXT, style TEXT, po TEXT, rid TEXT NOT NULL DEFAULT '', mat_doc TEXT)`,
+  `CREATE TABLE IF NOT EXISTS zroll_doc (barcode TEXT NOT NULL, material TEXT, batch TEXT, vendor_batch TEXT, mat_doc TEXT, vendor_roll TEXT, roll_no TEXT, shade TEXT, rid TEXT NOT NULL DEFAULT '')`,
   `CREATE TABLE IF NOT EXISTS zroll (barcode TEXT NOT NULL, bin TEXT, material TEXT, batch TEXT, qty REAL, uom TEXT, sloc TEXT, plant TEXT, so TEXT, li TEXT, status TEXT, raw TEXT, rid TEXT NOT NULL DEFAULT '', pcore TEXT, tn TEXT)`,
   `CREATE TABLE IF NOT EXISTS ztrr (tn TEXT, tn_date TEXT, to_so TEXT, to_li TEXT, material TEXT, to_plant TEXT, from_so TEXT, from_li TEXT, batch TEXT, qty REAL, approved REAL, tqty REAL, status TEXT, raw TEXT, rid TEXT NOT NULL DEFAULT '', rep TEXT)`,
   'CREATE INDEX IF NOT EXISTS dispatch_week_item ON dispatch(week, item)',
@@ -257,10 +258,13 @@ const BASE_SCHEMA = [
   'CREATE INDEX IF NOT EXISTS ztrr_tn ON ztrr(tn, rid)',
   'CREATE INDEX IF NOT EXISTS zcoment_tn ON zcoment(tn, rid)',
   'CREATE INDEX IF NOT EXISTS stock_sent_rid ON stock_sent(rid, key)',
+  'CREATE INDEX IF NOT EXISTS zinr_doc ON zinr(mat_doc)',
+  'CREATE INDEX IF NOT EXISTS zroll_doc_doc ON zroll_doc(mat_doc)',
+  'CREATE INDEX IF NOT EXISTS zroll_doc_rid ON zroll_doc(rid)',
 ];
 /** per system (each has its own database) */
 const schemaDone = new Set<string>();
-const SCHEMA_V = '40';
+const SCHEMA_V = '41';
 async function ensureSchema(env: Env) {
   const dk = env.DIV || 'active';
   if (schemaDone.has(dk) || !env.DB) return;
@@ -518,6 +522,12 @@ async function ensureSchema(env: Env) {
   } catch { /* */ }
   // v40 (v173): ZMM_TRR From SO Report No — its TRANSFER NOTE rolls are the ZROLLMGT rows with that QM Comment 1
   try { await env.DB.prepare('ALTER TABLE ztrr ADD COLUMN rep TEXT').run(); } catch { /* already there */ }
+  // v41 (v189): ZINSR Material Document and every ZROLLMGT row's Mat. Doc — a roll's inspection lot without ZCMNTVIEW
+  try { await env.DB.prepare('ALTER TABLE zinr ADD COLUMN mat_doc TEXT').run(); } catch { /* already there */ }
+  for (const q of ["CREATE TABLE IF NOT EXISTS zroll_doc (barcode TEXT NOT NULL, material TEXT, batch TEXT, vendor_batch TEXT, mat_doc TEXT, vendor_roll TEXT, roll_no TEXT, shade TEXT, rid TEXT NOT NULL DEFAULT '')",
+    'CREATE INDEX IF NOT EXISTS zinr_doc ON zinr(mat_doc)', 'CREATE INDEX IF NOT EXISTS zroll_doc_doc ON zroll_doc(mat_doc)', 'CREATE INDEX IF NOT EXISTS zroll_doc_rid ON zroll_doc(rid)']) {
+    try { await env.DB.prepare(q).run(); } catch { /* already there */ }
+  }
   await env.DB.prepare("INSERT INTO config (k, v) VALUES ('schema_v', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(SCHEMA_V).run();
   schemaDone.add(dk);
 }
@@ -686,7 +696,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 127; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 128; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -2527,11 +2537,13 @@ const PICK_COLS: Record<'zinr' | 'zcoment' | 'korber' | 'zroll' | 'ztrr', Record
     barcode: ['Barcode Number', 'Barcode No', 'Barcode No.', 'Barcode', 'Roll Barcode', 'Roll Barcode Number', 'HU Number', 'Handling Unit'], bin: ['StorageBin', 'Storage Bin', 'Bin', 'Bin Location', 'Storage Bin Location'],
     material: ['Material', 'Material Number', 'Item Code'], batch: ['System Batch', 'System Batch No', 'System Batch Number', 'Sys Batch', 'SAP Batch', 'SAP Batch No', 'Batch No', 'Batch Number', 'Batch'], qty: ['Available Quantity', 'Available Qty', 'Quantity', 'Qty', 'Roll Qty', 'Roll Quantity', 'Length'], uom: ['UoM', 'Unit', 'Base UoM', 'Base Unit of Measure'],
     sloc: ['Storage Location', 'Sloc', 'St Location', 'SLoc'], plant: ['Plant'], so: ['Sales Order', 'SO', 'Sales Document'], li: ['Line Item', 'LI', 'SO Item', 'Item'], status: ['Status', 'Roll Status', 'Stock Status', 'Stock Type', 'Stock Category', 'Stock Cat.'],
+    // v189: the roll's inspection lot without ZCMNTVIEW: Mat. Doc = ZINSR Material Document (+ Material, System Batch, Vendor Batch)
+    vendor_batch: ['Vendor Batch'], mat_doc: ['Mat. Doc', 'Mat. Doc.', 'Material Document', 'Material Doc.'], vendor_roll: ['Vendor Roll', 'Vendor Roll No'], roll_no: ['Roll No', 'Roll No.'], shade: ['Shade Grp', 'Shade Group', 'Shade'],
   },
   zinr: {
     lot: ['Inspection Lot'], plant: ['Plant'], sloc: ['Storage Location'], batch: ['Batch'], material: ['Material'], qty: ['Insp. Lot Quantity', 'Inspection Lot Quantity'],
     uom: ['Base UoM'], so: ['Sales Order'], li: ['Line Item'], vendor_batch: ['Vendor Batch'], invoice: ['Vendor Invoice No'], created: ['Lot Creation Date'], style: ['Customer Style'],
-    po: ['Purchasing Document', 'Purchasing Doc.', 'Purchase Order', 'PO Number'],
+    po: ['Purchasing Document', 'Purchasing Doc.', 'Purchase Order', 'PO Number'], mat_doc: ['Material Document', 'Material Doc.', 'Mat. Doc'],
   },
   zcoment: {
     // two layouts: the detail export (Inspection lot, Material, System Batch, Report Name, Roll qty.) and the roll view
@@ -2809,12 +2821,13 @@ async function handlePick(env: Env, req: Request, p: string) {
     const g = (r: unknown[], f: string) => (ix[f] >= 0 ? r[ix[f]] : null);
     let rows: Row[] = [];
     let skipped = 0;
+    const docRows: Row[] = [];
     if (b.src === 'zinr') {
       for (const r of b.rows) {
         const lot = normId(g(r, 'lot'));
         if (!lot) { skipped++; continue; }
         rows.push({ lot, plant: txt(g(r, 'plant')), sloc: txt(normId(g(r, 'sloc'))), batch: normId(g(r, 'batch')), material: normId(g(r, 'material')), qty: num(g(r, 'qty')),
-          uom: txt(g(r, 'uom')), so: normId(g(r, 'so')), li: normId(g(r, 'li')), vendor_batch: txt(g(r, 'vendor_batch')), invoice: txt(up(g(r, 'invoice'))), created: normDate(g(r, 'created')), style: txt(g(r, 'style')), po: txt(up(g(r, 'po'))) });
+          uom: txt(g(r, 'uom')), so: normId(g(r, 'so')), li: normId(g(r, 'li')), vendor_batch: txt(g(r, 'vendor_batch')), invoice: txt(up(g(r, 'invoice'))), created: normDate(g(r, 'created')), style: txt(g(r, 'style')), po: txt(up(g(r, 'po'))), mat_doc: normId(g(r, 'mat_doc')) || null });
       }
     } else if (b.src === 'ztrr') {
       // the second "Sales Document Item" (the From SO's) is next to From Sales Order
@@ -2836,6 +2849,10 @@ async function handlePick(env: Env, req: Request, p: string) {
       for (const r of b.rows) {
         const barcode = up(g(r, 'barcode'));
         if (!barcode) { skipped++; continue; }
+        // v189: every row (a moved roll's old row too) — its Mat. Doc finds the roll's ZINSR inspection lot
+        const md = normId(g(r, 'mat_doc'));
+        if (md) docRows.push({ barcode, material: normId(g(r, 'material')) || null, batch: normId(g(r, 'batch')) || null, vendor_batch: txt(g(r, 'vendor_batch')), mat_doc: md,
+          vendor_roll: txt(up(g(r, 'vendor_roll'))), roll_no: txt(g(r, 'roll_no')), shade: txt(g(r, 'shade')), rid });
         const prev = seen.get(barcode);
         const cand: Row = { barcode, pcore: palletCore(barcode), bin: txt(up(g(r, 'bin'))), material: korberItem(null, g(r, 'material')) || null, batch: normId(g(r, 'batch')) || null, qty: ix.qty >= 0 ? num(g(r, 'qty')) : null,
           uom: txt(g(r, 'uom')), sloc: txt(normId(g(r, 'sloc'))), plant: txt(g(r, 'plant')), so: normId(g(r, 'so')) || null, li: normId(g(r, 'li')) || null, status: txt(g(r, 'status')),
@@ -2895,16 +2912,23 @@ async function handlePick(env: Env, req: Request, p: string) {
     if (b.src === 'korber') poIxBy.delete(env.DIV || 'active');
     // ZCOMENT rows without Material (the roll view): the inspection lot's material from ZINR — after a ZINR upload too
     if (b.src === 'zcoment' || b.src === 'zinr') stmts.push(env.DB.prepare("UPDATE zcoment SET material = COALESCE((SELECT z.material FROM zinr z WHERE z.lot = zcoment.lot AND z.rid = zcoment.rid LIMIT 1), (SELECT z.material FROM zinr z WHERE z.lot = zcoment.lot AND z.rid = '' LIMIT 1)) WHERE COALESCE(material, '') = '' AND EXISTS (SELECT 1 FROM zinr z WHERE z.lot = zcoment.lot AND z.rid IN (zcoment.rid, ''))"));
+    if (b.src === 'zroll') {
+      stmts.push(env.DB.prepare('DELETE FROM zroll_doc WHERE rid = ?').bind(rid));
+      if (docRows.length) stmts.push(...jsonInsert(env, 'zroll_doc', ['barcode', 'material', 'batch', 'vendor_batch', 'mat_doc', 'vendor_roll', 'roll_no', 'shade', 'rid'], docRows, 1000));
+    }
     if (b.src === 'korber') stmts.push(env.DB.prepare("INSERT INTO config (k, v) VALUES ('korber_header', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(JSON.stringify(b.header)));
     stmts.push(env.DB.prepare('INSERT INTO uploads (src, file_name, sheet_name, row_count, uploaded_by, uploaded_at, rid) VALUES (?,?,?,?,?,?,?)').bind(b.src, b.fileName || null, null, rows.length, s.u, now(), rid));
     stmts.push(env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'upload',
       `${PICK_LABEL[b.src]}${rid ? ' · ' + periodLabel(rid) : ''}: ${rows.length} rows${b.total && b.total > rows.length ? ` (of ${b.total} in the file)` : ''}${b.fileName ? ' from ' + b.fileName : ''}`));
     await batchSized(env, stmts);
     if (rid === ALL_RID) allKorber.delete(env.DIV || 'active');
+    // v189: the rolls ZCMNTVIEW does not list get their inspection lot from ZROLLMGT Mat. Doc = ZINSR Material Document
+    let derived: number | null = null;
+    if (b.src === 'zroll' || b.src === 'zinr' || b.src === 'zcoment') derived = await deriveZcoment(env).catch((e) => { console.log('deriveZcoment', String(e)); return null; });
     await broadcast(env, { type: 'data', src: b.src, by: s.u, rows: rows.length });
     // v185: the new Korber Inventory against the pick history, pallet by pallet
     const check = b.src === 'korber' ? await korberUploadCheck(env, rows).catch(() => undefined) : undefined;
-    return json({ ok: true, rows: rows.length, skipped, rid, ...(rid === ALL_RID ? { expires: new Date(Date.now() + KORBER_TTL).toISOString() } : {}), ...(check ? { check } : {}) });
+    return json({ ok: true, rows: rows.length, skipped, rid, ...(derived !== null ? { derived } : {}), ...(rid === ALL_RID ? { expires: new Date(Date.now() + KORBER_TTL).toISOString() } : {}), ...(check ? { check } : {}) });
   }
 
   // the rolls that can be picked for one plan line, with every check of the chain
@@ -4699,6 +4723,22 @@ async function palletPicksMany(env: Env, pallets: unknown[], kenv?: Env): Promis
  *   notOut — Korber has MORE than the history leaves (the picks are not out of Korber yet): the history stays
  *   low    — Korber has LESS than the history leaves (taken off outside this system): the Korber Actual Qty is used
  */
+/**
+ * v189: a roll's inspection lot without ZCMNTVIEW — ZROLLMGT Mat. Doc = ZINSR Material Document, with the same Material,
+ * System Batch (= ZINSR Batch) and Vendor Batch. Those rolls are added to the ZCOMENT rows (marked "ZROLLMGT") only when
+ * ZCMNTVIEW does not list the roll at all: ZCMNTVIEW stays the first word. Worked out again after each ZROLLMGT, ZINSR or
+ * ZCMNTVIEW upload. Returns how many roll + lot rows came from ZROLLMGT.
+ */
+async function deriveZcoment(env: Env): Promise<number> {
+  const r = await env.DB.batch([
+    env.DB.prepare("DELETE FROM zcoment WHERE accept = 'ZROLLMGT'"),
+    env.DB.prepare(`INSERT INTO zcoment (lot, material, batch, vendor_batch, roll_no, barcode, shade, sys_roll, accept, rid)
+      SELECT DISTINCT i.lot, i.material, i.batch, i.vendor_batch, d.vendor_roll, d.barcode, d.shade, d.roll_no, 'ZROLLMGT', d.rid
+      FROM zroll_doc d JOIN zinr i ON i.mat_doc = d.mat_doc AND i.material = d.material AND i.batch = d.batch AND UPPER(COALESCE(i.vendor_batch, '')) = UPPER(COALESCE(d.vendor_batch, ''))
+      WHERE d.mat_doc IS NOT NULL AND NOT EXISTS (SELECT 1 FROM zcoment c WHERE c.barcode = d.barcode AND COALESCE(c.accept, '') <> 'ZROLLMGT')`),
+  ]);
+  return Number(r[1]?.meta?.changes ?? 0);
+}
 async function korberUploadCheck(env: Env, rows: Row[]) {
   const kBy = new Map(rows.map((r) => [up(r.pallet), r]));
   const hist = (await env.DB.prepare(`SELECT g.pallet, g.q, f.roll_qty base, g.day, g.lines, g.weeks FROM (SELECT p.pallet, SUM(p.qty) q, MIN(p.id) fid, MAX(p.day) day,

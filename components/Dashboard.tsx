@@ -377,16 +377,16 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
         const ready = viewCounts['Ready to pull'] ?? 0, notK = viewCounts['Not in Korber'] ?? 0, noStock = viewCounts['No stock'] ?? 0, hold = viewCounts['On hold'] ?? 0;
         const zAt = up.get('zmmbe')?.uploaded_at;
         const ageH = zAt ? Math.floor((Date.now() - new Date(zAt).getTime()) / 3600000) : null;
-        const GA = Math.PI * 52;
+        const GA = 2 * Math.PI * 42;
         return (
           <section className="glance" aria-label="At a glance">
-            {/* v187: a gauge — the arc fills and the needle points to how much of the plan QTY is picked */}
+            {/* v188: a soft-UI dial — a dark disc with an orange → red ring for how much of the plan QTY is picked */}
             <div className="gl-gauge" title={`${fmt(t.dispatched, 2)} of ${fmt(t.qty, 2)} picked`}>
-              <svg viewBox="0 0 132 80" width="148" height="90" aria-hidden="true">
-                <path d="M14 70 A52 52 0 0 1 118 70" className="gg-track" />
-                <path d="M14 70 A52 52 0 0 1 118 70" className="gg-fill" strokeDasharray={`${(pct / 100) * GA} ${GA}`} />
-                {Array.from({ length: 11 }, (_, i) => { const a = Math.PI * (1 - i / 10); return <line key={i} className="gg-tick" x1={66 + Math.cos(a) * 40} y1={70 - Math.sin(a) * 40} x2={66 + Math.cos(a) * (i % 5 ? 36 : 33)} y2={70 - Math.sin(a) * (i % 5 ? 36 : 33)} />; })}
-                <g className="gg-needle" style={{ transform: `rotate(${-90 + pct * 1.8}deg)` }}><line x1="66" y1="70" x2="66" y2="26" /><circle cx="66" cy="70" r="5" /></g>
+              <svg viewBox="0 0 120 120" width="118" height="118" aria-hidden="true">
+                <defs><linearGradient id="ggGrad" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stopColor="#ffa53a" /><stop offset="1" stopColor="#f2384a" /></linearGradient></defs>
+                <circle cx="60" cy="60" r="56" className="gg-disc" />
+                <circle cx="60" cy="60" r="42" className="gg-track" strokeDasharray={`${GA * 0.75} ${GA}`} transform="rotate(135 60 60)" />
+                <circle cx="60" cy="60" r="42" className="gg-fill" stroke="url(#ggGrad)" strokeDasharray={`${(pct / 100) * GA * 0.75} ${GA}`} transform="rotate(135 60 60)" />
               </svg>
               <div className="gl-pct"><b>{Math.round(pct)}%</b><span>picked</span></div>
             </div>

@@ -3,6 +3,7 @@
  * v187: the dashboard-style frame — a left sidebar (icons + names, collapses to icons) whose lime pill slides to the open
  * page, and a command search in the top bar (Ctrl / ⌘ K). Only how the pages are reached: nothing a page does is changed.
  */
+import * as React from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
