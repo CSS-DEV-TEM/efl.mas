@@ -377,13 +377,16 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
         const ready = viewCounts['Ready to pull'] ?? 0, notK = viewCounts['Not in Korber'] ?? 0, noStock = viewCounts['No stock'] ?? 0, hold = viewCounts['On hold'] ?? 0;
         const zAt = up.get('zmmbe')?.uploaded_at;
         const ageH = zAt ? Math.floor((Date.now() - new Date(zAt).getTime()) / 3600000) : null;
-        const R = 34, C = 2 * Math.PI * R;
+        const GA = Math.PI * 52;
         return (
           <section className="glance" aria-label="At a glance">
-            <div className="gl-ring" title={`${fmt(t.dispatched, 2)} of ${fmt(t.qty, 2)} picked`}>
-              <svg viewBox="0 0 80 80" width="92" height="92" aria-hidden="true">
-                <circle cx="40" cy="40" r={R} className="gl-track" />
-                <circle cx="40" cy="40" r={R} className="gl-fill" strokeDasharray={`${(pct / 100) * C} ${C}`} transform="rotate(-90 40 40)" />
+            {/* v187: a gauge — the arc fills and the needle points to how much of the plan QTY is picked */}
+            <div className="gl-gauge" title={`${fmt(t.dispatched, 2)} of ${fmt(t.qty, 2)} picked`}>
+              <svg viewBox="0 0 132 80" width="148" height="90" aria-hidden="true">
+                <path d="M14 70 A52 52 0 0 1 118 70" className="gg-track" />
+                <path d="M14 70 A52 52 0 0 1 118 70" className="gg-fill" strokeDasharray={`${(pct / 100) * GA} ${GA}`} />
+                {Array.from({ length: 11 }, (_, i) => { const a = Math.PI * (1 - i / 10); return <line key={i} className="gg-tick" x1={66 + Math.cos(a) * 40} y1={70 - Math.sin(a) * 40} x2={66 + Math.cos(a) * (i % 5 ? 36 : 33)} y2={70 - Math.sin(a) * (i % 5 ? 36 : 33)} />; })}
+                <g className="gg-needle" style={{ transform: `rotate(${-90 + pct * 1.8}deg)` }}><line x1="66" y1="70" x2="66" y2="26" /><circle cx="66" cy="70" r="5" /></g>
               </svg>
               <div className="gl-pct"><b>{Math.round(pct)}%</b><span>picked</span></div>
             </div>

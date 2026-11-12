@@ -12,6 +12,7 @@ import { onTasks, type Task } from '@/lib/progress';
 import { useLive, type LiveMessage, type LiveState } from '@/lib/live';
 import { Credit, Logo } from '@/components/Brand';
 import TableFilters from '@/components/TableFilters';
+import { CommandSearch, ICON, Icon, SideNav, isOn, type NavItem } from '@/components/SideNav';
 
 interface Ctx {
   user: User;
@@ -38,6 +39,12 @@ export default function Shell({ children, admin, allowGuest }: { children: React
   const [guest] = useState(false);
   const [div, setDivS] = useState<Div>('active');
   const [toasts, setToasts] = useState<{ id: number; text: string }[]>([]);
+  // v187: the sidebar — collapsed to icons (remembered on this device), and open / shut on a phone
+  const [sideMin, setSideMin] = useState(false);
+  const [sideOpen, setSideOpen] = useState(false);
+  useEffect(() => { try { setSideMin(localStorage.getItem('mas-side-min') === '1'); } catch { /* private mode */ } }, []);
+  const toggleSide = () => setSideMin((v) => { try { localStorage.setItem('mas-side-min', v ? '0' : '1'); } catch { /* private mode */ } return !v; });
+  useEffect(() => { setSideOpen(false); }, [path]);
   const subs = useRef(new Set<(m: LiveMessage) => void>());
 
   useEffect(() => {
@@ -192,48 +199,61 @@ export default function Shell({ children, admin, allowGuest }: { children: React
   if (!user) return null;
 
   // the week plan is retired: the home page is the day plan (Pick 1, 2 … per plant)
-  const nav = guest ? [{ href: '/', label: 'Day plan' }, { href: '/week/', label: 'Week plan' }] : [
-    { href: '/', label: 'Day plan' },
-    { href: '/week/', label: 'Week plan' },
-    { href: '/upload/', label: 'Uploads' },
-    { href: '/dispatch/', label: 'Pick & Dispatch' },
-    { href: '/data/', label: 'Data' },
-    { href: '/inventory/', label: 'Inventory' },
-    { href: '/plan-check/', label: 'Plan Check' },
-    ...(user.role === 'admin' ? [{ href: '/settings/', label: 'Settings' }] : []),
+  const nav: NavItem[] = guest ? [{ href: '/', label: 'Day plan' }, { href: '/week/', label: 'Week plan' }] : [
+    { href: '/', label: 'Day plan', hint: 'dashboard · Pick 1, 2 … per plant' },
+    { href: '/week/', label: 'Week plan', hint: 'week' },
+    { href: '/upload/', label: 'Uploads', hint: 'ZMMBE Korber ZINSR ZROLLMGT reports' },
+    { href: '/dispatch/', label: 'Pick & Dispatch', hint: 'pick workspace packing list history' },
+    { href: '/data/', label: 'Data', hint: 'tables' },
+    { href: '/inventory/', label: 'Inventory', hint: 'SAP Korber reconciliation' },
+    { href: '/plan-check/', label: 'Plan Check', hint: 'sent check pick diagnosis' },
+    ...(user.role === 'admin' ? [{ href: '/settings/', label: 'Settings', hint: 'users backup' }] : []),
   ];
+  const here = nav.find((n) => isOn(n.href, path))?.label ?? '';
   const liveText = state === 'live' ? 'Live' : state === 'connecting' ? 'Connecting…' : 'Updates on activity';
 
   return (
     <ShellCtx.Provider value={{ user, guest, live: state, online, subscribe, toast }}>
       {netBusy && <div className="net-bar" role="progressbar" aria-label="Loading" />}
       <TableFilters />
-      <header className="bar">
-        <div className="bar-in">
-          <Link href="/" className="brand"><Logo size={30} /><span className="tpl-badge" aria-label="3PL"><span>3PL</span></span><span className="brand-text">MAS AUTOMATE PICK SYSTEM</span></Link>
-          <span className="ver-badge" title={`Website ${APP_VERSION}${apiV ? ` · Worker API ${apiV}` : ''}`}>{APP_VERSION}{apiV ? ` · API ${apiV}` : ''}</span>
+      <div className={`app${sideMin ? ' side-min' : ''}${sideOpen ? ' side-open' : ''}`}>
+        <aside className="side" aria-label="Main menu">
+          <div className="side-head">
+            <Link href="/" className="side-brand" title="MAS AUTOMATE PICK SYSTEM"><Logo size={34} /><span className="side-name"><b>MAS Automate Pick</b><small>EFL 3PL · {DIV_NAME[div]}</small></span></Link>
+            <button type="button" className="side-min-btn" onClick={toggleSide} title={sideMin ? 'Open the menu' : 'Collapse the menu'} aria-label={sideMin ? 'Open the menu' : 'Collapse the menu'} aria-expanded={!sideMin}><Icon d={ICON.collapse} size={17} /></button>
+          </div>
           {/* the system open now: MAS Active or MAS Kreeda — a user with both switches here */}
           {userDivs(user).length > 1 ? (
-            <div className={`div-switch ${div}`} role="radiogroup" aria-label="System">
-              {(['active', 'kreeda'] as Div[]).map((d) => <button key={d} type="button" role="radio" aria-checked={div === d} className={div === d ? 'on' : ''} onClick={() => { if (d !== div) { setDiv(d); location.reload(); } }}>{DIV_NAME[d]}</button>)}
+            <div className={`div-switch side-div ${div}`} role="radiogroup" aria-label="System">
+              {(['active', 'kreeda'] as Div[]).map((d) => <button key={d} type="button" role="radio" aria-checked={div === d} className={div === d ? 'on' : ''} title={DIV_NAME[d]} onClick={() => { if (d !== div) { setDiv(d); location.reload(); } }}>{sideMin ? DIV_NAME[d].replace('MAS ', '').slice(0, 1) : DIV_NAME[d]}</button>)}
             </div>
-          ) : <span className={`div-tag ${div}`}>{DIV_NAME[div]}</span>}
-          <nav className="nav">
-            {nav.map((n) => (
-              <Link key={n.href} href={n.href} className={(n.href === '/' ? path === '/' : path?.startsWith(n.href.replace(/\/$/, ''))) ? 'on' : ''}>{n.label}</Link>
-            ))}
-          </nav>
-          <div className="bar-right">
-            <Credit compact />
-            <ThemeToggle />
-            <span className={`live ${state === 'live' ? 'on' : state === 'offline' ? 'off' : ''}`} title={online.length ? 'Online: ' + online.join(', ') : ''}>
-              <i />{liveText}
-            </span>
-            {guest ? (
-              <Link className="btn sm primary" href="/login/">Sign in to upload / edit</Link>
-            ) : (
+          ) : <span className={`div-tag side-div ${div}`} title={DIV_NAME[div]}>{sideMin ? DIV_NAME[div].replace('MAS ', '').slice(0, 1) : DIV_NAME[div]}</span>}
+          <SideNav items={nav} path={path} onGo={() => setSideOpen(false)} />
+          <div className="side-foot">
+            {guest ? <Link className="btn sm primary" href="/login/">Sign in</Link> : (
               <>
-                {owners && (
+                <span className="side-user" title={`${user.username} · ${ROLE_NAME[user.role] || user.role}`}><i aria-hidden>{user.username.slice(0, 1).toUpperCase()}</i><span className="side-label"><b>{user.username}</b><small>{ROLE_NAME[user.role] || user.role}</small></span></span>
+                <button type="button" className="side-out" onClick={() => { void signOut(); }} title="Sign out" aria-label="Sign out"><Icon d={ICON.out} size={17} /></button>
+              </>
+            )}
+          </div>
+        </aside>
+        <div className="side-scrim" onClick={() => setSideOpen(false)} aria-hidden />
+        <div className="main">
+          <header className="bar">
+            <div className="bar-in">
+              <button type="button" className="side-burger" onClick={() => setSideOpen(true)} aria-label="Open the menu"><Icon d={ICON.menu} size={20} /></button>
+              <nav className="crumb" aria-label="You are here"><span>{DIV_NAME[div]}</span><Icon d={ICON.chev} size={13} /><b>{here}</b></nav>
+              <span className="ver-badge" title={`Website ${APP_VERSION}${apiV ? ` · Worker API ${apiV}` : ''}`}>{APP_VERSION}{apiV ? ` · API ${apiV}` : ''}</span>
+              <CommandSearch items={nav} />
+              <div className="bar-right">
+                {!guest && user.role !== 'viewer' && <Link className="btn primary sm new-btn" href="/upload/"><Icon d={ICON.plus} size={16} />Upload</Link>}
+                <Credit compact />
+                <ThemeToggle />
+                <span className={`live ${state === 'live' ? 'on' : state === 'offline' ? 'off' : ''}`} title={online.length ? 'Online: ' + online.join(', ') : ''}>
+                  <i />{liveText}
+                </span>
+                {!guest && owners && (
                   <label className="view-user" title="Whose plan and picks to show">
                     <span>Data of</span>
                     <select value={viewU} onChange={(e) => { setViewUser(e.target.value); location.reload(); }} aria-label="Data of">
@@ -242,12 +262,8 @@ export default function Shell({ children, admin, allowGuest }: { children: React
                     </select>
                   </label>
                 )}
-                <span className="who">{user.username}<span className="role">{ROLE_NAME[user.role] || user.role}</span></span>
-                <button className="btn sm" onClick={() => { void signOut(); }}>Sign out</button>
-              </>
-            )}
-          </div>
-        </div>
+              </div>
+            </div>
         {/* v126: live data and who is signed in — at the top of every page */}
         <div className="top-status" role="status" aria-live="off">
           <span className={`ts-live ${inflight > 0 ? 'on' : ''}`} title={`${today ? `Whole system today (${today.day}, every user — resets at 12:00 midnight): ${today.rows.toLocaleString()} rows processed = ${today.read.toLocaleString()} read + ${today.written.toLocaleString()} written · ${today.reqs.toLocaleString()} requests\n` : ''}${meter ? `This tab since it opened (${new Date(meter.since).toLocaleTimeString()}): ${meter.requests.toLocaleString()} requests · ${meter.queries.toLocaleString()} database queries · ${meter.read.toLocaleString()} rows read · ${meter.written.toLocaleString()} rows written · ${fmtBytes(meter.bytes)} received` : ''}`}>
@@ -279,7 +295,7 @@ export default function Shell({ children, admin, allowGuest }: { children: React
             })}
           </div>
         )}
-      </header>
+          </header>
       {oldApi !== null && (
         <div className="notice bad api-old" role="alert">
           <b>The Worker (API) on Cloudflare is out of date</b> (version {oldApi || 'old'}, this website needs {NEEDS_API}). Uploads will lose data — e.g. SOs starting with a letter (E101697207) are dropped.
@@ -288,7 +304,9 @@ export default function Shell({ children, admin, allowGuest }: { children: React
       )}
       {user.role === 'admin' && <MaintBar />}
       {children}
-      <footer className="site-foot"><Logo size={22} /><span>EFL 3PL · MAS AUTOMATE PICK SYSTEM · {APP_VERSION}{apiV ? ` · API ${apiV}` : ''}</span><Credit /></footer>
+          <footer className="site-foot"><Logo size={22} /><span>EFL 3PL · MAS AUTOMATE PICK SYSTEM · {APP_VERSION}{apiV ? ` · API ${apiV}` : ''}</span><Credit /></footer>
+        </div>
+      </div>
       {!guest && <SmartCoach />}
       {!guest && <Welcome name={user.username} />}
       <div className="toasts" aria-live="polite">
