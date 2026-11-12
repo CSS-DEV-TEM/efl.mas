@@ -154,10 +154,7 @@ export async function uploadPickSheets(src: PickSrc, sheets: ReturnType<typeof r
     if (ri >= 0) rows = rows.filter((r) => hn(r[ri]) === 'shade report');
   }
   const r = await api<{ rows: number; skipped: number; check?: KorberCheck }>('/api/pick/upload', { method: 'POST', body: { src, header: t.header, rows, fileName: file.name, total, ...(rid ? { rid } : {}) } });
-  // v185: the Korber Inventory against the pick history, pallet by pallet — the report downloads when something differs
-  if (r.check && (r.check.lowN || r.check.notOutN)) {
-    try { saveWorkbook(korberCheckWorkbook(r.check, fileName), `Korber_Upload_Check_${new Date().toISOString().slice(0, 16).replace(/[T:]/g, '-')}.xlsx`); } catch { /* the toast still says it */ }
-  }
+  // v185: the Korber Inventory is checked against the pick history, pallet by pallet (v186: the report is not downloaded — the upload message says it)
   return { ...r, total, sheet: t.sheet };
 }
 /** v185: a Korber Inventory upload against the pick history (every user and Pick), pallet by pallet */
@@ -167,8 +164,7 @@ export interface KorberCheck { pallets: number; same: number; lowN: number; notO
 export function korberCheckText(c?: KorberCheck) {
   if (!c || !c.pallets) return '';
   return ` · Pick history check: ${c.pallets} picked pallet${c.pallets === 1 ? '' : 's'} — ${c.same} same` +
-    (c.lowN ? `, ${c.lowN} LESS in Korber (Korber Actual Qty used)` : '') + (c.notOutN ? `, ${c.notOutN} not out of Korber yet (history kept)` : '') +
-    (c.lowN || c.notOutN ? ' — Korber_Upload_Check downloaded' : '');
+    (c.lowN ? `, ${c.lowN} LESS in Korber (Korber Actual Qty used)` : '') + (c.notOutN ? `, ${c.notOutN} not out of Korber yet (history kept)` : '');
 }
 export function korberCheckWorkbook(c: KorberCheck, fileName: string) {
   const wb = XLSXS.utils.book_new();

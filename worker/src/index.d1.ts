@@ -686,7 +686,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 126; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 127; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -3268,8 +3268,9 @@ async function handlePick(env: Env, req: Request, p: string) {
     const trimK = !!item && !!(await trimItem(kenv, item, (lkey0.split('|').length === 3
       ? await kenv.DB.prepare("SELECT descr FROM stock WHERE src = 'zmmbe' AND key = ?").bind(lkey0).all<Row>()
       : await kenv.DB.prepare("SELECT descr FROM stock WHERE src = 'zmmbe' AND material = ? LIMIT 50").bind(item).all<Row>()).results));
+    const ppm = await palletPicksMany(env, rows.map((r) => r.pallet), kenv);
     for (const r of rows) {
-      const pp = await palletPicks(env, r.pallet);
+      const pp = ppm.get(String(r.pallet ?? '')) ?? emptyHist();
       const base = pp.base ?? Number(r.qty);
       r.picked_before = pp.before;
       // not pickable: on a WMS pick (Korber Pick Id ≠ 0) or rejected
@@ -4642,27 +4643,55 @@ async function candCached<T>(env: Env, id: string, make: () => Promise<T>): Prom
   return revCached(env, 'cand|' + id, [normId(String(id).split('|')[3] ?? '')], make);
 }
 function hashStr(t: string) { let h = 2166136261; for (let i = 0; i < t.length; i++) { h ^= t.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36); }
-async function palletPicks(env: Env, pallet: unknown, kenv?: Env) {
-  const ph = (await env.DB.prepare(`SELECT p.day, p.by_user, p.qty, p.roll_qty, p.week, p.so, p.li, p.at, p.req_id, r.pick_no FROM picks p LEFT JOIN pick_req r ON r.id = p.req_id
-    WHERE p.pallet = ? AND p.cancelled_at IS NULL ORDER BY p.id`).bind(String(pallet ?? '')).all<Row>()).results;
-  const picks: PalletPick[] = ph.map((x) => ({ day: String(x.day), by_user: String(x.by_user), qty: Number(x.qty), plan: periodLabel(x.week), so: String(x.so ?? ''), li: String(x.li ?? ''), pick_no: (x.pick_no as string | null) ?? null, at: String(x.at ?? ''), req: Number(x.req_id) }));
-  const full = ph.length ? Number(ph[0].roll_qty) : null;
-  const before = r3(picks.reduce((t, x) => t + x.qty, 0));
-  let base = full, korberLow: KorberLow | null = null;
-  // v185: the Korber Inventory as uploaded — its Actual Qty the same as (or more than) what the history leaves: the history
-  // stays; LESS than the history leaves (taken off the roll outside this system): the Korber Actual Qty is used, less what
-  // was picked here after that Korber upload (base lowered, so base − before = what the roll really has)
-  if (ph.length && full !== null && Number.isFinite(full)) {
-    const k = await (kenv ?? env).DB.prepare(`SELECT k.qty, (SELECT MAX(u.uploaded_at) FROM uploads u WHERE u.src = 'korber' AND u.rid = k.rid) up_at FROM korber k WHERE k.pallet = ? ORDER BY up_at DESC LIMIT 1`).bind(up(pallet)).first<Row>();
-    if (k && k.qty !== null && k.qty !== undefined && Number.isFinite(Number(k.qty))) {
-      const upAt = String(k.up_at ?? '');
-      const after = upAt ? r3(ph.filter((x) => String(x.at ?? '') > upAt).reduce((t, x) => t + Number(x.qty || 0), 0)) : 0;
-      const kLeft = Math.max(0, r3(Number(k.qty) - after));
-      const hLeft = Math.max(0, r3(full - before));
-      if (kLeft < hLeft - 0.0005) { base = r3(before + kLeft); korberLow = { korber: r3(Number(k.qty)), after, history: hLeft, left: kLeft, at: upAt || null }; }
+async function palletPicks(env: Env, pallet: unknown, kenv?: Env): Promise<PalletHist> {
+  return (await palletPicksMany(env, [pallet], kenv)).get(String(pallet ?? '')) ?? emptyHist();
+}
+interface PalletHist { picks: PalletPick[]; base: number | null; full: number | null; before: number; korberLow: KorberLow | null }
+const emptyHist = (): PalletHist => ({ picks: [], base: null, full: null, before: 0, korberLow: null });
+/**
+ * The pick history of many pallets in a few queries (v185b: one query per pallet went over the D1 queries a request may make).
+ * v185: the Korber Inventory as uploaded — its Actual Qty the same as (or more than) what the history leaves: the history
+ * stays; LESS than the history leaves (taken off the roll outside this system): the Korber Actual Qty is used, less what
+ * was picked here after that Korber upload (base lowered, so base − before = what the roll really has)
+ */
+async function palletPicksMany(env: Env, pallets: unknown[], kenv?: Env): Promise<Map<string, PalletHist>> {
+  const ids = Array.from(new Set(pallets.map((p) => String(p ?? '')).filter(Boolean)));
+  const out = new Map<string, PalletHist>();
+  if (!ids.length) return out;
+  const byP = new Map<string, Row[]>();
+  for (let i = 0; i < ids.length; i += 400) {
+    for (const x of (await env.DB.prepare(`SELECT p.pallet, p.day, p.by_user, p.qty, p.roll_qty, p.week, p.so, p.li, p.at, p.req_id, r.pick_no FROM picks p LEFT JOIN pick_req r ON r.id = p.req_id
+      WHERE p.pallet IN (SELECT value FROM json_each(?)) AND p.cancelled_at IS NULL ORDER BY p.id`).bind(JSON.stringify(ids.slice(i, i + 400))).all<Row>()).results) {
+      const k0 = String(x.pallet); if (!byP.has(k0)) byP.set(k0, []); byP.get(k0)!.push(x);
     }
   }
-  return { picks, base, full, before, korberLow };
+  // the Korber row of each pallet that has a history (the newest upload when there are several)
+  const hist = Array.from(new Set(Array.from(byP.keys()).map(up)));
+  const kq = new Map<string, { qty: number; upAt: string }>();
+  for (let i = 0; i < hist.length; i += 400) {
+    for (const k of (await (kenv ?? env).DB.prepare(`SELECT k.pallet, k.qty, (SELECT MAX(u.uploaded_at) FROM uploads u WHERE u.src = 'korber' AND u.rid = k.rid) up_at FROM korber k WHERE k.pallet IN (SELECT value FROM json_each(?))`).bind(JSON.stringify(hist.slice(i, i + 400))).all<Row>()).results) {
+      if (k.qty === null || k.qty === undefined || !Number.isFinite(Number(k.qty))) continue;
+      const k0 = up(k.pallet), o = kq.get(k0), at = String(k.up_at ?? '');
+      if (!o || at > o.upAt) kq.set(k0, { qty: Number(k.qty), upAt: at });
+    }
+  }
+  for (const id of ids) {
+    const ph = byP.get(id) ?? [];
+    if (!ph.length) { out.set(id, emptyHist()); continue; }
+    const picks: PalletPick[] = ph.map((x) => ({ day: String(x.day), by_user: String(x.by_user), qty: Number(x.qty), plan: periodLabel(x.week), so: String(x.so ?? ''), li: String(x.li ?? ''), pick_no: (x.pick_no as string | null) ?? null, at: String(x.at ?? ''), req: Number(x.req_id) }));
+    const full = Number(ph[0].roll_qty);
+    const before = r3(picks.reduce((t, x) => t + x.qty, 0));
+    let base: number | null = full, korberLow: KorberLow | null = null;
+    const k = kq.get(up(id));
+    if (k && Number.isFinite(full)) {
+      const after = k.upAt ? r3(ph.filter((x) => String(x.at ?? '') > k.upAt).reduce((t, x) => t + Number(x.qty || 0), 0)) : 0;
+      const kLeft = Math.max(0, r3(k.qty - after));
+      const hLeft = Math.max(0, r3(full - before));
+      if (kLeft < hLeft - 0.0005) { base = r3(before + kLeft); korberLow = { korber: r3(k.qty), after, history: hLeft, left: kLeft, at: k.upAt || null }; }
+    }
+    out.set(id, { picks, base, full, before, korberLow });
+  }
+  return out;
 }
 /**
  * v185: a Korber Inventory just uploaded, against the pick history (every user, every Pick), pallet by pallet:
@@ -5262,7 +5291,8 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
         const lotsOfVb = (await env.DB.prepare(`SELECT z.lot, z.qty, z.so, z.li FROM zinr z WHERE z.material = ?1 AND upper(z.vendor_batch) = ?2
           AND EXISTS (SELECT 1 FROM stock s WHERE s.src = 'zmmbe' AND s.so = z.so AND s.li = z.li AND s.material = z.material AND s.batch = z.batch AND s.ur > 0) ORDER BY z.lot`).bind(normId(lot.material), vb).all<Row>()).results;
         const avail = new Map<string, number>();
-        for (const c of cands) { const pp = await palletPicks(env, c.pallet); avail.set(c.pallet, Math.max(0, r3((pp.base ?? c.actual_qty) - pp.before))); }
+        const ppm = await palletPicksMany(env, cands.map((c) => c.pallet));
+        for (const c of cands) { const pp = ppm.get(String(c.pallet ?? '')) ?? emptyHist(); avail.set(c.pallet, Math.max(0, r3((pp.base ?? c.actual_qty) - pp.before))); }
         let pool0 = cands.filter((c) => c.checks.po !== false && (avail.get(c.pallet) ?? 0) > 1e-9).map((c) => ({ id: c.pallet, q: avail.get(c.pallet)! }));
         let pickSet = new Set<string>();
         for (const l0 of lotsOfVb) {
@@ -5455,8 +5485,9 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
   if (nNb) steps.push(`${nNb} roll${nNb === 1 ? '' : 's'} without a Korber barcode: choose the Korber roll under “No Barcode — choose the roll” (Invoice, Item and Lot agree; Po / Supplier Hu matches first).`);
   if (nLot) steps.push(`${nLot} roll${nLot === 1 ? '' : 's'} / lot${nLot === 1 ? '' : 's'} whose Lot Number is not in Korber: choose a roll of the invoice's other lots (Pick by Lot Number).`);
   // the master pick history: a pallet picked in full is gone, a cut roll keeps its balance
+  const ppAll = await palletPicksMany(env, Array.from(rolls.values()).map((r) => r.pallet));
   for (const r of rolls.values()) {
-    const pp = await palletPicks(env, r.pallet);
+    const pp = ppAll.get(String(r.pallet ?? '')) ?? emptyHist();
     if (!pp.picks.length) continue;
     r.base_qty = pp.full ?? r.actual_qty;
     r.picked_before = pp.before;
@@ -5499,13 +5530,18 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
       const gLots = lotsAll.filter((l) => find(String(l.lot)) === g);
       const gBcs = Array.from(new Set(gLots.flatMap((l) => lotBcs.get(String(l.lot)) || []))).sort();
       // the Korber roll of each barcode and the QTY it has left
+      // v185b: a few queries for the whole group (one per roll went over the D1 queries a request may make)
       const left = new Map<string, { pallet: string; a: number }>();
-      for (const b0 of gBcs) {
-        const k = await env.DB.prepare(`SELECT pallet, qty FROM korber WHERE pallet = ? AND ${PICKABLE}`).bind(b0).first<Row>();
-        if (!k || rejected.has(up(k.pallet)) || (await gate.check(String(k.pallet), b0))) continue;
-        const pp = await palletPicks(env, String(k.pallet));
+      const gks: Row[] = [];
+      for (let i0 = 0; i0 < gBcs.length; i0 += 400) gks.push(...(await env.DB.prepare(`SELECT pallet, qty FROM korber WHERE pallet IN (SELECT value FROM json_each(?)) AND ${PICKABLE}`).bind(JSON.stringify(gBcs.slice(i0, i0 + 400))).all<Row>()).results);
+      const okBin = await gate.atBin(gks.map((k) => up(k.pallet)));
+      const gpp = await palletPicksMany(env, gks.map((k) => k.pallet));
+      for (const k of gks) {
+        const b0 = up(k.pallet);
+        if (left.has(b0) || rejected.has(b0) || !okBin.has(b0)) continue;
+        const pp = gpp.get(String(k.pallet)) ?? emptyHist();
         const a = Math.max(0, r3((pp.base ?? Number(k.qty)) - pp.before));
-        if (a > 1e-9) left.set(b0, { pallet: up(k.pallet), a });
+        if (a > 1e-9) left.set(b0, { pallet: b0, a });
       }
       // each SO line of the group: its lots' QTY, what it picked from the group's rolls, its own (not shared) rolls
       const lines = new Map<string, { qty: number; picked: number; own: number }>();
@@ -5670,6 +5706,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
 async function nbOptions(env: Env, ks: Row[], lot: Row, sh: Row | null, limit = 30) {
   const vb = up(sh?.vendor_batch || lot.vendor_batch), hu = up(sh?.roll_no);
   const out: Row[] = [];
+  const ppm = await palletPicksMany(env, ks.map((k) => k.pallet));
   for (const k of ks) {
     const kpo = await korberPo(env, k);
     const checks: Record<string, boolean | null> = {
@@ -5677,7 +5714,7 @@ async function nbOptions(env: Env, ks: Row[], lot: Row, sh: Row | null, limit = 
       lot: vb ? up(k.lot) === vb : null, po: lot.po && kpo ? poMatch(kpo, lot) : null, hu: hu ? up(k.supplier_hu) === hu : null,
       qty: Number(sh?.roll_qty) > 0 ? Math.abs(Number(k.qty) - Number(sh!.roll_qty)) < 0.0005 : null,
     };
-    const pp = await palletPicks(env, k.pallet);
+    const pp = ppm.get(String(k.pallet ?? '')) ?? emptyHist();
     const base = pp.base ?? Number(k.qty), before = pp.before;
     const score = (checks.lot ? 40 : 0) + (checks.hu ? 30 : 0) + (checks.po ? 20 : 0) + (checks.qty ? 5 : 0) + (base - before > 1e-9 ? 3 : 0);
     out.push({ pallet: k.pallet, item: k.item, lot: k.lot, supplier_hu: k.supplier_hu, qty: k.qty, uom: k.uom, invoice: k.invoice, location: k.location, status: k.status, fifo: k.fifo ?? null,
