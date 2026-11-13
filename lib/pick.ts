@@ -509,7 +509,7 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
   };
 
   /** One sheet: the totals block, then a table per Asn + Po + Lot with its SAP lines under it. */
-  const plSheet = (list0: Entry[]) => {
+  const plSheet = (list0: Entry[], moved: { pallet: string; qty: number; sheet: string }[] = []) => {
     const list = mergeByPallet(list0);
     // v141: an Offsite pick's rolls carry their inspection Report Number (ZROLLMGT QM Comment 1) in a column of their own
     const hasOff = list0.some((e) => e.r.kind === 'offsite');
@@ -581,6 +581,9 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
       for (const m of g) if (m.e.clientKind && m.e.clientKind !== m.e.sapKind) { badRows.push(aoa.length); aoa.push([`CHECK: ${m.e.p.pallet} — Korber client ${m.e.client} (${m.e.clientKind}) but SAP location of its batch is ${m.e.sapKind}`]); }
       aoa.push([]);
     }
+    // v199: this Pick's piece of a roll split with an earlier Pick: the whole roll is on that Pick's sheet (with this SO line's SAP line)
+    const movedRows: number[] = [];
+    for (const x of moved) { movedRows.push(aoa.length); aoa.push([`${x.pallet} — ${Math.round(x.qty * 1000) / 1000} of this Pick is on sheet "${x.sheet}": the whole roll is there, this SO line's SAP line under it`]); }
     const qty = Math.round(list.reduce((t, m) => t + m.qty, 0) * 1000) / 1000;
     const picks = Array.from(new Set(list0.map((e) => e.r.id)));
     const pickNos = picks.map((id) => pickNoOf(reqs.find((r) => r.id === id)!)).filter((x) => x !== '');
@@ -613,6 +616,7 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
     // v178: a SAP line whose Vendor Batch is not the table's Korber Lot Number
     for (const r0 of vbBad) style(U.encode_col(5) + (r0 + 1), ST.cut);
     for (const r0 of badRows) style('A' + (r0 + 1), ST.cut);
+    for (const r0 of movedRows) style('A' + (r0 + 1), ST.tn);
     // v173: a TRANSFER NOTE roll: its Remark (TN + Transfer Request Number) marked
     for (const r0 of tnRows) style(U.encode_col(HEAD.length - 1) + (r0 + 1), ST.tn);
     for (const r0 of sapTnRows) style(U.encode_col(6) + (r0 + 1), ST.tn);
@@ -629,9 +633,18 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
   if (opts.combined) {
     for (const k of kinds) { const list = entries.filter((e) => e.kind === k); if (list.length) U.book_append_sheet(wb, plSheet(list), `${k} Packing List`); }
   } else {
+    // v199: a roll split between several Picks (a cut roll's balance on the next SO line) is one row: the whole roll on the
+    // sheet of the first of those Picks, every SO line's SAP line under it; the other Picks' sheets say where it is
+    const ownerOf = new Map<string, number>(), ownerKind = new Map<string, 'KFC' | 'PFC'>();
+    for (const r of reqs) for (const e of entries) if (e.r.id === r.id && !ownerOf.has(e.p.pallet)) { ownerOf.set(e.p.pallet, r.id); ownerKind.set(e.p.pallet, e.kind); }
+    const sheetOf = new Map<string, string>();
     for (const r of reqs) for (const k of kinds) {
-      const list = entries.filter((e) => e.r.id === r.id && e.kind === k);
-      if (list.length) U.book_append_sheet(wb, plSheet(list), sheetName(`${reqName(r)} ${k}`));
+      const list = entries.filter((e) => ownerOf.get(e.p.pallet) === r.id && ownerKind.get(e.p.pallet) === k);
+      const away = entries.filter((e) => e.r.id === r.id && e.kind === k && ownerOf.get(e.p.pallet) !== r.id);
+      if (!list.length && !away.length) continue;
+      const name = sheetName(`${reqName(r)} ${k}`);
+      for (const e of list) if (!sheetOf.has(e.p.pallet)) sheetOf.set(e.p.pallet, name);
+      U.book_append_sheet(wb, plSheet(list, away.map((e) => ({ pallet: e.p.pallet, qty: Number(e.p.qty), sheet: sheetOf.get(e.p.pallet) ?? '' }))), name);
     }
   }
   // Cut Roll: every roll that is cut (its pieces add up to less than the roll), KFC and PFC on their own sheets — in the
