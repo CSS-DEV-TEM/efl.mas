@@ -1833,3 +1833,46 @@ input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, te
 .rm-t th, .rm-t td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--line); }
 .rm-t th { font-family: var(--font-head); font-size: 12.5px; color: var(--ink-3); }
 @media (max-width: 900px) { .rm-grid { grid-template-columns: minmax(0, 1fr); } .rm-toc { position: static; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); } .rm-t { display: block; overflow-x: auto; } }
+
+/* ================================================= v197 · Sign-in: a dark "Welcome back" card and the tethered button */
+.login-wrap { background: radial-gradient(900px 600px at 50% -10%, rgba(255, 140, 60, .16), transparent 60%), linear-gradient(160deg, #202127, #121317); }
+.login-wrap .login-bg { opacity: .55; }
+.login { max-width: 400px; padding: 30px 28px 24px; border-radius: 28px; color: #f1f1f4;
+  --ink: #f1f1f4; --ink-2: #b6b7c0; --ink-3: #868892; --panel: #26272d; --panel-2: #1d1e23; --line: rgba(255, 255, 255, .08); --line-strong: rgba(255, 255, 255, .16);
+  background: linear-gradient(180deg, #2a2b31, #1f2025) !important; border: 1px solid rgba(255, 255, 255, .06) !important;
+  box-shadow: 0 30px 80px -20px rgba(0, 0, 0, .7), 0 0 0 1px rgba(255, 255, 255, .03) inset, 0 1px 0 rgba(255, 255, 255, .06) inset !important; }
+.login-head h1 { font-family: var(--font-head); font-size: 26px; font-weight: 700; letter-spacing: -.01em; color: #fff; }
+.login-head p { margin: 4px 0 0; color: var(--ink-3); font-size: 13px; }
+.login label { color: var(--ink-2); font-size: 12.5px; font-weight: 600; }
+.login input { background: #17181c !important; color: #f1f1f4; border: 1px solid rgba(255, 255, 255, .07) !important; box-shadow: inset 3px 3px 8px rgba(0, 0, 0, .5), inset -2px -2px 6px rgba(255, 255, 255, .03) !important;
+  height: 44px; border-radius: 14px !important; padding: 0 14px; transition: border-color .2s, box-shadow .2s; }
+.login input:focus { outline: none; border-color: rgba(255, 140, 60, .6) !important; box-shadow: 0 0 0 3px rgba(255, 120, 50, .18), inset 3px 3px 8px rgba(0, 0, 0, .5) !important; }
+.login-div button { background: #1d1e23; border-color: rgba(255, 255, 255, .06); color: var(--ink-2); }
+.login-div button.on { background: var(--grad); color: #fff; border-color: transparent; }
+.login-div button.on small { color: rgba(255, 255, 255, .85); }
+
+/* the dock: a recessed socket, the tether line and the button that will not be caught until the form is filled */
+.tether { position: relative; height: 92px; margin-top: 4px; touch-action: manipulation; }
+.tether-socket { position: absolute; left: 50%; top: 50%; width: 170px; height: 50px; transform: translate(-50%, -50%); border-radius: 999px;
+  background: #15161a; box-shadow: inset 4px 4px 10px rgba(0, 0, 0, .6), inset -3px -3px 8px rgba(255, 255, 255, .03); }
+.tether-line { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.tether-line path { fill: none; stroke: rgba(255, 150, 70, .75); stroke-width: 2; stroke-dasharray: 5 5; stroke-linecap: round; transition: opacity .25s; filter: drop-shadow(0 0 4px rgba(255, 120, 50, .5)); }
+.tether-anchor { fill: #ff8a2b; filter: drop-shadow(0 0 5px rgba(255, 120, 50, .8)); }
+.tether.ready .tether-anchor { fill: #6fd39a; filter: drop-shadow(0 0 6px rgba(111, 211, 154, .8)); }
+.tether-btn { position: absolute; left: calc(50% - 80px); top: calc(50% - 22px); width: 160px; height: 44px; border-radius: 999px; border: 1px solid rgba(255, 255, 255, .08);
+  display: grid; place-items: center; cursor: pointer; font-family: var(--font-head); font-weight: 700; font-size: 14.5px; letter-spacing: .01em;
+  color: #9a9ba5; background: linear-gradient(180deg, #34353d, #2a2b31); box-shadow: 6px 8px 18px rgba(0, 0, 0, .5), -2px -2px 8px rgba(255, 255, 255, .04), inset 0 1px 0 rgba(255, 255, 255, .06);
+  transition: color .3s, background .4s, box-shadow .4s; will-change: transform; }
+.tether.ready .tether-btn { color: #fff; background: var(--grad); border-color: transparent; box-shadow: 0 12px 28px -8px rgba(242, 70, 60, .8), inset 0 1px 0 rgba(255, 255, 255, .35); }
+.tether.ready .tether-btn:hover { filter: brightness(1.06); }
+.tether-btn:focus-visible { outline: 2px solid #ffb347; outline-offset: 3px; }
+.tether-btn > span { grid-area: 1 / 1; }
+.tether-spin { width: 18px; height: 18px; border-radius: 50%; border: 2px solid rgba(255, 255, 255, .35); border-top-color: #fff; opacity: 0; }
+.tether.busy .tether-label { opacity: 0; }
+.tether.busy .tether-spin { opacity: 1; animation: tetherSpin .8s linear infinite; }
+.tether-btn.shake { animation: tetherShake .45s cubic-bezier(.36, .07, .19, .97); }
+@keyframes tetherShake { 15%, 85% { margin-left: -3px; } 30%, 70% { margin-left: 5px; } 45% { margin-left: -7px; } 60% { margin-left: 7px; } }
+@keyframes tetherSpin { to { transform: rotate(360deg); } }
+.tether-hint { position: absolute; left: 0; right: 0; bottom: -6px; text-align: center; font-size: 12px; color: #ffb37a; opacity: 0; transform: translateY(4px); transition: opacity .3s, transform .3s; }
+.tether-hint.on { opacity: 1; transform: none; }
+@media (prefers-reduced-motion: reduce) { .tether-btn.shake { animation: none; } .tether-line path { transition: none; } }

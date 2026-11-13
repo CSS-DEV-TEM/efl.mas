@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { APP_VERSION, api, ApiError, clearSession, DIV_NAME, getDiv, getSession, saveSession, setDiv, userDivs, type Div, type MaintInfo, type User } from '@/lib/api';
 import { Credit, Logo } from '@/components/Brand';
+import TetherButton from '@/components/TetherButton';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -45,10 +46,9 @@ export default function LoginPage() {
       <div className="login-bg" aria-hidden="true"><i /><i /><i /><span className="threads" /></div>
       <form className="login card" onSubmit={submit}>
         <div className="login-logo"><Logo size={56} /></div>
-        <div>
-          <h1>MAS AUTOMATE PICK SYSTEM</h1>
-          <p className="muted small" style={{ margin: 0 }}>{APP_VERSION}</p>
-          <p>Sign in to plan, pick and dispatch against ZMMBE, ZINSR, ZCOMENT and Korber stock.</p>
+        <div className="login-head">
+          <h1>Welcome back</h1>
+          <p>MAS Automate Pick System · <span className="mono">{APP_VERSION}</span></p>
         </div>
         {maint && (
           <div className="maint-note" role="status">
@@ -70,7 +70,7 @@ export default function LoginPage() {
           <label htmlFor="p">Password<input id="p" type="password" autoComplete="current-password" value={password} onChange={(e) => setP(e.target.value)} required /></label>
           {maint && <label htmlFor="mp">Maintenance password<input id="mp" type="password" autoComplete="off" value={mpw} onChange={(e) => setMpw(e.target.value)} placeholder="Admin: leave empty" /></label>}
           {err && <div className="notice bad" role="alert">{err}</div>}
-          <button className="btn primary login-btn" type="submit" aria-busy={!!busy || undefined} disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
+          <TetherButton ready={!!username.trim() && !!password} busy={busy} label="Sign in" busyLabel="Signing in…" hint="Fill in your username and password first" />
         </div>
         <div className="login-credit"><Credit /></div>
       </form>
