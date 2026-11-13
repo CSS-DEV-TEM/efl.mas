@@ -1,5 +1,6 @@
 'use client';
 import LineCoach from './LineCoach';
+import MatchHud, { type HudEv } from './MatchHud';
 import ReconModal from './ReconModal';
 import DayEndModal from './DayEndModal';
 import { useShell } from './Shell';
@@ -309,6 +310,10 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
   const [run, setRun] = useState<{ total: number; done: number; cur: string; res: RunRes[]; finished: boolean; offline?: boolean } | null>(null);
   const [runWhy, setRunWhy] = useState<Record<number, string>>({});
   const stopRef = useRef(false);
+  // v198: the Match HUD — what Pick all matched does, shown live (display only)
+  const hudFeed = useRef<HudEv[]>([]);
+  const [hudOpen, setHudOpen] = useState(false);
+  const hud = (e: HudEv) => { hudFeed.current.push(e); };
   // v138: the Pick all matched mode — Offsite: the last roll cut to the exact QTY; Normal: the same picks, then each cut roll's
   // balance is tallied (to another SO line that can take it, as the Packing List does). Settings → Pick rules give the default.
   const [autoRules, setAutoRules] = useState<{ allowOffsite: boolean; defaultPickKind: 'normal' | 'offsite' }>({ allowOffsite: true, defaultPickKind: 'normal' });
@@ -354,6 +359,9 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
     const res: RunRes[] = []; const why: Record<number, string> = {};
     const newReqs: number[] = [];
     setRun({ total: targets.length, done: 0, cur: '', res: [], finished: false });
+    hudFeed.current = [];
+    hud({ t: 'start', kind: kindNow, label: label || week, lines: targets.map((l) => ({ so: l.so, li: String(l.li), item: l.item })) });
+    setHudOpen(true);
     const task = startTask('Pick all matched', '', targets.length);
     try {
       for (let i = 0; i < targets.length; i++) {
@@ -363,14 +371,20 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
         const base = { id: l.id, so: l.so, li: String(l.li), item: l.item };
         // a line is tried again after the network comes back: its rolls are read again, so a pick that reached the
         // server before the network dropped is not picked twice (it shows as picked)
-        let firstPicked: number | null = null, sent = 0;
+        let firstPicked: number | null = null, sent = 0, gotQ = 0;
         for (;;) {
           try {
             const wk = (l as LineP & { week?: string }).week || week;
             const c = await api<Candidates>(`/api/pick/candidates?week=${encodeURIComponent(wk)}&key=${encodeURIComponent(l.key)}&date=${encodeURIComponent(l.date ?? '')}`);
             if (firstPicked === null) firstPicked = c.picked;
             const left = r3(c.need - c.picked);
+            if (!hudFeed.current.some((e) => e.t === 'line' && e.i === i)) {
+              hud({ t: 'line', i, so: l.so, li: String(l.li), item: l.item, need: r3(c.planQty ?? c.need), left, ur: typeof c.ur === 'number' ? r3(c.ur) : null });
+              hud({ t: 'cands', i, rolls: c.rolls.filter((x) => x.available > 1e-9 && !x.needsConfirm && !x.pool).length, pool: c.rolls.filter((x) => x.available > 1e-9 && x.pool).length, blocked: c.blocked?.length ?? 0,
+                lots: c.lots.map((x) => ({ lot: x.lot, vb: x.vendor_batch || '', qty: r3(x.qty) })) });
+            }
             if (sent > 1e-9 && c.picked - firstPicked > 1e-9) {
+              gotQ = r3(c.picked - firstPicked);
               res.push({ ...base, ok: 'picked', text: `${fmtQty(r3(c.picked - firstPicked))} (saved before the network dropped)${left > 1e-9 ? ` · ${fmtQty(left)} still to pick` : ''}` });
               break;
             }
@@ -384,6 +398,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
             } else {
               const tot = r3(rolls.reduce((t, x) => t + x.qty, 0));
               sent = tot;
+              hud({ t: 'sel', i, rolls: rolls.map((x) => { const cr = c.rolls.find((y) => y.pallet === x.pallet); return { pallet: x.pallet, lot: cr?.lot || '', qty: x.qty, cut: !!cr && x.qty < r3(cr.available) - 1e-9, loc: cr?.location || '', tn: !!cr?.tn }; }) });
               const pr = await api<{ id: number | null; qty: number; moved?: { pallet: string; so: string; li: string; qty: number }[]; movedErr?: string }>('/api/pick', { method: 'POST', body: { week: wk, key: l.key, date: l.date, kind: kindNow, auto: true, rolls } });
               if (pr.id) newReqs.push(pr.id);
               // v129: a roll over this SO line's batch lot: that part went to another SO line (same Material, LI, SO Plant)
@@ -391,6 +406,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
               const mvQ = r3(mv.reduce((t, x) => t + x.qty, 0));
               const got = r3(tot - mvQ);
               const short = r3(left - got);
+              gotQ = got;
               res.push({ ...base, ok: 'picked', text: `${rolls.length} roll${rolls.length === 1 ? '' : 's'} · ${fmtQty(got)}${mv.length ? ` · ${fmtQty(mvQ)} to ${Array.from(new Set(mv.map((x) => `${x.so} / ${x.li}`))).join(', ')} (batch lot full)` : ''}${pr.movedErr ? ` · not moved: ${pr.movedErr}` : ''}${short > 1e-9 ? ` · ${fmtQty(short)} still short` : ''}` });
               if (short > 1e-9) why[l.id] = `${fmtQty(short)} still short — no more All-match rolls (see the Smart suggestion in the pick window)`;
             }
@@ -402,6 +418,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
             break;
           }
         }
+        { const x = res[res.length - 1]; if (!hudFeed.current.some((e) => e.t === 'line' && e.i === i)) hud({ t: 'line', i, so: l.so, li: String(l.li), item: l.item, need: 0, left: 0, ur: null }); if (x && x.id === base.id) hud({ t: 'done', i, ok: x.ok, text: x.text, got: x.ok === 'picked' ? gotQ : 0 }); }
         setRun((r) => r && { ...r, done: i + 1, res: [...res] });
         task.set(i + 1, undefined, `${l.so} / ${l.li}`);
       }
@@ -427,6 +444,8 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
       window.removeEventListener('beforeunload', onLeave);
       task.end();
     }
+    { const t = res.find((x) => x.id === -1); if (t) hud({ t: 'tally', text: t.text }); }
+    hud({ t: 'end', stopped: stopRef.current });
     setRun((r) => r && { ...r, cur: '', finished: true, offline: false });
     setRunActive(false);
     setRunWhy(why);
@@ -536,6 +555,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
             </div>
           ))}
         </div>
+        {run && hudOpen && createPortal(<MatchHud feed={hudFeed} finished={run.finished} onClose={() => setHudOpen(false)} onStop={() => { stopRef.current = true; }} />, document.body)}
         {run && (
           <div className={`run-panel ${run.finished ? 'done' : 'going'} ${run.offline ? 'offline' : ''}`} role="status" aria-live="polite">
             <div className="run-top">
@@ -543,6 +563,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
               <b>{run.finished ? 'Pick all matched — finished' : run.offline ? 'Network lost — paused, goes on by itself' : 'Picking all matched rolls… keep this tab open'}</b>
               <span className="muted small">{run.done} / {run.total} lines{run.cur ? ` · ${run.cur}` : ''}</span>
               <span style={{ flex: 1 }} />
+              {!hudOpen && <button className="btn sm" onClick={() => setHudOpen(true)} title="Show the live match view">◎ Live view</button>}
               {!run.finished ? <button className="btn sm" onClick={() => { stopRef.current = true; }}>Stop</button> : <button className="btn sm" onClick={() => setRun(null)}>Close</button>}
             </div>
             <div className="run-bar"><i style={{ width: `${run.total ? Math.round((run.done / run.total) * 100) : 0}%` }} /></div>

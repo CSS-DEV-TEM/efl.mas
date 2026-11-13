@@ -66,7 +66,8 @@ function WeekDispatch({ toggle }: { toggle: React.ReactNode }) {
   const plants = useMemo(() => Array.from(new Set(all.map((l) => (l.plant || '').toUpperCase()).filter(Boolean))).sort(), [all]);
   // a remembered day / plant that is not in this week: every day / every plant
   useEffect(() => { if (plan && day && !days.some(([d]) => d === day)) setDay(''); if (plan && plant && !plants.includes(plant)) setPlant(''); }, [plan, days, plants]); // eslint-disable-line react-hooks/exhaustive-deps
-  const rows = all.filter((l) => (!day || l.date === day) && (!plant || (l.plant || '').toUpperCase() === plant));
+  // v198: the same array until the plan / day / plant changes (a new one each render made the Pick tab fetch its plan report again and again)
+  const rows = useMemo(() => all.filter((l) => (!day || l.date === day) && (!plant || (l.plant || '').toUpperCase() === plant)), [all, day, plant]);
   const plantName = (c: string) => (plan?.plants || []).find((p) => p.code.toUpperCase() === c)?.name || c;
   const label = `Week plan ${plan?.week || ''}${day ? ` · ${fmtDate(day)}` : ' · whole week'}${plant ? ` · ${plantName(plant)}` : ''}`;
   return (
