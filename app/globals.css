@@ -2000,3 +2000,11 @@ input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, te
 .psum tbody td.dash { background: color-mix(in srgb, #ff8a3d 6%, transparent); }
 .psum tbody td.warn-t { color: var(--warn, #c98a00); font-weight: 600; }
 .psum tbody td.bad-t { color: var(--bad, #d93a3a); font-weight: 600; }
+
+/* v201: the plant summary in the Dashboard cards' columns — the card's name over its figures */
+.psum.psum-cards thead tr.grp th { text-align: center; font-size: 11.5px; letter-spacing: .04em; text-transform: uppercase; white-space: nowrap; }
+.psum.psum-cards thead tr.grp th[rowspan] { vertical-align: bottom; text-align: left; }
+.psum.psum-cards thead tr.sub th { font-size: 11px; font-weight: 600; opacity: .85; white-space: nowrap; }
+.psum.psum-cards th.g0, .psum.psum-cards td.g0 { border-left: 2px solid color-mix(in srgb, #ff8a3d 55%, transparent); }
+.psum.psum-cards thead tr.grp th.g0 { box-shadow: inset 0 -3px 0 #ff8a3d; }
+.psum.psum-cards tbody td.strong, .psum.psum-cards tfoot td.strong { font-weight: 700; }

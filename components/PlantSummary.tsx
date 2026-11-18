@@ -58,48 +58,61 @@ export default function PlantSummary({ rows, plants, received = [], week, day, c
   };
   const [setup, setSetup] = useState(false);
   const fl = (code: string, k: string) => (changed.has(`${code}:${k}`) ? ' flash-cell' : '');
-  const pair = (r: PlantRow, k: 'plan' | 'ur' | 'qi' | 'block' | 'nih' | 'adhoc' | 'sameDay' | 'picked' | 'released' | 'dispatched' | 'pending', strong = false) => (
-    <><td className={`n ${strong ? 'strong' : ''}${fl(r.code, k)}`}>{q(r[k].qty)}</td><td className={`n soli${fl(r.code, k + '#')}`}>{c(r[k].soli)}</td></>);
-  const pct = (r: PlantRow) => Math.round(r.progress * 100);
-  const row = (r: PlantRow, isTotal = false) => (
-    <tr key={r.code} className={isTotal ? 'total' : ''} onClick={isTotal ? undefined : () => onPlant(r.plantCode)} title={isTotal ? '' : `Show ${r.name} lines`}>
-      <td>{isTotal ? '' : r.responsible}</td>
-      <td className="pname">{r.name}{!isTotal && !r.name.startsWith(r.plantCode) && <small>{r.plantCode}</small>}</td>
-      <td onClick={(e) => e.stopPropagation()}>{isTotal ? '' : <TimeCell value={r.target} canEdit={canTarget} placeholder="10:00 AM" title="Target time (admin setting) — click to change" onSave={(v) => saveTarget(r.plantCode, v)} weekly />}</td>
-      <td onClick={(e) => e.stopPropagation()} className={r.late === true ? 'late' : r.late === false ? 'ontime' : ''}>{isTotal ? '' : <TimeCell value={r.receivedText} canEdit={canEdit} placeholder="9:48 AM" manual={r.receivedManual}
-        title={r.receivedManual ? 'Typed on the dashboard — click to change, clear it to use the upload time' : r.received ? 'Plan upload time — click to type the real received time' : 'Click to type the received time'} onSave={(v) => saveReceived(r.plantCode, v, r.period)} />}</td>
-      {pair(r, 'plan')}
-      {kp && <><td className="n strong dash" title="Plan UR: each line's QTY, at most its UR (as on the Dashboard)">{q(K(r)?.planUr.v ?? 0)}</td><td className={`n soli dash ${K(r)?.planUr.short ? 'warn-t' : ''}`} title="Lines whose UR is less than their QTY">{c(K(r)?.planUr.short ?? 0)}</td></>}
-      {pair(r, 'ur', true)}
-      <td className="n">{r.wh ? fmt(r.wh, 2) : isTotal ? '' : '–'}</td>
-      {pair(r, 'qi')}{pair(r, 'block')}{pair(r, 'nih')}{pair(r, 'adhoc')}{pair(r, 'sameDay')}
-      <td className={`n pick${fl(r.code, 'picked')}`} title={r.rolls ? `${fmt(r.rolls)} roll${r.rolls === 1 ? '' : 's'} picked` : ''}>{q(r.picked.qty)}</td><td className={`n soli${fl(r.code, 'picked#')}`}>{c(r.picked.soli)}</td>
-      {pair(r, 'released')}{pair(r, 'dispatched')}
-      <td className="n strong">{q(r.total) || (isTotal ? '' : '–')}</td>
-      {pair(r, 'pending')}
-      {kp && (() => { const k = K(r); const rp = k?.rep; const cv = covPct(k); return <>
-        <td className="n dash" title="Full UR stock in the warehouse (each SO / LI / Item once)">{q(k?.t.ur ?? 0)}</td>
-        <td className="n dash">{q(k?.t.kfc_ur ?? 0)}</td><td className="n dash">{q(k?.t.pfc_ur ?? 0)}</td>
-        <td className="n dash" title="ZMMBE at the plant storage locations (40 / 70 / 75)">{rp ? q(rp.sent) : ''}</td><td className="n soli dash">{rp ? c(rp.sentN) : ''}</td>
-        <td className="n dash" title={rp && rp.tnUr > 1e-9 ? `TN-UR ${fmt(rp.tnUr, 2)}` : 'ZMM_TRR transfer requests of these SO lines'}>{rp ? c(rp.tnCount) : ''}</td><td className="n dash">{rp ? q(rp.tnQty) : ''}</td>
-        <td className="n dash strong" title="Lines the warehouse can send now (plan report)">{rp ? q(rp.possible) : ''}</td><td className="n soli dash">{rp ? c(rp.possibleN) : ''}</td>
-        <td className="n dash" title={k ? `${fmt(k.rolls.qty, 2)} QTY on the Packing List` : ''}>{c(k?.rolls.rolls ?? 0)}</td>
-        <td className={`n dash ${k?.rolls.cut ? 'warn-t' : ''}`} title={k?.rolls.cut ? `${fmt(k.rolls.cutQty, 2)} QTY cut` : ''}>{c(k?.rolls.cut ?? 0)}</td>
-        <td className={`n dash ${k?.t.shortLines ? 'bad-t' : ''}`} title="Open lines whose QTY is more than the Full UR">{c(k?.t.shortLines ?? 0)}</td><td className="n dash">{q(k?.t.short ?? 0)}</td>
-        <td className="n dash" title="Lines with UR ≥ QTY">{cv === null ? '' : `${cv}%`}</td>
-      </>; })()}
-      <td className={`n${fl(r.code, 'done')}`} title="SO/LI lines sent in full (picked / dispatched) or marked Done, of all lines">{r.plan.soli ? `${fmt(r.doneSoli)} / ${fmt(r.plan.soli)}` : ''}</td>
-      <td className={`prog-td${fl(r.code, 'progress')}`} title={`${pct(r)}% of the plan QTY sent`}>{r.plan.qty > 0 && <span className={`prog ${pct(r) >= 100 ? 'full' : ''}`}><i style={{ width: `${pct(r)}%` }} /><b>{pct(r)}%</b></span>}</td>
-      <td className="n" title={r.lastPick ? `Last pick saved ${pickDay(r.lastPick)} ${fmtTime(r.lastPick)}` : ''}>{r.lastPick ? `${pickDay(r.lastPick) === pickDay(new Date().toISOString()) ? '' : pickDay(r.lastPick).slice(0, 5) + ' '}${fmtTime(r.lastPick)}` : ''}</td>
-    </tr>
-  );
+  // v201: the columns are the Dashboard cards — each card's name over its figures, worked out the same way as the card
+  type Cell = { v: number | string | null; k?: 'q' | 'n' | 'p'; cls?: string; title?: string };
+  const COLS: { card: string; tip: string; subs: { h: string; get: (k: DashKpi, r: PlantRow) => Cell }[] }[] = [
+    { card: 'Plan lines', tip: 'SO / LI lines of the plan', subs: [
+      { h: 'Lines', get: (k) => ({ v: k.t.lines, k: 'n', cls: 'strong' }) }, { h: 'Done', get: (k) => ({ v: k.t.done, k: 'n' }) }, { h: 'Open', get: (k) => ({ v: k.t.open, k: 'n' }) }] },
+    { card: 'Required QTY', tip: 'Plan QTY (variance = QTY − Assigned)', subs: [
+      { h: 'QTY', get: (k) => ({ v: k.t.qty, k: 'q', cls: 'strong' }) }, { h: 'Variance', get: (k) => ({ v: k.t.variance, k: 'q' }) }] },
+    { card: 'Full UR stock', tip: 'In the warehouse (not at the plant storage locations 40 / 70 / 75)', subs: [
+      { h: 'UR', get: (k) => ({ v: k.t.ur, k: 'q', cls: 'strong' }) }, { h: 'QI', get: (k) => ({ v: k.t.qi, k: 'q' }) }, { h: 'Block', get: (k) => ({ v: k.t.block, k: 'q' }) }] },
+    { card: 'KFC / PFC UR', tip: 'UR at the KFC and PFC storage locations', subs: [
+      { h: 'KFC', get: (k) => ({ v: k.t.kfc_ur, k: 'q' }) }, { h: 'PFC', get: (k) => ({ v: k.t.pfc_ur, k: 'q' }) }] },
+    { card: 'Plan UR', tip: "Each line's QTY, at most its UR (Total − QI − Block − Assigned)", subs: [
+      { h: 'QTY', get: (k) => ({ v: k.planUr.v, k: 'q', cls: 'strong' }) }, { h: 'Lines short', get: (k) => ({ v: k.planUr.short, k: 'n', cls: k.planUr.short ? 'warn-t' : '' }) }] },
+    { card: 'Transfer notes', tip: 'ZMM_TRR transfer requests of these SO lines', subs: [
+      { h: 'TN', get: (k) => ({ v: k.rep?.tnCount ?? null, k: 'n' }) }, { h: 'SO/LI', get: (k) => ({ v: k.rep?.tnLines ?? null, k: 'n' }) },
+      { h: 'QTY', get: (k) => ({ v: k.rep?.tnQty ?? null, k: 'q' }) }, { h: 'TN-UR', get: (k) => ({ v: k.rep?.tnUr ?? null, k: 'q' }) }] },
+    { card: 'Alrady send', tip: 'ZMMBE at the plant storage locations (40 / 70 / 75)', subs: [
+      { h: 'QTY', get: (k) => ({ v: k.rep?.sent ?? null, k: 'q' }) }, { h: 'SO/LI', get: (k) => ({ v: k.rep?.sentN ?? null, k: 'n' }) }] },
+    { card: 'QI', tip: 'SO QI stock (ZMMBE, every storage location) — not picked until released', subs: [
+      { h: 'QTY', get: (k) => ({ v: k.rep?.qi ?? null, k: 'q', cls: k.rep?.qiN ? 'warn-t' : '' }) }, { h: 'SO/LI', get: (k) => ({ v: k.rep?.qiN ?? null, k: 'n' }) }] },
+    { card: 'Block', tip: 'SO Blocked stock (ZMMBE, every storage location) — not picked until released', subs: [
+      { h: 'QTY', get: (k) => ({ v: k.rep?.block ?? null, k: 'q', cls: k.rep?.blockN ? 'bad-t' : '' }) }, { h: 'SO/LI', get: (k) => ({ v: k.rep?.blockN ?? null, k: 'n' }) }] },
+    { card: 'Posibal pending', tip: 'Lines the warehouse can send now (plan report)', subs: [
+      { h: 'QTY', get: (k) => ({ v: k.rep?.possible ?? null, k: 'q', cls: 'strong' }) }, { h: 'Lines', get: (k) => ({ v: k.rep?.possibleN ?? null, k: 'n' }) }] },
+    { card: 'PL rolls', tip: 'Rolls on the Packing List of these lines (a pallet picked in pieces counts once)', subs: [
+      { h: 'Rolls', get: (k) => ({ v: k.rolls.rolls, k: 'n' }) }, { h: 'QTY', get: (k) => ({ v: k.rolls.qty, k: 'q' }) }] },
+    { card: 'Cut rolls', tip: 'Rolls picked for less than the whole roll', subs: [
+      { h: 'Rolls', get: (k) => ({ v: k.rolls.cut, k: 'n', cls: k.rolls.cut ? 'warn-t' : '' }) }, { h: 'QTY', get: (k) => ({ v: k.rolls.cutQty, k: 'q' }) }] },
+    { card: 'Picked', tip: 'Saved picks of these lines', subs: [
+      { h: 'QTY', get: (k) => ({ v: k.picked.qty, k: 'q', cls: 'strong' }) }, { h: 'SO/LI', get: (k) => ({ v: k.picked.lines, k: 'n' }) }, { h: 'Rolls', get: (k) => ({ v: k.rolls.rolls, k: 'n' }) }] },
+    { card: 'Dispatched', tip: 'Dispatched QTY and lines complete', subs: [
+      { h: 'QTY', get: (k) => ({ v: k.t.dispatched, k: 'q' }) }, { h: 'Lines', get: (k) => ({ v: k.t.dispatchedLines, k: 'n' }) }] },
+    { card: 'Open & short of UR', tip: 'Open lines whose QTY is more than the Full UR', subs: [
+      { h: 'Lines', get: (k) => ({ v: k.t.shortLines, k: 'n', cls: k.t.shortLines ? 'bad-t' : '' }) }, { h: 'QTY', get: (k) => ({ v: k.t.short, k: 'q' }) }] },
+    { card: 'Stock coverage', tip: 'Lines with UR ≥ QTY', subs: [
+      { h: '%', get: (k) => ({ v: k.t.lines ? Math.round((k.t.cov.Covered / k.t.lines) * 100) : null, k: 'p' }) }] },
+  ];
+  const show = (x: Cell) => (x.v === null || x.v === '' ? '' : x.k === 'q' ? q(Number(x.v)) : x.k === 'p' ? `${x.v}%` : typeof x.v === 'number' ? c(x.v) : String(x.v));
+  const row = (r: PlantRow, isTotal = false) => {
+    const k = K(r);
+    return (
+      <tr key={r.code} className={isTotal ? 'total' : ''} onClick={isTotal ? undefined : () => onPlant(r.plantCode)} title={isTotal ? '' : `Show ${r.name} lines`}>
+        <td>{isTotal ? '' : r.responsible}</td>
+        <td className="pname">{r.name}{!isTotal && !r.name.startsWith(r.plantCode) && <small>{r.plantCode}</small>}</td>
+        {COLS.map((g, gi) => g.subs.map((sub, si) => { const cl = k ? sub.get(k, r) : { v: null }; return <td key={`${gi}.${si}`} className={`n ${si === 0 ? 'g0' : ''} ${cl.cls || ''}${fl(r.code, g.card + sub.h)}`}>{show(cl)}</td>; }))}
+      </tr>
+    );
+  };
   const exportXlsx = () => {
-    const head = ['Responsible', 'PLANT', 'Target time', 'Received time', 'Plan Qty', 'SOLI', ...(kp ? ['Plan UR', 'Short lines'] : []), 'UR', 'SOLI', 'W/H', 'QI', 'SOLI', 'BLOCK', 'SOLI', 'NIH', 'SOLI', 'Adhoc', 'SOLI', 'Same day', 'SOLI', 'Picked', 'SOLI', 'Rolls', 'Released to UR', 'SOLI', 'Dispatched', 'SOLI', 'Total qty', 'Pending', 'SOLI', ...(kp ? ['Full UR', 'KFC UR', 'PFC UR', 'Alrady send', 'SOLI', 'TN', 'TN QTY', 'Posibal pending', 'SOLI', 'PL rolls', 'Cut rolls', 'Open short lines', 'Short QTY', 'Coverage %'] : []), 'Done SOLI', 'Progress %', 'Last pick'];
-    const dk = (r: PlantRow) => { const k = K(r), rp = k?.rep; return [k?.t.ur ?? 0, k?.t.kfc_ur ?? 0, k?.t.pfc_ur ?? 0, rp?.sent ?? '', rp?.sentN ?? '', rp?.tnCount ?? '', rp?.tnQty ?? '', rp?.possible ?? '', rp?.possibleN ?? '', k?.rolls.rolls ?? 0, k?.rolls.cut ?? 0, k?.t.shortLines ?? 0, k?.t.short ?? 0, covPct(k) ?? '']; };
-    const line = (r: PlantRow) => [r.responsible, r.name, r.target, r.receivedText, r.plan.qty, r.plan.soli, ...(kp ? [K(r)?.planUr.v ?? 0, K(r)?.planUr.short ?? 0] : []), r.ur.qty, r.ur.soli, Math.round(r.wh * 100) / 100, r.qi.qty, r.qi.soli, r.block.qty, r.block.soli, r.nih.qty, r.nih.soli, r.adhoc.qty, r.adhoc.soli, r.sameDay.qty, r.sameDay.soli, r.picked.qty, r.picked.soli, r.rolls, r.released.qty, r.released.soli, r.dispatched.qty, r.dispatched.soli, r.total, r.pending.qty, r.pending.soli, ...(kp ? dk(r) : []), r.doneSoli, Math.round(r.progress * 100), fmtTime(r.lastPick)]
-      .map((v) => (typeof v === 'number' ? Math.round(v * 1000) / 1000 : v));
-    const ws = XLSX.utils.aoa_to_sheet([head, ...s.rows.map(line), line(s.total)]);
-    ws['!cols'] = head.map((h, i) => ({ wch: i < 4 ? 14 : Math.max(7, h.length + 2) }));
+    const head1 = ['', '', ...COLS.flatMap((g) => g.subs.map((_, i) => (i === 0 ? g.card : '')))];
+    const head2 = ['Responsible', 'PLANT', ...COLS.flatMap((g) => g.subs.map((x) => x.h))];
+    const line = (r: PlantRow) => { const k = K(r); return [r.responsible, r.name, ...COLS.flatMap((g) => g.subs.map((x) => { const v = k ? x.get(k, r).v : null; return typeof v === 'number' ? Math.round(v * 1000) / 1000 : v ?? ''; }))]; };
+    const ws = XLSX.utils.aoa_to_sheet([head1, head2, ...s.rows.map(line), line(s.total)]);
+    let at = 2; ws['!merges'] = COLS.map((g) => { const m = { s: { r: 0, c: at }, e: { r: 0, c: at + g.subs.length - 1 } }; at += g.subs.length; return m; });
+    ws['!cols'] = head2.map((h, i) => ({ wch: i < 2 ? 22 : Math.max(9, h.length + 3) }));
     const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Summary');
     XLSX.writeFile(wb, `Plant_Summary_${day || week}.xlsx`);
   };
@@ -117,22 +130,12 @@ export default function PlantSummary({ rows, plants, received = [], week, day, c
         </div>
       </div>
       <div className="psum-wrap">
-        <table className="psum">
-          <thead><tr>
-            <th>Responsible</th><th>PLANT</th><th>Target time</th><th>Received time</th>
-            <th className="n">Plan Qty</th><th className="n">SOLI</th>
-            {kp && <><th className="n dash" title="Each line's QTY, at most its UR — as the Dashboard's Plan UR">Plan UR</th><th className="n dash" title="Lines whose UR is less than their QTY">Short</th></>}
-            <th className="n" title="UR given to the lines' balance (each SO / LI / Item's UR shared by its dates, earliest first)">UR</th><th className="n">SOLI</th><th className="n" title={`UR SOLI ÷ ${SOLI_PER_HOUR}`}>W/H</th>
-            <th className="n">QI</th><th className="n">SOLI</th><th className="n">BLOCK</th><th className="n">SOLI</th><th className="n" title="Not in house: no UR, QI or Block stock for it">NIH</th><th className="n">SOLI</th>
-            <th className="n" title='Lines with "adhoc" in Remarks or Comment'>Adhoc</th><th className="n">SOLI</th><th className="n" title="Lines dated the same day the plan was received">Same day</th><th className="n">SOLI</th>
-            <th className="n pick" title="Saved picks (pick history) — rolls in the tooltip">Picked</th><th className="n pick">SOLI</th>
-            <th className="n rel" title="QI / Block released to UR">Released</th><th className="n rel">SOLI</th><th className="n disp">Dispatched</th><th className="n disp">SOLI</th>
-            <th className="n">Total qty</th><th className="n pend">Pending</th><th className="n pend">SOLI</th>
-            {kp && <><th className="n dash">Full UR</th><th className="n dash">KFC UR</th><th className="n dash">PFC UR</th><th className="n dash">Alrady send</th><th className="n dash">SOLI</th>
-              <th className="n dash">TN</th><th className="n dash">TN QTY</th><th className="n dash">Posibal pending</th><th className="n dash">SOLI</th>
-              <th className="n dash">PL rolls</th><th className="n dash">Cut rolls</th><th className="n dash">Open short</th><th className="n dash">Short QTY</th><th className="n dash">Coverage</th></>}
-            <th className="n" title="SO/LI lines done, of all lines">Done</th><th title="Share of the plan QTY sent (picked / dispatched)">Progress</th><th className="n" title="Time of the last saved pick">Last pick</th>
-          </tr></thead>
+        <table className="psum psum-cards">
+          <thead>
+            <tr className="grp"><th rowSpan={2}>Responsible</th><th rowSpan={2}>PLANT</th>
+              {COLS.map((g) => <th key={g.card} colSpan={g.subs.length} className="g0" title={g.tip} data-nofilter>{g.card}</th>)}</tr>
+            <tr className="sub">{COLS.flatMap((g) => g.subs.map((x, i) => <th key={g.card + x.h} className={`n ${i === 0 ? 'g0' : ''}`} data-nofilter>{x.h}</th>))}</tr>
+          </thead>
           <tbody>{s.rows.map((r) => row(r))}</tbody>
           <tfoot>{row(s.total, true)}</tfoot>
         </table>

@@ -70,7 +70,9 @@ export function repOfLines(ls: Line[], repMap: Map<string, PlanReportRow> | null
     block: sumU((x) => x.block), blockN: u.filter((x) => x.block > 1e-9).length, qiSent: sumU((x) => x.qi_sent ?? 0), blockSent: sumU((x) => x.block_sent ?? 0), possible: pp.reduce((t0, x) => t0 + Number(x.possible), 0), possibleN: pp.length,
     tnCount: tns.size, tnLines: u.filter((x) => x.tn).length, tnQty: u.reduce((t0, x) => t0 + (Number(x.tn_qty) || 0), 0), tnUr: u.reduce((t0, x) => t0 + (Number(x.tn_ur) || 0), 0) };
 }
-export interface DashKpi { t: ReturnType<typeof totals>; planUr: ReturnType<typeof planUrOf>; rep: ReturnType<typeof repOfLines>; rolls: ReturnType<typeof rollsOfLines> }
+export interface DashKpi { t: ReturnType<typeof totals>; planUr: ReturnType<typeof planUrOf>; rep: ReturnType<typeof repOfLines>; rolls: ReturnType<typeof rollsOfLines>; picked: { qty: number; lines: number } }
+/** the Picked card: QTY of the saved picks and the SO / LI lines with a pick */
+export const pickedOf = (ls: Line[]) => ({ qty: ls.reduce((x, r) => x + (r.picked ?? 0), 0), lines: ls.filter((r) => (r.picked ?? 0) > 0).length });
 
 export default function Dashboard({ planType = 'week' }: { planType?: 'week' | 'day' }) {
   const isDay = planType === 'day';
@@ -214,7 +216,7 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
   }, [repIds.join(','), wPlant, data?.generatedAt]); // eslint-disable-line react-hooks/exhaustive-deps
   const rep = useMemo(() => repOfLines(scoped, repMap), [repMap, scoped]);
   // v200: the same figures for each row of the Summary (plant / Pick)
-  const kpiOf = useCallback((ls: Line[]): DashKpi => ({ t: totals(ls), planUr: planUrOf(ls), rep: repOfLines(ls, repMap), rolls: rollsOfLines(ls, data?.pickRolls) }), [repMap, data?.pickRolls]);
+  const kpiOf = useCallback((ls: Line[]): DashKpi => ({ t: totals(ls), planUr: planUrOf(ls), rep: repOfLines(ls, repMap), rolls: rollsOfLines(ls, data?.pickRolls), picked: pickedOf(ls) }), [repMap, data?.pickRolls]);
   // v164: the table's TN-UR column (from the plan report)
   const ledgerRows = useMemo(() => (!repMap ? tableRows : tableRows.map((l) => { const x = repMap.get(`${l.week}|${l.key}|${l.date ?? ''}`); return x && x.tn_ur ? { ...l, tn_ur: Number(x.tn_ur) } : l; })), [tableRows, repMap]);
   const tips = useMemo(() => insights(scoped, data?.uploads || [], today, data?.dispatch), [scoped, data?.uploads, today, data?.dispatch]);
