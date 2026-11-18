@@ -35,6 +35,43 @@ export const roundOf = (w: string | null | undefined) => { const m = /^\d{4}-\d{
 const dayLabel = (d: string) => new Date(d + 'T00:00:00Z').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
 
 /** Week plan dashboard (planType "week") and Day plan dashboard (planType "day"): the same tracking, separate plans. */
+/** v200: the Dashboard's figures of a set of plan lines — the KPI tiles and each row of the Summary use the same ones */
+type PickRollRow = { week: string; line: string; pallet: string; qty: number; roll_qty: number | null };
+/** the rolls on the Packing List of these lines (a pallet picked in pieces counts once) and the cut ones */
+export function rollsOfLines(ls: Line[], pickRolls: PickRollRow[] | undefined) {
+  const ids = new Set(ls.map((l) => `${l.week}|${l.key}|${l.date ?? ''}`));
+  const by = new Map<string, { q: number; full: number }>();
+  for (const p of pickRolls || []) {
+    if (!ids.has(`${p.week}|${p.line}`)) continue;
+    const x = by.get(p.pallet) || { q: 0, full: 0 };
+    x.q += Number(p.qty) || 0; x.full = Math.max(x.full, Number(p.roll_qty) || 0); by.set(p.pallet, x);
+  }
+  const all = Array.from(by.values());
+  const cut = all.filter((x) => x.full > 0 && x.q < x.full - 0.0005);
+  return { rolls: all.length, cut: cut.length, cutQty: cut.reduce((t0, x) => t0 + x.q, 0), qty: all.reduce((t0, x) => t0 + x.q, 0) };
+}
+/** Plan UR: what the UR covers of the plan — each line's QTY, at most its UR (QTY 100 / UR 1000 → 100; QTY 100 / UR 50 → 50) */
+export function planUrOf(ls: Line[]) {
+  let v = 0, short = 0, n = 0;
+  for (const l of ls) { const q = Number(l.qty) || 0, u0 = Math.max(0, Number(l.ur) || 0); const c = Math.min(q, u0); v += c; if (c > 1e-9) n++; if (u0 < q - 1e-9) short++; }
+  return { v, short, n };
+}
+/** the plan report figures of these lines: ALRADY SEND, QI, BLOCK, TN (per SO / LI / Item, counted once) and POSIBAL PENDING (per line) */
+export function repOfLines(ls: Line[], repMap: Map<string, PlanReportRow> | null) {
+  if (!repMap) return null;
+  const xs = ls.map((l) => repMap.get(`${l.week}|${l.key}|${l.date ?? ''}`)).filter(Boolean) as PlanReportRow[];
+  if (!xs.length) return null;
+  const byKey = new Map(xs.map((x) => [`${x.plant}|${x.key}`, x]));
+  const u = Array.from(byKey.values());
+  const sumU = (f: (x: PlanReportRow) => number) => u.reduce((t0, x) => t0 + (f(x) || 0), 0);
+  const pp = xs.filter((x) => x.possible);
+  const tns = new Set(u.flatMap((x) => String(x.tn ?? '').split(',').map((t) => t.trim()).filter(Boolean)));
+  return { sent: sumU((x) => x.sent), sentN: u.filter((x) => x.sent > 1e-9).length, qi: sumU((x) => x.qi), qiN: u.filter((x) => x.qi > 1e-9).length,
+    block: sumU((x) => x.block), blockN: u.filter((x) => x.block > 1e-9).length, qiSent: sumU((x) => x.qi_sent ?? 0), blockSent: sumU((x) => x.block_sent ?? 0), possible: pp.reduce((t0, x) => t0 + Number(x.possible), 0), possibleN: pp.length,
+    tnCount: tns.size, tnLines: u.filter((x) => x.tn).length, tnQty: u.reduce((t0, x) => t0 + (Number(x.tn_qty) || 0), 0), tnUr: u.reduce((t0, x) => t0 + (Number(x.tn_ur) || 0), 0) };
+}
+export interface DashKpi { t: ReturnType<typeof totals>; planUr: ReturnType<typeof planUrOf>; rep: ReturnType<typeof repOfLines>; rolls: ReturnType<typeof rollsOfLines> }
+
 export default function Dashboard({ planType = 'week' }: { planType?: 'week' | 'day' }) {
   const isDay = planType === 'day';
   const { user, guest, subscribe, toast, live } = useShell();
@@ -156,24 +193,9 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
   const pickedLines = useMemo(() => scoped.filter((r) => (r.picked ?? 0) > 0).length, [scoped]);
   const pickedRolls = useMemo(() => scoped.reduce((x, r) => x + (r.picked_rolls ?? 0), 0), [scoped]);
   // the Packing List of the lines on screen: its rolls (a pallet picked in pieces counts once) and the cut ones (pieces < the roll)
-  const plRolls = useMemo(() => {
-    const ids = new Set(scoped.map((l) => `${l.week}|${l.key}|${l.date ?? ''}`));
-    const by = new Map<string, { q: number; full: number }>();
-    for (const p of data?.pickRolls || []) {
-      if (!ids.has(`${p.week}|${p.line}`)) continue;
-      const x = by.get(p.pallet) || { q: 0, full: 0 };
-      x.q += Number(p.qty) || 0; x.full = Math.max(x.full, Number(p.roll_qty) || 0); by.set(p.pallet, x);
-    }
-    const all = Array.from(by.values());
-    const cut = all.filter((x) => x.full > 0 && x.q < x.full - 0.0005);
-    return { rolls: all.length, cut: cut.length, cutQty: cut.reduce((t0, x) => t0 + x.q, 0), qty: all.reduce((t0, x) => t0 + x.q, 0) };
-  }, [data, scoped]);
+  const plRolls = useMemo(() => rollsOfLines(scoped, data?.pickRolls), [data, scoped]);
   // Plan UR: what the UR covers of the plan — each line's QTY, at most its UR (QTY 100 / UR 1000 → 100; QTY 100 / UR 50 → 50)
-  const planUr = useMemo(() => {
-    let v = 0, short = 0;
-    for (const l of scoped) { const q = Number(l.qty) || 0, u0 = Math.max(0, Number(l.ur) || 0); v += Math.min(q, u0); if (u0 < q - 1e-9) short++; }
-    return { v, short };
-  }, [scoped]);
+  const planUr = useMemo(() => planUrOf(scoped), [scoped]);
   // the plan report of what is on screen (each Pick of the day, or the week / its plant): ALRADY SEND, QI, BLOCK, POSIBAL PENDING
   const repIds = useMemo(() => (!data ? [] : isDay ? (round ? [round] : (data.rounds || []).map((r) => String(r.id))) : data.week ? [data.week] : []), [data, isDay, round]);
   const [repMap, setRepMap] = useState<Map<string, PlanReportRow> | null>(null);
@@ -190,21 +212,9 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
     })();
     return () => { stop = true; };
   }, [repIds.join(','), wPlant, data?.generatedAt]); // eslint-disable-line react-hooks/exhaustive-deps
-  const rep = useMemo(() => {
-    if (!repMap) return null;
-    const xs = scoped.map((l) => repMap.get(`${l.week}|${l.key}|${l.date ?? ''}`)).filter(Boolean) as PlanReportRow[];
-    if (!xs.length) return null;
-    // ALRADY SEND, QI and BLOCK are per SO / LI / Item (the same one on two days counts once); POSIBAL PENDING per line
-    const byKey = new Map(xs.map((x) => [`${x.plant}|${x.key}`, x]));
-    const u = Array.from(byKey.values());
-    const sumU = (f: (x: PlanReportRow) => number) => u.reduce((t0, x) => t0 + (f(x) || 0), 0);
-    const pp = xs.filter((x) => x.possible);
-    // ZMM_TRR transfer notes of these lines (one TN can cover several lines)
-    const tns = new Set(u.flatMap((x) => String(x.tn ?? '').split(',').map((t) => t.trim()).filter(Boolean)));
-    return { sent: sumU((x) => x.sent), sentN: u.filter((x) => x.sent > 1e-9).length, qi: sumU((x) => x.qi), qiN: u.filter((x) => x.qi > 1e-9).length,
-      block: sumU((x) => x.block), blockN: u.filter((x) => x.block > 1e-9).length, qiSent: sumU((x) => x.qi_sent ?? 0), blockSent: sumU((x) => x.block_sent ?? 0), possible: pp.reduce((t0, x) => t0 + Number(x.possible), 0), possibleN: pp.length,
-      tnCount: tns.size, tnLines: u.filter((x) => x.tn).length, tnQty: u.reduce((t0, x) => t0 + (Number(x.tn_qty) || 0), 0), tnUr: u.reduce((t0, x) => t0 + (Number(x.tn_ur) || 0), 0) };
-  }, [repMap, scoped]);
+  const rep = useMemo(() => repOfLines(scoped, repMap), [repMap, scoped]);
+  // v200: the same figures for each row of the Summary (plant / Pick)
+  const kpiOf = useCallback((ls: Line[]): DashKpi => ({ t: totals(ls), planUr: planUrOf(ls), rep: repOfLines(ls, repMap), rolls: rollsOfLines(ls, data?.pickRolls) }), [repMap, data?.pickRolls]);
   // v164: the table's TN-UR column (from the plan report)
   const ledgerRows = useMemo(() => (!repMap ? tableRows : tableRows.map((l) => { const x = repMap.get(`${l.week}|${l.key}|${l.date ?? ''}`); return x && x.tn_ur ? { ...l, tn_ur: Number(x.tn_ur) } : l; })), [tableRows, repMap]);
   const tips = useMemo(() => insights(scoped, data?.uploads || [], today, data?.dispatch), [scoped, data?.uploads, today, data?.dispatch]);
@@ -506,7 +516,7 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
           received={isDay ? (data!.received || []) : (data!.received || []).filter((r) => (r.period ?? data!.week) === (date || data!.week))} week={isDay ? period : date || data!.week!} day={isDay ? data!.day : date}
           canTarget={!guest && user.role === 'admin'} canEdit={canEdit} time={data!.time} live={live === 'live'} updatedAt={data!.generatedAt}
           onPlant={(c) => { setPlant(rows.some((r) => (r.plant || '').toUpperCase() === c) ? (rows.find((r) => (r.plant || '').toUpperCase() === c)!.plant || '') : ''); setView({ kind: 'all' }); setTab('details'); }}
-          onSaved={(m) => { toast(m); load(); }} />
+          onSaved={(m) => { toast(m); load(); }} kpi={kpiOf} />
       )}
 
 

@@ -20,6 +20,8 @@ export interface PlantRow {
   receivedText: string; receivedManual: boolean; late: boolean | null;
   plan: Bucket; ur: Bucket; wh: number; qi: Bucket; block: Bucket; nih: Bucket; adhoc: Bucket; sameDay: Bucket;
   released: Bucket; dispatched: Bucket; total: number; pending: Bucket;
+  /** v200: the plan lines of this row (the Dashboard figures of the row are worked out from them) */
+  lines: Line[];
   /** picked from the pick history (QTY, SOLI with a pick), rolls, the last pick time */
   picked: Bucket; rolls: number; lastPick: string | null;
   /** SOLI done (sent in full / marked Done) and the share of the plan QTY already sent */
@@ -79,7 +81,7 @@ export function plantSummary(rows: Line[], plants: PlantInfo[], received: { code
     const p = info.get(pc);
     const r: PlantRow = {
       code, plantCode: pc, period: periodOfKey.get(code), round: rn, name: `${p?.name || pc}${rn ? ` · Pick ${rn}` : ''}`, responsible: p?.responsible || '', target: p?.target || time.defaultTarget || '', received: null, receivedText: '', receivedManual: false, late: null,
-      plan: b0(), ur: b0(), wh: 0, qi: b0(), block: b0(), nih: b0(), adhoc: b0(), sameDay: b0(), released: b0(), dispatched: b0(), total: 0, pending: b0(), picked: b0(), rolls: 0, lastPick: null, doneSoli: 0, progress: 0,
+      plan: b0(), ur: b0(), wh: 0, qi: b0(), block: b0(), nih: b0(), adhoc: b0(), sameDay: b0(), released: b0(), dispatched: b0(), total: 0, pending: b0(), picked: b0(), rolls: 0, lastPick: null, doneSoli: 0, progress: 0, lines: ls,
     };
     const relKeys = new Set<string>();
     for (const l of [...ls].sort(byDate)) {
@@ -113,6 +115,7 @@ export function plantSummary(rows: Line[], plants: PlantInfo[], received: { code
     .sort((a, b) => (info.get(a.plantCode)?.sort ?? 999) - (info.get(b.plantCode)?.sort ?? 999) || a.plantCode.localeCompare(b.plantCode) || (a.round ?? 0) - (b.round ?? 0) || b.plan.qty - a.plan.qty);
   const total = make('Summary', []);
   total.name = 'Summary';
+  total.lines = out.flatMap((r) => r.lines);
   for (const r of out) {
     for (const k of ['plan', 'ur', 'qi', 'block', 'nih', 'adhoc', 'sameDay', 'released', 'dispatched', 'pending', 'picked'] as const) { total[k].qty += r[k].qty; total[k].soli += r[k].soli; }
     total.wh += r.wh; total.total += r.total; total.rolls += r.rolls; total.doneSoli += r.doneSoli;

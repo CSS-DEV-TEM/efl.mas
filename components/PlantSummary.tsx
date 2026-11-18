@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { api } from '@/lib/api';
 import { fmt, type Line } from '@/lib/calc';
+import type { DashKpi } from '@/components/Dashboard';
 import { SOLI_PER_HOUR, fmtTime, plantSummary, timeMinutes, type Bucket, type PlantInfo, type PlantRow, type TimeSetup } from '@/lib/summary';
 
 const q = (n: number) => (Math.abs(n) < 0.0005 ? '' : fmt(n, 2));
@@ -15,14 +16,20 @@ const pickDay = (iso: string) => { const d = new Date(new Date(iso).getTime() + 
  * `week` is the period the received times belong to: the week (2026-W47), or the day for a day plan (2026-11-17).
  * Target times are system settings (admin only); received times are typed by the users.
  */
-export default function PlantSummary({ rows, plants, received = [], week, day, canTarget, canEdit, time, onPlant, onSaved, live, updatedAt, byRound = false }: {
+export default function PlantSummary({ rows, plants, received = [], week, day, canTarget, canEdit, time, onPlant, onSaved, live, updatedAt, byRound = false, kpi }: {
   rows: Line[]; plants: PlantInfo[]; received?: { code: string; received: string | null; period?: string }[];
   /** a day plan: a row per plant per Pick No */
   byRound?: boolean; week: string; day?: string | null; canTarget: boolean; canEdit: boolean; time?: TimeSetup; onPlant: (code: string) => void; onSaved: (msg: string) => void;
   /** realtime connected (updates the moment someone picks / uploads) or not (updates when the page is used, and every minute) */
   live?: boolean; updatedAt?: string;
+  /** v200: the Dashboard's figures of a row's lines (Plan UR, KFC / PFC UR, Alrady send, TN, Posibal pending, rolls, coverage) */
+  kpi?: (ls: Line[]) => DashKpi;
 }) {
   const s = useMemo(() => plantSummary(rows, plants, received, time, byRound), [rows, plants, received, time, byRound]);
+  // v200: the Dashboard figures of each row (and of the Summary row), worked out the same way as the Dashboard tiles
+  const kp = useMemo(() => (kpi ? new Map([...s.rows, s.total].map((r) => [r.code, kpi(r.lines)])) : null), [s, kpi]);
+  const K = (r: PlantRow) => kp?.get(r.code);
+  const covPct = (k?: DashKpi) => (k && k.t.lines ? Math.round((k.t.cov.Covered / k.t.lines) * 100) : null);
   // cells whose figure changed since the last update flash for a moment, so a live change is seen
   const prev = useRef<Map<string, number> | null>(null);
   const [changed, setChanged] = useState<Set<string>>(new Set());
@@ -61,21 +68,35 @@ export default function PlantSummary({ rows, plants, received = [], week, day, c
       <td onClick={(e) => e.stopPropagation()}>{isTotal ? '' : <TimeCell value={r.target} canEdit={canTarget} placeholder="10:00 AM" title="Target time (admin setting) — click to change" onSave={(v) => saveTarget(r.plantCode, v)} weekly />}</td>
       <td onClick={(e) => e.stopPropagation()} className={r.late === true ? 'late' : r.late === false ? 'ontime' : ''}>{isTotal ? '' : <TimeCell value={r.receivedText} canEdit={canEdit} placeholder="9:48 AM" manual={r.receivedManual}
         title={r.receivedManual ? 'Typed on the dashboard — click to change, clear it to use the upload time' : r.received ? 'Plan upload time — click to type the real received time' : 'Click to type the received time'} onSave={(v) => saveReceived(r.plantCode, v, r.period)} />}</td>
-      {pair(r, 'plan')}{pair(r, 'ur', true)}
+      {pair(r, 'plan')}
+      {kp && <><td className="n strong dash" title="Plan UR: each line's QTY, at most its UR (as on the Dashboard)">{q(K(r)?.planUr.v ?? 0)}</td><td className={`n soli dash ${K(r)?.planUr.short ? 'warn-t' : ''}`} title="Lines whose UR is less than their QTY">{c(K(r)?.planUr.short ?? 0)}</td></>}
+      {pair(r, 'ur', true)}
       <td className="n">{r.wh ? fmt(r.wh, 2) : isTotal ? '' : '–'}</td>
       {pair(r, 'qi')}{pair(r, 'block')}{pair(r, 'nih')}{pair(r, 'adhoc')}{pair(r, 'sameDay')}
       <td className={`n pick${fl(r.code, 'picked')}`} title={r.rolls ? `${fmt(r.rolls)} roll${r.rolls === 1 ? '' : 's'} picked` : ''}>{q(r.picked.qty)}</td><td className={`n soli${fl(r.code, 'picked#')}`}>{c(r.picked.soli)}</td>
       {pair(r, 'released')}{pair(r, 'dispatched')}
       <td className="n strong">{q(r.total) || (isTotal ? '' : '–')}</td>
       {pair(r, 'pending')}
+      {kp && (() => { const k = K(r); const rp = k?.rep; const cv = covPct(k); return <>
+        <td className="n dash" title="Full UR stock in the warehouse (each SO / LI / Item once)">{q(k?.t.ur ?? 0)}</td>
+        <td className="n dash">{q(k?.t.kfc_ur ?? 0)}</td><td className="n dash">{q(k?.t.pfc_ur ?? 0)}</td>
+        <td className="n dash" title="ZMMBE at the plant storage locations (40 / 70 / 75)">{rp ? q(rp.sent) : ''}</td><td className="n soli dash">{rp ? c(rp.sentN) : ''}</td>
+        <td className="n dash" title={rp && rp.tnUr > 1e-9 ? `TN-UR ${fmt(rp.tnUr, 2)}` : 'ZMM_TRR transfer requests of these SO lines'}>{rp ? c(rp.tnCount) : ''}</td><td className="n dash">{rp ? q(rp.tnQty) : ''}</td>
+        <td className="n dash strong" title="Lines the warehouse can send now (plan report)">{rp ? q(rp.possible) : ''}</td><td className="n soli dash">{rp ? c(rp.possibleN) : ''}</td>
+        <td className="n dash" title={k ? `${fmt(k.rolls.qty, 2)} QTY on the Packing List` : ''}>{c(k?.rolls.rolls ?? 0)}</td>
+        <td className={`n dash ${k?.rolls.cut ? 'warn-t' : ''}`} title={k?.rolls.cut ? `${fmt(k.rolls.cutQty, 2)} QTY cut` : ''}>{c(k?.rolls.cut ?? 0)}</td>
+        <td className={`n dash ${k?.t.shortLines ? 'bad-t' : ''}`} title="Open lines whose QTY is more than the Full UR">{c(k?.t.shortLines ?? 0)}</td><td className="n dash">{q(k?.t.short ?? 0)}</td>
+        <td className="n dash" title="Lines with UR ≥ QTY">{cv === null ? '' : `${cv}%`}</td>
+      </>; })()}
       <td className={`n${fl(r.code, 'done')}`} title="SO/LI lines sent in full (picked / dispatched) or marked Done, of all lines">{r.plan.soli ? `${fmt(r.doneSoli)} / ${fmt(r.plan.soli)}` : ''}</td>
       <td className={`prog-td${fl(r.code, 'progress')}`} title={`${pct(r)}% of the plan QTY sent`}>{r.plan.qty > 0 && <span className={`prog ${pct(r) >= 100 ? 'full' : ''}`}><i style={{ width: `${pct(r)}%` }} /><b>{pct(r)}%</b></span>}</td>
       <td className="n" title={r.lastPick ? `Last pick saved ${pickDay(r.lastPick)} ${fmtTime(r.lastPick)}` : ''}>{r.lastPick ? `${pickDay(r.lastPick) === pickDay(new Date().toISOString()) ? '' : pickDay(r.lastPick).slice(0, 5) + ' '}${fmtTime(r.lastPick)}` : ''}</td>
     </tr>
   );
   const exportXlsx = () => {
-    const head = ['Responsible', 'PLANT', 'Target time', 'Received time', 'Plan Qty', 'SOLI', 'UR', 'SOLI', 'W/H', 'QI', 'SOLI', 'BLOCK', 'SOLI', 'NIH', 'SOLI', 'Adhoc', 'SOLI', 'Same day', 'SOLI', 'Picked', 'SOLI', 'Rolls', 'Released to UR', 'SOLI', 'Dispatched', 'SOLI', 'Total qty', 'Pending', 'SOLI', 'Done SOLI', 'Progress %', 'Last pick'];
-    const line = (r: PlantRow) => [r.responsible, r.name, r.target, r.receivedText, r.plan.qty, r.plan.soli, r.ur.qty, r.ur.soli, Math.round(r.wh * 100) / 100, r.qi.qty, r.qi.soli, r.block.qty, r.block.soli, r.nih.qty, r.nih.soli, r.adhoc.qty, r.adhoc.soli, r.sameDay.qty, r.sameDay.soli, r.picked.qty, r.picked.soli, r.rolls, r.released.qty, r.released.soli, r.dispatched.qty, r.dispatched.soli, r.total, r.pending.qty, r.pending.soli, r.doneSoli, Math.round(r.progress * 100), fmtTime(r.lastPick)]
+    const head = ['Responsible', 'PLANT', 'Target time', 'Received time', 'Plan Qty', 'SOLI', ...(kp ? ['Plan UR', 'Short lines'] : []), 'UR', 'SOLI', 'W/H', 'QI', 'SOLI', 'BLOCK', 'SOLI', 'NIH', 'SOLI', 'Adhoc', 'SOLI', 'Same day', 'SOLI', 'Picked', 'SOLI', 'Rolls', 'Released to UR', 'SOLI', 'Dispatched', 'SOLI', 'Total qty', 'Pending', 'SOLI', ...(kp ? ['Full UR', 'KFC UR', 'PFC UR', 'Alrady send', 'SOLI', 'TN', 'TN QTY', 'Posibal pending', 'SOLI', 'PL rolls', 'Cut rolls', 'Open short lines', 'Short QTY', 'Coverage %'] : []), 'Done SOLI', 'Progress %', 'Last pick'];
+    const dk = (r: PlantRow) => { const k = K(r), rp = k?.rep; return [k?.t.ur ?? 0, k?.t.kfc_ur ?? 0, k?.t.pfc_ur ?? 0, rp?.sent ?? '', rp?.sentN ?? '', rp?.tnCount ?? '', rp?.tnQty ?? '', rp?.possible ?? '', rp?.possibleN ?? '', k?.rolls.rolls ?? 0, k?.rolls.cut ?? 0, k?.t.shortLines ?? 0, k?.t.short ?? 0, covPct(k) ?? '']; };
+    const line = (r: PlantRow) => [r.responsible, r.name, r.target, r.receivedText, r.plan.qty, r.plan.soli, ...(kp ? [K(r)?.planUr.v ?? 0, K(r)?.planUr.short ?? 0] : []), r.ur.qty, r.ur.soli, Math.round(r.wh * 100) / 100, r.qi.qty, r.qi.soli, r.block.qty, r.block.soli, r.nih.qty, r.nih.soli, r.adhoc.qty, r.adhoc.soli, r.sameDay.qty, r.sameDay.soli, r.picked.qty, r.picked.soli, r.rolls, r.released.qty, r.released.soli, r.dispatched.qty, r.dispatched.soli, r.total, r.pending.qty, r.pending.soli, ...(kp ? dk(r) : []), r.doneSoli, Math.round(r.progress * 100), fmtTime(r.lastPick)]
       .map((v) => (typeof v === 'number' ? Math.round(v * 1000) / 1000 : v));
     const ws = XLSX.utils.aoa_to_sheet([head, ...s.rows.map(line), line(s.total)]);
     ws['!cols'] = head.map((h, i) => ({ wch: i < 4 ? 14 : Math.max(7, h.length + 2) }));
@@ -99,12 +120,17 @@ export default function PlantSummary({ rows, plants, received = [], week, day, c
         <table className="psum">
           <thead><tr>
             <th>Responsible</th><th>PLANT</th><th>Target time</th><th>Received time</th>
-            <th className="n">Plan Qty</th><th className="n">SOLI</th><th className="n">UR</th><th className="n">SOLI</th><th className="n" title={`UR SOLI ÷ ${SOLI_PER_HOUR}`}>W/H</th>
+            <th className="n">Plan Qty</th><th className="n">SOLI</th>
+            {kp && <><th className="n dash" title="Each line's QTY, at most its UR — as the Dashboard's Plan UR">Plan UR</th><th className="n dash" title="Lines whose UR is less than their QTY">Short</th></>}
+            <th className="n" title="UR given to the lines' balance (each SO / LI / Item's UR shared by its dates, earliest first)">UR</th><th className="n">SOLI</th><th className="n" title={`UR SOLI ÷ ${SOLI_PER_HOUR}`}>W/H</th>
             <th className="n">QI</th><th className="n">SOLI</th><th className="n">BLOCK</th><th className="n">SOLI</th><th className="n" title="Not in house: no UR, QI or Block stock for it">NIH</th><th className="n">SOLI</th>
             <th className="n" title='Lines with "adhoc" in Remarks or Comment'>Adhoc</th><th className="n">SOLI</th><th className="n" title="Lines dated the same day the plan was received">Same day</th><th className="n">SOLI</th>
             <th className="n pick" title="Saved picks (pick history) — rolls in the tooltip">Picked</th><th className="n pick">SOLI</th>
             <th className="n rel" title="QI / Block released to UR">Released</th><th className="n rel">SOLI</th><th className="n disp">Dispatched</th><th className="n disp">SOLI</th>
             <th className="n">Total qty</th><th className="n pend">Pending</th><th className="n pend">SOLI</th>
+            {kp && <><th className="n dash">Full UR</th><th className="n dash">KFC UR</th><th className="n dash">PFC UR</th><th className="n dash">Alrady send</th><th className="n dash">SOLI</th>
+              <th className="n dash">TN</th><th className="n dash">TN QTY</th><th className="n dash">Posibal pending</th><th className="n dash">SOLI</th>
+              <th className="n dash">PL rolls</th><th className="n dash">Cut rolls</th><th className="n dash">Open short</th><th className="n dash">Short QTY</th><th className="n dash">Coverage</th></>}
             <th className="n" title="SO/LI lines done, of all lines">Done</th><th title="Share of the plan QTY sent (picked / dispatched)">Progress</th><th className="n" title="Time of the last saved pick">Last pick</th>
           </tr></thead>
           <tbody>{s.rows.map((r) => row(r))}</tbody>
