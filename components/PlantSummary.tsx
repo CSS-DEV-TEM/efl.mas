@@ -69,8 +69,11 @@ export default function PlantSummary({ rows, plants, received = [], week, day, c
       { h: 'UR', get: (k) => ({ v: k.t.ur, k: 'q', cls: 'strong' }) }, { h: 'QI', get: (k) => ({ v: k.t.qi, k: 'q' }) }, { h: 'Block', get: (k) => ({ v: k.t.block, k: 'q' }) }] },
     { card: 'KFC / PFC UR', tip: 'UR at the KFC and PFC storage locations', subs: [
       { h: 'KFC', get: (k) => ({ v: k.t.kfc_ur, k: 'q' }) }, { h: 'PFC', get: (k) => ({ v: k.t.pfc_ur, k: 'q' }) }] },
-    { card: 'Plan UR', tip: "Each line's QTY, at most its UR (Total − QI − Block − Assigned)", subs: [
-      { h: 'QTY', get: (k) => ({ v: k.planUr.v, k: 'q', cls: 'strong' }) }, { h: 'Lines short', get: (k) => ({ v: k.planUr.short, k: 'n', cls: k.planUr.short ? 'warn-t' : '' }) }] },
+    // v202: Plan UR and Dispatched in one place — what the UR covers of the plan, what is dispatched of it, and what is left
+    { card: 'Plan UR · Dispatched', tip: "Plan UR: each line's QTY, at most its UR (Total − QI − Block − Assigned) · Dispatched: QTY dispatched and lines complete · Balance: Plan UR − Dispatched", subs: [
+      { h: 'Plan UR', get: (k) => ({ v: k.planUr.v, k: 'q', cls: 'strong' }) }, { h: 'Lines short', get: (k) => ({ v: k.planUr.short, k: 'n', cls: k.planUr.short ? 'warn-t' : '' }) },
+      { h: 'Dispatched', get: (k) => ({ v: k.t.dispatched, k: 'q', cls: 'strong' }) }, { h: 'Lines', get: (k) => ({ v: k.t.dispatchedLines, k: 'n' }) },
+      { h: 'Balance', get: (k) => ({ v: Math.max(0, k.planUr.v - k.t.dispatched), k: 'q' }) }] },
     { card: 'Transfer notes', tip: 'ZMM_TRR transfer requests of these SO lines', subs: [
       { h: 'TN', get: (k) => ({ v: k.rep?.tnCount ?? null, k: 'n' }) }, { h: 'SO/LI', get: (k) => ({ v: k.rep?.tnLines ?? null, k: 'n' }) },
       { h: 'QTY', get: (k) => ({ v: k.rep?.tnQty ?? null, k: 'q' }) }, { h: 'TN-UR', get: (k) => ({ v: k.rep?.tnUr ?? null, k: 'q' }) }] },
@@ -88,8 +91,6 @@ export default function PlantSummary({ rows, plants, received = [], week, day, c
       { h: 'Rolls', get: (k) => ({ v: k.rolls.cut, k: 'n', cls: k.rolls.cut ? 'warn-t' : '' }) }, { h: 'QTY', get: (k) => ({ v: k.rolls.cutQty, k: 'q' }) }] },
     { card: 'Picked', tip: 'Saved picks of these lines', subs: [
       { h: 'QTY', get: (k) => ({ v: k.picked.qty, k: 'q', cls: 'strong' }) }, { h: 'SO/LI', get: (k) => ({ v: k.picked.lines, k: 'n' }) }, { h: 'Rolls', get: (k) => ({ v: k.rolls.rolls, k: 'n' }) }] },
-    { card: 'Dispatched', tip: 'Dispatched QTY and lines complete', subs: [
-      { h: 'QTY', get: (k) => ({ v: k.t.dispatched, k: 'q' }) }, { h: 'Lines', get: (k) => ({ v: k.t.dispatchedLines, k: 'n' }) }] },
     { card: 'Open & short of UR', tip: 'Open lines whose QTY is more than the Full UR', subs: [
       { h: 'Lines', get: (k) => ({ v: k.t.shortLines, k: 'n', cls: k.t.shortLines ? 'bad-t' : '' }) }, { h: 'QTY', get: (k) => ({ v: k.t.short, k: 'q' }) }] },
     { card: 'Stock coverage', tip: 'Lines with UR ≥ QTY', subs: [
