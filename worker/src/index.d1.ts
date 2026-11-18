@@ -184,6 +184,11 @@ const BASE_SCHEMA = [
   'CREATE TABLE IF NOT EXISTS pick_reject (id INTEGER PRIMARY KEY AUTOINCREMENT, pick_id INTEGER, req_id INTEGER, day TEXT, week TEXT, line TEXT, so TEXT, li TEXT, item TEXT, pallet TEXT, qty REAL, roll_qty REAL, lot TEXT, insp_lot TEXT, batch TEXT, shade TEXT, reason TEXT, by_user TEXT, at TEXT, korber TEXT, replaced_by TEXT, replaced_qty REAL, replaced_pick INTEGER, replaced_user TEXT, replaced_at TEXT)',
   `CREATE TABLE IF NOT EXISTS pick_req (id INTEGER PRIMARY KEY AUTOINCREMENT, day TEXT NOT NULL, seq INTEGER NOT NULL, pick_no TEXT, week TEXT, line TEXT, so TEXT, li TEXT, item TEXT, plant TEXT, need REAL, qty REAL, rolls INTEGER, by_user TEXT, at TEXT, cancelled_at TEXT, cancelled_by TEXT, match TEXT, kind TEXT DEFAULT 'normal', closed INTEGER DEFAULT 0, short REAL, auto INTEGER DEFAULT 0)`,
   'CREATE TABLE IF NOT EXISTS pick_round (rid TEXT PRIMARY KEY, day TEXT NOT NULL, plant TEXT, round INTEGER NOT NULL, created_by TEXT, created_at TEXT, note TEXT)',
+  // v195 (API 131): the JOB ID of a Pick, Pick all matched runs, the UR of the first run, balances completed by hand
+  'CREATE TABLE IF NOT EXISTS pick_job (rid TEXT PRIMARY KEY, job_id TEXT, by_user TEXT, at TEXT)',
+  'CREATE TABLE IF NOT EXISTS pick_run (rid TEXT NOT NULL, n INTEGER NOT NULL, started_at TEXT NOT NULL, by_user TEXT, PRIMARY KEY (rid, n))',
+  `CREATE TABLE IF NOT EXISTS ur_base (rid TEXT NOT NULL, key TEXT NOT NULL, date TEXT NOT NULL DEFAULT '', qty REAL, ur REAL, qi REAL, block REAL, at TEXT, PRIMARY KEY (rid, key, date))`,
+  `CREATE TABLE IF NOT EXISTS bal_close (rid TEXT NOT NULL, key TEXT NOT NULL, date TEXT NOT NULL DEFAULT '', plant TEXT, cat TEXT NOT NULL, qty REAL NOT NULL, by_user TEXT, at TEXT, PRIMARY KEY (rid, key, date))`,
   'CREATE TABLE IF NOT EXISTS picks (id INTEGER PRIMARY KEY AUTOINCREMENT, req_id INTEGER NOT NULL, day TEXT, week TEXT, line TEXT, so TEXT, li TEXT, item TEXT, pallet TEXT NOT NULL, qty REAL NOT NULL, roll_qty REAL, partial INTEGER DEFAULT 0, shade TEXT, lot TEXT, insp_lot TEXT, batch TEXT, note TEXT, by_user TEXT, at TEXT, cancelled_at TEXT, cancelled_by TEXT, korber TEXT, tn TEXT)',
   `CREATE TABLE IF NOT EXISTS plan ( key TEXT NOT NULL, so TEXT NOT NULL, li TEXT NOT NULL, item TEXT NOT NULL, date TEXT, qty REAL NOT NULL DEFAULT 0, plant TEXT, remarks TEXT, row_no INTEGER NOT NULL , week TEXT, src_user TEXT, src_at TEXT, owner TEXT, plan_type TEXT DEFAULT 'week', follow_of TEXT, plan_date TEXT)`,
   'CREATE TABLE IF NOT EXISTS plan_day (day TEXT PRIMARY KEY, created_by TEXT, created_at TEXT)',
@@ -266,7 +271,7 @@ const BASE_SCHEMA = [
 ];
 /** per system (each has its own database) */
 const schemaDone = new Set<string>();
-const SCHEMA_V = '42';
+const SCHEMA_V = '43';
 async function ensureSchema(env: Env) {
   const dk = env.DIV || 'active';
   if (schemaDone.has(dk) || !env.DB) return;
@@ -531,6 +536,13 @@ async function ensureSchema(env: Env) {
     'CREATE INDEX IF NOT EXISTS zinr_doc_rid ON zinr(mat_doc, rid)', 'CREATE INDEX IF NOT EXISTS zroll_doc_rid_doc ON zroll_doc(rid, mat_doc)']) {
     try { await env.DB.prepare(q).run(); } catch { /* already there */ }
   }
+  // schema 43: JOB ID, Pick all matched runs, first UR, balances completed by hand
+  await env.DB.batch([
+    env.DB.prepare('CREATE TABLE IF NOT EXISTS pick_job (rid TEXT PRIMARY KEY, job_id TEXT, by_user TEXT, at TEXT)'),
+    env.DB.prepare('CREATE TABLE IF NOT EXISTS pick_run (rid TEXT NOT NULL, n INTEGER NOT NULL, started_at TEXT NOT NULL, by_user TEXT, PRIMARY KEY (rid, n))'),
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS ur_base (rid TEXT NOT NULL, key TEXT NOT NULL, date TEXT NOT NULL DEFAULT '', qty REAL, ur REAL, qi REAL, block REAL, at TEXT, PRIMARY KEY (rid, key, date))`),
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS bal_close (rid TEXT NOT NULL, key TEXT NOT NULL, date TEXT NOT NULL DEFAULT '', plant TEXT, cat TEXT NOT NULL, qty REAL NOT NULL, by_user TEXT, at TEXT, PRIMARY KEY (rid, key, date))`),
+  ]);
   await env.DB.prepare("INSERT INTO config (k, v) VALUES ('schema_v', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").bind(SCHEMA_V).run();
   schemaDone.add(dk);
 }
@@ -701,7 +713,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 130; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 131; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1829,14 +1841,86 @@ async function handleZroll(env: Env, req: Request) {
   return json({ rid, bin, hasStatus, gate: st.rollGate !== false, upload: upl ?? null, summary: sum, rows });
 }
 
+/**
+ * v195 (API 131) — picking a Pick's balance again after new reports, and completing balances by hand:
+ *   GET  /api/repick?rids=a,b      → {jobs, runs, base, close} of those Picks (plans)
+ *   POST /api/repick {action:'run', rid, base:[{key,date,qty,ur,qi,block}]}
+ *        Pick all matched starts: the first run of a Pick keeps each line's UR / QI / Block as the "first UR"; a later run is a
+ *        new "balance pick" only when a report was uploaded since the last run began (otherwise the same run goes on)
+ *   POST /api/repick {action:'close', rid, cat, lines:[{key,date,qty,plant}]}   the balance of these lines completed as
+ *        Block / QI / Dispatched / Shortage (the balance is added to that category and becomes 0)
+ *   POST /api/repick {action:'reopen', rid, lines:[{key,date}]}                 undo
+ * Nothing here changes a pick or the matching: the picks of a run are the picks saved after it began.
+ */
+const BAL_CATS = ['block', 'qi', 'dispatched', 'shortage'];
+async function handleRepick(env: Env, req: Request) {
+  if (req.method === 'GET') {
+    await requireUser(env, req);
+    const rids = String(new URL(req.url).searchParams.get('rids') || '').split(',').map((x) => x.trim()).filter(Boolean).slice(0, 80);
+    if (!rids.length) return json({ jobs: [], runs: [], base: [], close: [] });
+    const ids = JSON.stringify(rids);
+    const [jobs, runs, base, close] = await Promise.all([
+      env.DB.prepare('SELECT rid, job_id, by_user, at FROM pick_job WHERE rid IN (SELECT value FROM json_each(?))').bind(ids).all<Row>(),
+      env.DB.prepare('SELECT rid, n, started_at, by_user FROM pick_run WHERE rid IN (SELECT value FROM json_each(?)) ORDER BY rid, n').bind(ids).all<Row>(),
+      env.DB.prepare('SELECT rid, key, date, qty, ur, qi, block, at FROM ur_base WHERE rid IN (SELECT value FROM json_each(?))').bind(ids).all<Row>(),
+      env.DB.prepare('SELECT rid, key, date, plant, cat, qty, by_user, at FROM bal_close WHERE rid IN (SELECT value FROM json_each(?))').bind(ids).all<Row>(),
+    ]);
+    return json({ jobs: jobs.results, runs: runs.results, base: base.results, close: close.results });
+  }
+  if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed.');
+  const s = await requireUser(env, req, 'editor');
+  const b = (await req.json()) as { action?: string; rid?: string; cat?: string; base?: { key: string; date?: string | null; qty?: number; ur?: number; qi?: number; block?: number }[]; lines?: { key: string; date?: string | null; qty?: number; plant?: string | null }[] };
+  const rid = String(b.rid || '');
+  if (!rid) throw new HttpError(400, 'Unknown Pick.');
+  const num = (v: unknown) => (Number.isFinite(Number(v)) ? r3(Number(v)) : 0);
+  if (b.action === 'run') {
+    const last = await env.DB.prepare('SELECT n, started_at FROM pick_run WHERE rid = ? ORDER BY n DESC LIMIT 1').bind(rid).first<{ n: number; started_at: string }>();
+    if (!last) {
+      const at = now();
+      const base = (b.base || []).filter((x) => x && typeof x.key === 'string').slice(0, 3000);
+      const stmts = [env.DB.prepare('INSERT OR IGNORE INTO pick_run (rid, n, started_at, by_user) VALUES (?,?,?,?)').bind(rid, 1, at, s.u)];
+      for (const x of base) stmts.push(env.DB.prepare('INSERT OR IGNORE INTO ur_base (rid, key, date, qty, ur, qi, block, at) VALUES (?,?,?,?,?,?,?,?)').bind(rid, x.key, x.date ?? '', num(x.qty), num(x.ur), num(x.qi), num(x.block), at));
+      for (let i = 0; i < stmts.length; i += 90) await env.DB.batch(stmts.slice(i, i + 90));
+      return json({ ok: true, n: 1, first: true, newRun: true, base: base.length });
+    }
+    // a report uploaded (for this Pick, or shared) since the last run began: the balance pick is a new run
+    const up = await env.DB.prepare("SELECT COUNT(*) n FROM uploads WHERE rid IN (?1, '') AND uploaded_at > ?2").bind(rid, last.started_at).first<{ n: number }>();
+    if (!Number(up?.n)) return json({ ok: true, n: last.n, first: last.n === 1, newRun: false });
+    const n = Number(last.n) + 1;
+    await env.DB.batch([
+      env.DB.prepare('INSERT OR IGNORE INTO pick_run (rid, n, started_at, by_user) VALUES (?,?,?,?)').bind(rid, n, now(), s.u),
+      env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'pick', `${periodLabel(rid)}: balance pick ${n - 1} started (new reports since the last run)`),
+    ]);
+    return json({ ok: true, n, first: false, newRun: true });
+  }
+  if (b.action === 'close' || b.action === 'reopen') {
+    const lines = (b.lines || []).filter((x) => x && typeof x.key === 'string').slice(0, 3000);
+    if (!lines.length) throw new HttpError(400, 'No line with a balance.');
+    const cat = String(b.cat || '').toLowerCase();
+    if (b.action === 'close' && !BAL_CATS.includes(cat)) throw new HttpError(400, 'Choose Block, QI, Dispatched or Shortage.');
+    const at = now();
+    const stmts = lines.map((x) => b.action === 'close'
+      ? env.DB.prepare('INSERT OR REPLACE INTO bal_close (rid, key, date, plant, cat, qty, by_user, at) VALUES (?,?,?,?,?,?,?,?)').bind(rid, x.key, x.date ?? '', x.plant ?? null, cat, num(x.qty), s.u, at)
+      : env.DB.prepare('DELETE FROM bal_close WHERE rid = ? AND key = ? AND date = ?').bind(rid, x.key, x.date ?? ''));
+    const total = r3(lines.reduce((t0, x) => t0 + num(x.qty), 0));
+    stmts.push(env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(at, s.u, 'balance',
+      b.action === 'close' ? `${periodLabel(rid)}: balance ${total} of ${lines.length} line${lines.length === 1 ? '' : 's'} completed as ${cat}` : `${periodLabel(rid)}: completed balance of ${lines.length} line${lines.length === 1 ? '' : 's'} reopened`));
+    for (let i = 0; i < stmts.length; i += 90) await env.DB.batch(stmts.slice(i, i + 90));
+    await broadcast(env, { type: 'data', src: 'plan', by: s.u, rows: 0 });
+    return json({ ok: true, lines: lines.length, qty: total });
+  }
+  throw new HttpError(400, 'Unknown action.');
+}
+
 async function handleRounds(env: Env, req: Request) {
   const sp = new URL(req.url).searchParams;
   // POST {day, plant}: a new Pick of that plant on that day (the next Pick No)
   if (req.method === 'POST') {
     const s = await requireUser(env, req, 'editor');
-    const b = (await req.json()) as { day?: string; plant?: string };
+    const b = (await req.json()) as { day?: string; plant?: string; job_id?: string };
     const day = normDate(b.day);
     if (!day) throw new HttpError(400, 'Choose the day.');
+    const job = (txt(b.job_id) ?? '').slice(0, 60);
     const plant = cleanPlant(b.plant);
     if (!plant) throw new HttpError(400, 'Choose the plant of the Pick.');
     const max = Number((await env.DB.prepare(`SELECT MAX(n) m FROM (SELECT round n FROM pick_round WHERE day = ?1 AND upper(COALESCE(plant, '')) = ?2
@@ -1845,10 +1929,25 @@ async function handleRounds(env: Env, req: Request) {
     await env.DB.batch([
       env.DB.prepare('INSERT OR IGNORE INTO plan_day (day, created_by, created_at) VALUES (?,?,?)').bind(day, s.u, now()),
       env.DB.prepare('INSERT OR IGNORE INTO pick_round (rid, day, plant, round, created_by, created_at) VALUES (?,?,?,?,?,?)').bind(rid, day, plant, n, s.u, now()),
-      env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'pick-round', `Created ${periodLabel(rid)}`),
+      env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'pick-round', `Created ${periodLabel(rid)}${job ? ` · JOB ID ${job}` : ''}`),
+      ...(job ? [env.DB.prepare('INSERT OR REPLACE INTO pick_job (rid, job_id, by_user, at) VALUES (?,?,?,?)').bind(rid, job, s.u, now())] : []),
     ]);
     await broadcast(env, { type: 'data', src: 'plan', by: s.u, rows: 0 });
-    return json({ ok: true, rid, day, plant, round: n });
+    return json({ ok: true, rid, day, plant, round: n, job_id: job || null });
+  }
+  // PATCH {rid, job_id}: the JOB ID of a Pick (added or changed later; empty removes it)
+  if (req.method === 'PATCH') {
+    const s = await requireUser(env, req, 'editor');
+    const b = (await req.json()) as { rid?: string; job_id?: string };
+    const rid = String(b.rid || '');
+    if (!rid) throw new HttpError(400, 'Unknown Pick.');
+    const job = (txt(b.job_id) ?? '').slice(0, 60);
+    await env.DB.batch([
+      job ? env.DB.prepare('INSERT OR REPLACE INTO pick_job (rid, job_id, by_user, at) VALUES (?,?,?,?)').bind(rid, job, s.u, now()) : env.DB.prepare('DELETE FROM pick_job WHERE rid = ?').bind(rid),
+      env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'pick-round', `${periodLabel(rid)}: JOB ID ${job || 'removed'}`),
+    ]);
+    await broadcast(env, { type: 'data', src: 'plan', by: s.u, rows: 0 });
+    return json({ ok: true, rid, job_id: job || null });
   }
   // DELETE ?rid= (Admin / Head): a Pick with its plan and its own reports; not when picks were saved for it
   if (req.method === 'DELETE') {
@@ -1883,6 +1982,7 @@ async function handleRounds(env: Env, req: Request) {
       env.DB.prepare("DELETE FROM line_status WHERE key LIKE ? || '#%'").bind(rid),
       env.DB.prepare('DELETE FROM plan WHERE week = ?').bind(rid),
       env.DB.prepare('DELETE FROM pick_round WHERE rid = ?').bind(rid),
+      ...['pick_job', 'pick_run', 'ur_base', 'bal_close'].map((t) => env.DB.prepare(`DELETE FROM ${t} WHERE rid = ?`).bind(rid)),
       env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'pick-round', `Deleted ${periodLabel(rid)} with its plan and reports${withHistory ? ` and its pick history (${n} pick${n === 1 ? '' : 's'}, ${rolls} roll${rolls === 1 ? '' : 's'})` : ''}`),
       env.DB.prepare("DELETE FROM config WHERE k IN ('c_counts', 'c_pick_counts', 'c_weeks') OR k LIKE 'c_weeks:%'"),
     ]);
@@ -1908,7 +2008,8 @@ async function handleRounds(env: Env, req: Request) {
     .filter((r) => !plant || String(r.plant ?? '').toUpperCase() === plant)
     .sort((a, b) => String(a.plant ?? '').localeCompare(String(b.plant ?? '')) || a.round - b.round);
   const next = plant ? Math.max(0, ...rows.map((r) => r.round)) + 1 : 1;
-  return json({ day, plant, rounds: rows, next });
+  const jobs = new Map((await env.DB.prepare("SELECT rid, job_id FROM pick_job WHERE rid LIKE ? || '~%'").bind(day).all<{ rid: string; job_id: string }>()).results.map((j) => [j.rid, j.job_id]));
+  return json({ day, plant, rounds: rows.map((r) => ({ ...r, job_id: jobs.get(String(r.id)) ?? null })), next });
 }
 
 /** GET /api/days — the days (created, or with a plan), newest first; POST {day} creates one. */
@@ -2326,10 +2427,10 @@ async function handleAssign(env: Env, req: Request, id: string) {
 
 /** What "Clear database" can empty. Users and sign-in keys are never touched. */
 const CLEAR_GROUPS: Record<string, { label: string; tables: string[] }> = {
-  plan: { label: 'Day plans (days, Picks, plan lines) + dashboard edits', tables: ['plan', 'line_status', 'plant_received', 'stock_release', 'dispatch_assign', 'pick_round', 'plan_day', 'follow_close'] },
+  plan: { label: 'Day plans (days, Picks, plan lines) + dashboard edits', tables: ['plan', 'line_status', 'plant_received', 'stock_release', 'dispatch_assign', 'pick_round', 'plan_day', 'follow_close', 'pick_job', 'bal_close'] },
   stock: { label: 'Stock reports (ZMMBE, KFC, PFC, PLANT, TRR)', tables: ['stock', 'stock_sent', 'trr'] },
   pickdata: { label: 'Pick data (ZINR, ZCOMENT VIEW, Korber, ZROLLMGT, ZMM_TRR)', tables: ['zinr', 'zcoment', 'korber', 'zroll', 'ztrr'] },
-  picks: { label: 'Pick history + packing lists', tables: ['picks', 'pick_req'] },
+  picks: { label: 'Pick history + packing lists', tables: ['picks', 'pick_req', 'pick_run', 'ur_base'] },
   dispatch: { label: 'Old dispatch uploads', tables: ['dispatch'] },
   settings: { label: 'Plant settings', tables: ['plant_info'] },
   history: { label: 'Upload history + activity log', tables: ['uploads', 'activity'] },
@@ -6668,6 +6769,7 @@ export default {
       else if (p === '/api/plants/received') res = await handleReceived(env, req);
       else if (p === '/api/pullplan' && req.method === 'GET') res = await handlePullPlan(env, req);
       else if (p === '/api/rounds') res = await handleRounds(env, req);
+      else if (p === '/api/repick') res = await handleRepick(env, req);
       // the Plant + SO Plant pairs in the ZMMBE uploads (for Settings → ZMMBE plants)
       else if (p === '/api/follow') res = await handleFollow(env, req);
       else if (p === '/api/zroll' && req.method === 'GET') res = await handleZroll(env, req);

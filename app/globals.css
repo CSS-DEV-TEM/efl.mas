@@ -2008,3 +2008,40 @@ input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, te
 .psum.psum-cards th.g0, .psum.psum-cards td.g0 { border-left: 2px solid color-mix(in srgb, #ff8a3d 55%, transparent); }
 .psum.psum-cards thead tr.grp th.g0 { box-shadow: inset 0 -3px 0 #ff8a3d; }
 .psum.psum-cards tbody td.strong, .psum.psum-cards tfoot td.strong { font-weight: 700; }
+
+/* v203: JOB ID of a Pick */
+.dpb-job { width: 150px; }
+.dpb-jobid { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted, #666); }
+.dpb-jobid b { color: var(--text, inherit); }
+
+/* v203: re-pick figures and completing a balance by hand */
+.psum.psum-cards tbody td.ok-t { color: var(--ok, #1a9b5a); font-weight: 600; }
+.psum.psum-cards tbody td.done-t { color: #6a5cff; font-weight: 600; }
+.psum.psum-cards td.psum-act { white-space: nowrap; text-align: center; }
+.psum.psum-cards td.psum-act .btn + .btn { margin-left: 4px; }
+.bal-back { position: fixed; inset: 0; z-index: 300; background: rgba(10,10,14,.45); display: grid; place-items: center; padding: 16px; }
+.bal-dlg { width: min(520px, 100%); max-height: calc(100vh - 32px); overflow: auto; padding: 18px; }
+.bal-dlg h3 { margin: 0 0 6px; }
+.bal-cats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 12px 0; }
+.bal-cats label { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 10px 8px; border-radius: 10px; border: 1px solid var(--line, #ddd); cursor: pointer; font-weight: 600; }
+.bal-cats label.on { border-color: #ff8a3d; box-shadow: 0 0 0 2px color-mix(in srgb, #ff8a3d 35%, transparent); }
+.bal-cats input { accent-color: #ff8a3d; }
+.bal-lines { display: grid; gap: 4px; max-height: 220px; overflow: auto; font-size: 12.5px; border-top: 1px solid var(--line, #eee); padding-top: 8px; }
+.bal-lines div { display: flex; gap: 10px; } .bal-lines div b { margin-left: auto; }
+.bal-acts { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+@media (max-width: 560px) { .bal-cats { grid-template-columns: repeat(2, 1fr); } }
+.psum .pname small.psum-job { display: block; color: #c25a12; font-weight: 600; }
+
+/* v204: Korber Inventory after picks */
+.ka-dlg { width: min(560px, 100%); }
+.ka-picks { display: grid; gap: 6px; margin: 10px 0; max-height: 260px; overflow: auto; }
+.ka-picks label { display: flex; gap: 10px; align-items: center; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line, #ddd); cursor: pointer; }
+.ka-picks label.on { border-color: #ff8a3d; }
+.ka-picks label small { display: block; color: var(--muted, #777); }
+.ka-picks input, .ka-opt input { accent-color: #ff8a3d; }
+.ka-opt { display: flex; gap: 8px; align-items: center; font-size: 13px; margin-top: 6px; }
+.ka-dlg label { display: flex; flex-direction: row; justify-content: flex-start; align-items: center; text-align: left; gap: 10px; font-weight: 400; }
+.ka-dlg label span { flex: 1; }
+.ka-dlg label input { width: auto; margin: 0; flex: none; }
+.ka-dlg label input[type="checkbox"] { width: 16px !important; min-width: 16px !important; height: 16px; padding: 0 !important; }
+.ka-dlg label, .ka-dlg label span, .ka-dlg label b, .ka-dlg label small { text-align: left !important; }

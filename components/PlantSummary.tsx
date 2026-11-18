@@ -4,6 +4,7 @@ import * as XLSX from 'xlsx';
 import { api } from '@/lib/api';
 import { fmt, type Line } from '@/lib/calc';
 import type { DashKpi } from '@/components/Dashboard';
+import { BAL_CATS, catLabel, type BalCat } from '@/lib/repick';
 import { SOLI_PER_HOUR, fmtTime, plantSummary, timeMinutes, type Bucket, type PlantInfo, type PlantRow, type TimeSetup } from '@/lib/summary';
 
 const q = (n: number) => (Math.abs(n) < 0.0005 ? '' : fmt(n, 2));
@@ -16,7 +17,7 @@ const pickDay = (iso: string) => { const d = new Date(new Date(iso).getTime() + 
  * `week` is the period the received times belong to: the week (2026-W47), or the day for a day plan (2026-11-17).
  * Target times are system settings (admin only); received times are typed by the users.
  */
-export default function PlantSummary({ rows, plants, received = [], week, day, canTarget, canEdit, time, onPlant, onSaved, live, updatedAt, byRound = false, kpi }: {
+export default function PlantSummary({ rows, plants, received = [], week, day, canTarget, canEdit, time, onPlant, onSaved, live, updatedAt, byRound = false, kpi, onRepick }: {
   rows: Line[]; plants: PlantInfo[]; received?: { code: string; received: string | null; period?: string }[];
   /** a day plan: a row per plant per Pick No */
   byRound?: boolean; week: string; day?: string | null; canTarget: boolean; canEdit: boolean; time?: TimeSetup; onPlant: (code: string) => void; onSaved: (msg: string) => void;
@@ -24,6 +25,8 @@ export default function PlantSummary({ rows, plants, received = [], week, day, c
   live?: boolean; updatedAt?: string;
   /** v200: the Dashboard's figures of a row's lines (Plan UR, KFC / PFC UR, Alrady send, TN, Posibal pending, rolls, coverage) */
   kpi?: (ls: Line[]) => DashKpi;
+  /** v203: a balance was completed / reopened (the re-pick data is read again) */
+  onRepick?: () => void;
 }) {
   const s = useMemo(() => plantSummary(rows, plants, received, time, byRound), [rows, plants, received, time, byRound]);
   // v200: the Dashboard figures of each row (and of the Summary row), worked out the same way as the Dashboard tiles
@@ -57,6 +60,30 @@ export default function PlantSummary({ rows, plants, received = [], week, day, c
     onSaved(v ? `Received time for ${code} saved` : `Received time for ${code} back to the upload time`);
   };
   const [setup, setSetup] = useState(false);
+  // v203: complete the balance of a row by hand — Block / QI / Dispatched / Shortage (the balance goes to that category, the row's balance becomes 0)
+  const [done, setDone] = useState<{ r: PlantRow; k: DashKpi } | null>(null);
+  const [doneCat, setDoneCat] = useState<BalCat | ''>('');
+  const [doneBusy, setDoneBusy] = useState(false);
+  const byRid = <T extends { l: Line }>(xs: T[]) => { const m = new Map<string, T[]>(); for (const x of xs) m.set(x.l.week, [...(m.get(x.l.week) || []), x]); return m; };
+  const complete = async () => {
+    if (!done || !doneCat) return;
+    setDoneBusy(true);
+    try {
+      const groups = byRid(done.k.rp.open);
+      for (const [rid, xs] of Array.from(groups.entries())) await api('/api/repick', { method: 'POST', body: { action: 'close', rid, cat: doneCat, lines: xs.map((x) => ({ key: x.l.key, date: x.l.date ?? '', qty: Math.round(x.bal * 1000) / 1000, plant: x.l.plant ?? null })) } });
+      onSaved(`${done.r.name}: balance ${fmt(done.k.rp.balance, 2)} of ${done.k.rp.open.length} line${done.k.rp.open.length === 1 ? '' : 's'} completed as ${catLabel(doneCat)}`);
+      setDone(null); setDoneCat(''); onRepick?.();
+    } catch (e) { onSaved(e instanceof Error ? e.message : 'Could not complete the balance.'); }
+    finally { setDoneBusy(false); }
+  };
+  const reopen = async (r: PlantRow, k: DashKpi) => {
+    if (!window.confirm(`${r.name}: open the completed balance of ${k.rp.closedN} line${k.rp.closedN === 1 ? '' : 's'} again (${fmt(k.rp.closedQty, 2)})?`)) return;
+    try {
+      const groups = byRid(k.rp.closedLines.map((l) => ({ l })));
+      for (const [rid, xs] of Array.from(groups.entries())) await api('/api/repick', { method: 'POST', body: { action: 'reopen', rid, lines: xs.map((x) => ({ key: x.l.key, date: x.l.date ?? '' })) } });
+      onSaved(`${r.name}: completed balance opened again`); onRepick?.();
+    } catch (e) { onSaved(e instanceof Error ? e.message : 'Could not undo.'); }
+  };
   const fl = (code: string, k: string) => (changed.has(`${code}:${k}`) ? ' flash-cell' : '');
   // v201: the columns are the Dashboard cards — each card's name over its figures, worked out the same way as the card
   type Cell = { v: number | string | null; k?: 'q' | 'n' | 'p'; cls?: string; title?: string };
@@ -72,17 +99,30 @@ export default function PlantSummary({ rows, plants, received = [], week, day, c
     // v202: Plan UR and Dispatched in one place — what the UR covers of the plan, what is dispatched of it, and what is left
     { card: 'Plan UR · Dispatched', tip: "Plan UR: each line's QTY, at most its UR (Total − QI − Block − Assigned) · Dispatched: QTY dispatched and lines complete · Balance: Plan UR − Dispatched", subs: [
       { h: 'Plan UR', get: (k) => ({ v: k.planUr.v, k: 'q', cls: 'strong' }) }, { h: 'Lines short', get: (k) => ({ v: k.planUr.short, k: 'n', cls: k.planUr.short ? 'warn-t' : '' }) },
-      { h: 'Dispatched', get: (k) => ({ v: k.t.dispatched, k: 'q', cls: 'strong' }) }, { h: 'Lines', get: (k) => ({ v: k.t.dispatchedLines, k: 'n' }) },
-      { h: 'Balance', get: (k) => ({ v: Math.max(0, k.planUr.v - k.t.dispatched), k: 'q' }) }] },
+      { h: 'Dispatched', get: (k) => ({ v: k.t.dispatched + k.rp.closed.dispatched, k: 'q', cls: 'strong', title: k.rp.closed.dispatched ? `incl. ${fmt(k.rp.closed.dispatched, 2)} completed by hand` : undefined }) }, { h: 'Lines', get: (k) => ({ v: k.t.dispatchedLines, k: 'n' }) },
+      // v203: the balance of each open line (plan QTY − dispatched); a line completed by hand is 0 (its balance is in the category chosen)
+      { h: 'Balance', get: (k) => ({ v: k.rp.balance, k: 'q', cls: 'strong' }) },
+      { h: 'Completed', get: (k) => ({ v: k.rp.closedQty || null, k: 'q', cls: k.rp.closedN ? 'done-t' : '', title: k.rp.closedN ? `${k.rp.closedN} line${k.rp.closedN === 1 ? '' : 's'} completed by hand — ${BAL_CATS.filter((x) => k.rp.closed[x.v] > 1e-9).map((x) => `${x.label} ${fmt(k.rp.closed[x.v], 2)}`).join(' · ')}` : undefined }) }] },
+    // v203: the first Pick all matched kept each line's UR / QI / Block; what the reports uploaded since then add, and what can be picked again
+    { card: 'First UR · Re-pick', tip: 'First UR / QI / Block: as at the first Pick all matched of the Pick · New UR: UR uploaded since then · QI / Block released: since then · Re-pick: open balance, at most the UR left · Runs: Pick all matched runs (2+ = balance picks)', subs: [
+      { h: 'First UR', get: (k) => ({ v: k.rp.based ? k.rp.firstUr : null, k: 'q', cls: 'strong' }) },
+      { h: 'First QI', get: (k) => ({ v: k.rp.based ? k.rp.firstQi : null, k: 'q' }) },
+      { h: 'First Block', get: (k) => ({ v: k.rp.based ? k.rp.firstBlock : null, k: 'q' }) },
+      { h: 'New UR', get: (k) => ({ v: k.rp.based ? k.rp.newUr : null, k: 'q', cls: k.rp.newUr > 1e-9 ? 'ok-t' : '' }) },
+      { h: 'QI released', get: (k) => ({ v: k.rp.based ? k.rp.qiRel : null, k: 'q' }) },
+      { h: 'Block released', get: (k) => ({ v: k.rp.based ? k.rp.blockRel : null, k: 'q' }) },
+      { h: 'Re-pick lines', get: (k) => ({ v: k.rp.based ? k.rp.reLines : null, k: 'n', cls: k.rp.reLines ? 'ok-t' : '' }) },
+      { h: 'Re-pick QTY', get: (k) => ({ v: k.rp.based ? k.rp.reQty : null, k: 'q', cls: k.rp.reQty > 1e-9 ? 'ok-t strong' : '' }) },
+      { h: 'Runs', get: (k) => ({ v: k.rp.runs || null, k: 'n', title: k.rp.runs > 1 ? `1st pick + ${k.rp.runs - 1} balance pick${k.rp.runs === 2 ? '' : 's'}` : undefined }) }] },
     { card: 'Transfer notes', tip: 'ZMM_TRR transfer requests of these SO lines', subs: [
       { h: 'TN', get: (k) => ({ v: k.rep?.tnCount ?? null, k: 'n' }) }, { h: 'SO/LI', get: (k) => ({ v: k.rep?.tnLines ?? null, k: 'n' }) },
       { h: 'QTY', get: (k) => ({ v: k.rep?.tnQty ?? null, k: 'q' }) }, { h: 'TN-UR', get: (k) => ({ v: k.rep?.tnUr ?? null, k: 'q' }) }] },
     { card: 'Alrady send', tip: 'ZMMBE at the plant storage locations (40 / 70 / 75)', subs: [
       { h: 'QTY', get: (k) => ({ v: k.rep?.sent ?? null, k: 'q' }) }, { h: 'SO/LI', get: (k) => ({ v: k.rep?.sentN ?? null, k: 'n' }) }] },
     { card: 'QI', tip: 'SO QI stock (ZMMBE, every storage location) — not picked until released', subs: [
-      { h: 'QTY', get: (k) => ({ v: k.rep?.qi ?? null, k: 'q', cls: k.rep?.qiN ? 'warn-t' : '' }) }, { h: 'SO/LI', get: (k) => ({ v: k.rep?.qiN ?? null, k: 'n' }) }] },
+      { h: 'QTY', get: (k) => ({ v: k.rep || k.rp.closed.qi ? (k.rep?.qi ?? 0) + k.rp.closed.qi : null, k: 'q', cls: k.rep?.qiN || k.rp.closed.qi ? 'warn-t' : '', title: k.rp.closed.qi ? `incl. ${fmt(k.rp.closed.qi, 2)} completed by hand` : undefined }) }, { h: 'SO/LI', get: (k) => ({ v: k.rep?.qiN ?? null, k: 'n' }) }] },
     { card: 'Block', tip: 'SO Blocked stock (ZMMBE, every storage location) — not picked until released', subs: [
-      { h: 'QTY', get: (k) => ({ v: k.rep?.block ?? null, k: 'q', cls: k.rep?.blockN ? 'bad-t' : '' }) }, { h: 'SO/LI', get: (k) => ({ v: k.rep?.blockN ?? null, k: 'n' }) }] },
+      { h: 'QTY', get: (k) => ({ v: k.rep || k.rp.closed.block ? (k.rep?.block ?? 0) + k.rp.closed.block : null, k: 'q', cls: k.rep?.blockN || k.rp.closed.block ? 'bad-t' : '', title: k.rp.closed.block ? `incl. ${fmt(k.rp.closed.block, 2)} completed by hand` : undefined }) }, { h: 'SO/LI', get: (k) => ({ v: k.rep?.blockN ?? null, k: 'n' }) }] },
     { card: 'Posibal pending', tip: 'Lines the warehouse can send now (plan report)', subs: [
       { h: 'QTY', get: (k) => ({ v: k.rep?.possible ?? null, k: 'q', cls: 'strong' }) }, { h: 'Lines', get: (k) => ({ v: k.rep?.possibleN ?? null, k: 'n' }) }] },
     { card: 'PL rolls', tip: 'Rolls on the Packing List of these lines (a pallet picked in pieces counts once)', subs: [
@@ -92,7 +132,7 @@ export default function PlantSummary({ rows, plants, received = [], week, day, c
     { card: 'Picked', tip: 'Saved picks of these lines', subs: [
       { h: 'QTY', get: (k) => ({ v: k.picked.qty, k: 'q', cls: 'strong' }) }, { h: 'SO/LI', get: (k) => ({ v: k.picked.lines, k: 'n' }) }, { h: 'Rolls', get: (k) => ({ v: k.rolls.rolls, k: 'n' }) }] },
     { card: 'Open & short of UR', tip: 'Open lines whose QTY is more than the Full UR', subs: [
-      { h: 'Lines', get: (k) => ({ v: k.t.shortLines, k: 'n', cls: k.t.shortLines ? 'bad-t' : '' }) }, { h: 'QTY', get: (k) => ({ v: k.t.short, k: 'q' }) }] },
+      { h: 'Lines', get: (k) => ({ v: k.t.shortLines, k: 'n', cls: k.t.shortLines ? 'bad-t' : '' }) }, { h: 'QTY', get: (k) => ({ v: k.t.short + k.rp.closed.shortage, k: 'q', title: k.rp.closed.shortage ? `incl. ${fmt(k.rp.closed.shortage, 2)} completed by hand (Shortage)` : undefined }) }] },
     { card: 'Stock coverage', tip: 'Lines with UR ≥ QTY', subs: [
       { h: '%', get: (k) => ({ v: k.t.lines ? Math.round((k.t.cov.Covered / k.t.lines) * 100) : null, k: 'p' }) }] },
   ];
@@ -102,15 +142,19 @@ export default function PlantSummary({ rows, plants, received = [], week, day, c
     return (
       <tr key={r.code} className={isTotal ? 'total' : ''} onClick={isTotal ? undefined : () => onPlant(r.plantCode)} title={isTotal ? '' : `Show ${r.name} lines`}>
         <td>{isTotal ? '' : r.responsible}</td>
-        <td className="pname">{r.name}{!isTotal && !r.name.startsWith(r.plantCode) && <small>{r.plantCode}</small>}</td>
-        {COLS.map((g, gi) => g.subs.map((sub, si) => { const cl = k ? sub.get(k, r) : { v: null }; return <td key={`${gi}.${si}`} className={`n ${si === 0 ? 'g0' : ''} ${cl.cls || ''}${fl(r.code, g.card + sub.h)}`}>{show(cl)}</td>; }))}
+        <td className="pname">{r.name}{!isTotal && !r.name.startsWith(r.plantCode) && <small>{r.plantCode}</small>}{!isTotal && k && k.rp.jobs.length > 0 && <small className="psum-job">JOB {k.rp.jobs.join(', ')}</small>}</td>
+        {COLS.map((g, gi) => g.subs.map((sub, si) => { const cl = k ? sub.get(k, r) : { v: null }; return <td key={`${gi}.${si}`} className={`n ${si === 0 ? 'g0' : ''} ${cl.cls || ''}${fl(r.code, g.card + sub.h)}`} title={cl.title}>{show(cl)}</td>; }))}
+        {kpi && <td className="g0 psum-act">{!isTotal && k && canEdit && <>
+          {k.rp.open.length > 0 && <button type="button" className="btn sm" onClick={(e) => { e.stopPropagation(); setDone({ r, k }); }} title="Complete the balance of this row by hand: Block, QI, Dispatched or Shortage">✓ Complete</button>}
+          {k.rp.closedN > 0 && <button type="button" className="btn sm" onClick={(e) => { e.stopPropagation(); void reopen(r, k); }} title="Undo: the completed balance of this row is open again">↶ Undo</button>}
+        </>}</td>}
       </tr>
     );
   };
   const exportXlsx = () => {
     const head1 = ['', '', ...COLS.flatMap((g) => g.subs.map((_, i) => (i === 0 ? g.card : '')))];
     const head2 = ['Responsible', 'PLANT', ...COLS.flatMap((g) => g.subs.map((x) => x.h))];
-    const line = (r: PlantRow) => { const k = K(r); return [r.responsible, r.name, ...COLS.flatMap((g) => g.subs.map((x) => { const v = k ? x.get(k, r).v : null; return typeof v === 'number' ? Math.round(v * 1000) / 1000 : v ?? ''; }))]; };
+    const line = (r: PlantRow) => { const k = K(r); return [r.responsible, r.name + (k && k.rp.jobs.length && r !== s.total ? ` (JOB ${k.rp.jobs.join(', ')})` : ''), ...COLS.flatMap((g) => g.subs.map((x) => { const v = k ? x.get(k, r).v : null; return typeof v === 'number' ? Math.round(v * 1000) / 1000 : v ?? ''; }))]; };
     const ws = XLSX.utils.aoa_to_sheet([head1, head2, ...s.rows.map(line), line(s.total)]);
     let at = 2; ws['!merges'] = COLS.map((g) => { const m = { s: { r: 0, c: at }, e: { r: 0, c: at + g.subs.length - 1 } }; at += g.subs.length; return m; });
     ws['!cols'] = head2.map((h, i) => ({ wch: i < 2 ? 22 : Math.max(9, h.length + 3) }));
@@ -134,12 +178,30 @@ export default function PlantSummary({ rows, plants, received = [], week, day, c
         <table className="psum psum-cards">
           <thead>
             <tr className="grp"><th rowSpan={2}>Responsible</th><th rowSpan={2}>PLANT</th>
-              {COLS.map((g) => <th key={g.card} colSpan={g.subs.length} className="g0" title={g.tip} data-nofilter>{g.card}</th>)}</tr>
+              {COLS.map((g) => <th key={g.card} colSpan={g.subs.length} className="g0" title={g.tip} data-nofilter>{g.card}</th>)}
+              {kpi && <th rowSpan={2} className="g0" data-nofilter title="Complete the balance by hand (Block / QI / Dispatched / Shortage) — or undo it">Balance</th>}</tr>
             <tr className="sub">{COLS.flatMap((g) => g.subs.map((x, i) => <th key={g.card + x.h} className={`n ${i === 0 ? 'g0' : ''}`} data-nofilter>{x.h}</th>))}</tr>
           </thead>
           <tbody>{s.rows.map((r) => row(r))}</tbody>
           <tfoot>{row(s.total, true)}</tfoot>
         </table>
+        {done && (
+          <div className="bal-back" role="dialog" aria-modal="true" aria-labelledby="bal-title" onClick={() => !doneBusy && setDone(null)}>
+            <div className="bal-dlg card" onClick={(e) => e.stopPropagation()}>
+              <h3 id="bal-title">Complete balance · {done.r.name}</h3>
+              <p className="muted small">Balance <b>{fmt(done.k.rp.balance, 2)}</b> of {done.k.rp.open.length} open line{done.k.rp.open.length === 1 ? '' : 's'} (plan QTY − dispatched). It is added to the category you choose and the balance becomes 0. Undo opens it again.</p>
+              <div className="bal-cats" role="radiogroup" aria-label="Category">
+                {BAL_CATS.map((c) => <label key={c.v} className={doneCat === c.v ? 'on' : ''}><input type="radio" name="balcat" value={c.v} checked={doneCat === c.v} onChange={() => setDoneCat(c.v)} />{c.label}</label>)}
+              </div>
+              <div className="bal-lines">{done.k.rp.open.slice(0, 40).map((x) => <div key={`${x.l.week}|${x.l.key}|${x.l.date ?? ''}`}><span className="mono">{x.l.so} / {x.l.li}</span><span className="mono muted">{x.l.item}</span><b>{fmt(x.bal, 2)}</b></div>)}
+                {done.k.rp.open.length > 40 && <div className="muted small">… and {done.k.rp.open.length - 40} more</div>}</div>
+              <div className="bal-acts">
+                <button type="button" className="btn" onClick={() => setDone(null)} disabled={doneBusy}>Cancel</button>
+                <button type="button" className="btn primary" onClick={() => void complete()} disabled={!doneCat || doneBusy}>{doneBusy ? 'Saving…' : `Complete as ${doneCat ? catLabel(doneCat) : '…'}`}</button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
       <datalist id="target-opts"><option value="9:00 AM" /><option value="10:00 AM" /><option value="1:00 PM" /><option value="Weekly" /></datalist>
       {setup && <PlantSetup rows={rows} plants={plants} onClose={() => setSetup(false)} onSaved={(m) => { setSetup(false); onSaved(m); }} />}

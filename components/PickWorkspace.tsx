@@ -1,6 +1,7 @@
 'use client';
 import LineCoach from './LineCoach';
 import MatchHud, { type HudEv } from './MatchHud';
+import { loadRepick, lineRef, runLabel, runOf, type PickRun } from '@/lib/repick';
 import ReconModal from './ReconModal';
 import DayEndModal from './DayEndModal';
 import { useShell } from './Shell';
@@ -337,12 +338,23 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
     // the Admin changed the settings: the block shows (or goes) without a reload
     return subscribe((m) => { if (m.type === 'data' && (m as { src?: string }).src === 'settings') void loadRules(); });
   }, [subscribe]);
+  // v203: lines whose balance was completed by hand (Plant summary → Complete) are not picked again
+  const [closedRefs, setClosedRefs] = useState<Set<string>>(new Set());
+  const ridKey = Array.from(new Set(rows.map((l) => l.week))).sort().join(',');
+  useEffect(() => { let on = true; void loadRepick(ridKey.split(',')).then((d) => { if (on) setClosedRefs(new Set(d.close.map((c) => `${c.rid}|${c.key}|${c.date}`))); }); return () => { on = false; }; }, [ridKey, rows]);
   const runAll = async () => {
     const kindNow: 'normal' | 'offsite' = autoRules.allowOffsite && autoKind === 'offsite' ? 'offsite' : 'normal';
-    const targets = rows.filter((l) => !isDone(l) && todo(l) > 1e-9 && !l.hold);
+    const targets = rows.filter((l) => !isDone(l) && todo(l) > 1e-9 && !l.hold && !closedRefs.has(lineRef(l)));
     if (!targets.length) { toast('No open line with UR to pick in this Pick.'); return; }
     if (!window.confirm(`${kindNow === 'offsite' ? 'OFFSITE' : 'NORMAL'} — pick every All-match roll for ${targets.length} open line${targets.length === 1 ? '' : 's'} of ${label || week}?\n\n${kindNow === 'offsite' ? 'Offsite: the last roll of each line is cut to the exact QTY (never over the plan, never closed short).' : 'Normal: the last roll is cut to the QTY, then each cut roll\'s balance is tallied to another SO line that can take it (same Material and LI, SO Plant, UR, a ZINSR lot with the roll\'s Vendor Batch).'}\n\nOnly rolls where everything matches are picked (as the system selects them, the last roll cut to the QTY) — also a roll SAP lists in the lots of several SO lines, up to each line's ZINSR lot QTY (a cut roll's balance first). Lines that need a check or a manual roll are left for you under “Needs manual” — the Smart suggestion shows there, you choose.\n\nKeep this tab open while it runs. If the network drops it waits and goes on by itself.`)) return;
     stopRef.current = false;
+    // v203: a run of Pick all matched — the first one keeps each line's UR / QI / Block (first UR); after new reports it is a balance pick
+    try {
+      const rs = await Promise.all(ridKey.split(',').filter(Boolean).map((rid) => api<{ n: number; newRun: boolean }>('/api/repick', { method: 'POST', body: { action: 'run', rid,
+        base: rows.filter((l) => l.week === rid).map((l) => ({ key: l.key, date: l.date ?? '', qty: Number(l.qty) || 0, ur: Number(l.ur) || 0, qi: Number(l.qi) || 0, block: Number(l.block) || 0 })) } })));
+      const bp = rs.find((x) => x.newRun && x.n > 1);
+      if (bp) toast(`${runLabel(bp.n)} — new reports since the last run: its picks get their own Packing List (pick history → Run)`);
+    } catch { /* the picking goes on: only the run is not noted */ }
     setRunActive(true);
     // closing / reloading the tab while it runs: the browser asks first (the lines already picked stay picked)
     const onLeave = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ''; return ''; };
@@ -1646,11 +1658,20 @@ function PickHistoryCard({ canEdit, toast, onChanged, plApi }: { canEdit: boolea
   const [plantNames, setPlantNames] = useState<Record<string, string>>({});
   useEffect(() => { api<{ plants: { code: string; name: string | null }[] }>('/api/plants').then((r) => setPlantNames(Object.fromEntries(r.plants.map((x) => [x.code.toUpperCase(), x.name || x.code])))).catch(() => {}); }, []);
   const pickName = (w: string) => { const m = /^\d{4}-\d{2}-\d{2}~([^~]*)~(\d+)$/.exec(w); return m ? `${w.slice(8, 10)}-${w.slice(5, 7)} · ${m[1] === '-' ? 'No plant' : plantNames[m[1]] || m[1]} · Pick ${m[2]}` : /^\d{4}-W\d{2}$/.test(w) ? `Week plan ${w}` : w; };
-  const shownReqs = (h?.requests || []).filter((r) => !pickId || r.week === pickId);
+  // v203: the runs of Pick all matched — the 1st pick and each balance pick (after new reports) has its own Packing List
+  const [runs, setRuns] = useState<PickRun[]>([]);
+  const [jobs, setJobs] = useState<Record<string, string>>({});
+  const ridList = pickIds.slice().sort().join(',');
+  useEffect(() => { let on = true; void loadRepick(ridList.split(',')).then((d) => { if (on) { setRuns(d.runs); setJobs(Object.fromEntries(d.jobs.map((j) => [j.rid, j.job_id]))); } }); return () => { on = false; }; }, [ridList, h]);
+  const [runSel, setRunSel] = useState(0);
+  useEffect(() => { setRunSel(0); }, [day, pickId]);
+  const reqRun = (r: { week: string; at: string }) => runOf(runs, r.week, r.at);
+  const runNs = Array.from(new Set((h?.requests || []).filter((r) => !r.cancelled_at && (!pickId || r.week === pickId)).map(reqRun))).sort((a, b) => a - b);
+  const shownReqs = (h?.requests || []).filter((r) => (!pickId || r.week === pickId) && (!runSel || reqRun(r) === runSel));
   const live = shownReqs.filter((r) => !r.cancelled_at);
   // the picks marked for the download (none marked = all of the day)
   const [sel, setSel] = useState<Set<number>>(new Set());
-  useEffect(() => { setSel(new Set()); }, [day, mine, pickId]);
+  useEffect(() => { setSel(new Set()); }, [day, mine, pickId, runSel]);
   const marked = live.filter((r) => sel.has(r.id));
   const allOn = live.length > 0 && marked.length === live.length;
   const flip = (id: number) => setSel((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
@@ -1666,7 +1687,7 @@ function PickHistoryCard({ canEdit, toast, onChanged, plApi }: { canEdit: boolea
   // the Packing List tallies the cut roll balances first (can be turned off)
   const [autoTally, setAutoTally0] = useState(() => { try { return localStorage.getItem('pl_auto_tally') !== '0'; } catch { return true; } });
   const setAutoTally = (v: boolean) => { setAutoTally0(v); try { localStorage.setItem('pl_auto_tally', v ? '1' : '0'); } catch { /* */ } };
-  const ptag = pickId ? '_' + pickName(pickId).replace(/[^\w]+/g, '_') : '';
+  const ptag = (pickId ? '_' + pickName(pickId).replace(/[^\w]+/g, '_') : '') + (runSel ? '_' + runLabel(runSel).replace(/[^\w]+/g, '_') : '');
   const [plBusy, setPlBusy] = useState(false);
   const downloadPL = async (opts?: { hist: PickHistory; day: string; capture: (x: { wb: ReturnType<typeof packingListWorkbook>; file: string; issues: number; picks: number; tallied: number }) => void }) => {
     const day = opts?.day ?? day0;
@@ -1789,7 +1810,7 @@ function PickHistoryCard({ canEdit, toast, onChanged, plApi }: { canEdit: boolea
       // the SAP and Korber data of every roll is checked first: problems are shown before the file is saved
       task.step('checking SAP / Korber and building the file', 0);
       const issues: PLIssue[] = [];
-      const wb = packingListWorkbook(hh, { ids: new Set(target.map((r) => r.id)), combined: oneSheet, pfcSlocs, plan, planTitle: `Plan · ${weeks.map(pickName).join(', ')}`, issues, notPicked, plantNames });
+      const wb = packingListWorkbook(hh, { ids: new Set(target.map((r) => r.id)), combined: oneSheet, pfcSlocs, plan, planTitle: `Plan · ${weeks.map(pickName).join(', ')}`, issues, notPicked, plantNames, jobs });
       const file = `Packing_List_${day}${ptag}${tag}.xlsx`;
       const tallyMsg = tallied ? ` · ${tallied} cut roll balance${tallied === 1 ? '' : 's'} tallied (${fmtQty(tallyQty)})` : '';
       if (tallyFail.length) toast(`Cut roll tally: ${tallyFail.length} not saved — ${tallyFail[0]}`);
@@ -1862,8 +1883,12 @@ function PickHistoryCard({ canEdit, toast, onChanged, plApi }: { canEdit: boolea
           </select>
           <select className="as-search" value={pickId} onChange={(e) => setPickId(e.target.value)} aria-label="Pick No">
             <option value="">All Picks{pickIds.length ? ` (${pickIds.length})` : ''}</option>
-            {pickIds.map((w) => <option key={w} value={w}>{pickName(w)} · {(h?.requests || []).filter((r) => r.week === w && !r.cancelled_at).length} picks</option>)}
+            {pickIds.map((w) => <option key={w} value={w}>{pickName(w)}{jobs[w] ? ` · JOB ${jobs[w]}` : ''} · {(h?.requests || []).filter((r) => r.week === w && !r.cancelled_at).length} picks</option>)}
           </select>
+          {(runNs.length > 1 || runSel > 0) && <select className="as-search" value={runSel} onChange={(e) => setRunSel(Number(e.target.value))} aria-label="Run" title="Pick all matched runs: the 1st pick, then each balance pick after new reports — the Packing List is of the run chosen (All: every run)">
+            <option value={0}>All runs ({runNs.length})</option>
+            {runNs.map((n) => <option key={n} value={n}>{runLabel(n)} · {(h?.requests || []).filter((r) => !r.cancelled_at && (!pickId || r.week === pickId) && reqRun(r) === n).length} picks</option>)}
+          </select>}
         </div>
       </div>
       {h && live.length > 0 && (

@@ -5,10 +5,11 @@ import { api, getSession, isBossRole } from '@/lib/api';
 import { ago, fmt, fmtDate } from '@/lib/calc';
 import { uploadPickFile, korberCheckText, docText, type PickSrc } from '@/lib/pick';
 import PlanReport from '@/components/PlanReport';
+import KorberAfter from '@/components/KorberAfter';
 import { todayLocal } from '@/lib/smart';
 
 export interface DayRow { day: string; picks: number; lines: number }
-export interface PickRound { id: string; plant: string | null; round: number; lines: number; qty: number; src_at?: string | null; created_by?: string; reports: string[]; /** made from a Packing List (Import Packing List) */ imported?: number }
+export interface PickRound { id: string; plant: string | null; round: number; lines: number; qty: number; src_at?: string | null; created_by?: string; reports: string[]; /** made from a Packing List (Import Packing List) */ imported?: number; /** v203: the JOB ID typed when the Pick was made (or later) */ job_id?: string | null }
 interface Report { src: string; uses: 'own' | 'shared' | 'none'; rows: number; missing?: string[]; own: { file_name: string | null; uploaded_by: string; uploaded_at: string } | null; shared: { file_name: string | null; uploaded_by: string; uploaded_at: string } | null }
 
 const REPORT_NAME: Record<string, string> = { plan: 'Plan', zmmbe: 'ZMMBE', zinr: 'ZINSR / ZINR', zcoment: 'ZCOMENT VIEW (optional)', korber: 'Korber Inventory', zroll: 'ZROLLMGT', ztrr: 'ZMM_TRR' };
@@ -40,6 +41,7 @@ export default function DayPickBar({ day, setDay, rid, setRid, toast, refreshKey
   const [reports, setReports] = useState<Report[] | null>(null);
   const [newDay, setNewDay] = useState('');
   const [newPlant, setNewPlant] = useState('');
+  const [newJob, setNewJob] = useState('');
   const [busy, setBusy] = useState('');
   const names = Object.fromEntries(plants.map((p) => [p.code.toUpperCase(), p.name || p.code]));
 
@@ -60,10 +62,20 @@ export default function DayPickBar({ day, setDay, rid, setRid, toast, refreshKey
   const createPick = async () => {
     if (!newPlant) { toast('Choose the plant of the Pick'); return; }
     try {
-      const r = await api<{ rid: string; round: number }>('/api/rounds', { method: 'POST', body: { day, plant: newPlant } });
-      setRid(r.rid); toast(`${pickLabel({ plant: newPlant, round: r.round }, names)} created for ${fmtDate(day)} — upload its Plan, ZMMBE, ZINSR, ZCOMENT VIEW and Korber`);
+      const r = await api<{ rid: string; round: number }>('/api/rounds', { method: 'POST', body: { day, plant: newPlant, job_id: newJob.trim() || undefined } });
+      setNewJob('');
+      setRid(r.rid); toast(`${pickLabel({ plant: newPlant, round: r.round }, names)}${newJob.trim() ? ` (JOB ID ${newJob.trim()})` : ''} created for ${fmtDate(day)} — upload its Plan, ZMMBE, ZINSR, ZCOMENT VIEW and Korber`);
       await loadRounds(); void loadDays();
     } catch (e) { toast(e instanceof Error ? e.message : 'Could not create the Pick.'); }
+  };
+  // v203: the JOB ID of the chosen Pick — added or changed later (empty removes it)
+  const editJob = async () => {
+    const r = rounds.find((x) => x.id === rid);
+    if (!r) return;
+    const v = prompt(`JOB ID of ${pickLabel(r, names)} (${fmtDate(day)}) — leave empty to remove it`, r.job_id ?? '');
+    if (v === null) return;
+    try { await api('/api/rounds', { method: 'PATCH', body: { rid, job_id: v.trim() } }); toast(v.trim() ? `JOB ID ${v.trim()} saved` : 'JOB ID removed'); await loadRounds(); onUploaded?.(); }
+    catch (e) { toast(e instanceof Error ? e.message : 'Could not save the JOB ID.'); }
   };
   const deletePick = async () => {
     const r = rounds.find((x) => x.id === rid);
@@ -84,6 +96,9 @@ export default function DayPickBar({ day, setDay, rid, setRid, toast, refreshKey
     } catch (e) { toast(e instanceof Error ? e.message : 'Could not delete.'); }
   };
   const [report, setReport] = useState(false);
+  // v204: the Korber Inventory with the picks saved after its upload taken off ('' = the shared Korber)
+  const [kAfter, setKAfter] = useState<string | null>(null);
+  const ridName = (w: string) => { const m = /^(\d{4})-(\d{2})-(\d{2})~([^~]*)~(\d+)$/.exec(w); return m ? `${m[3]}-${m[2]} · ${m[4] === '-' ? 'No plant' : names[m[4]] || m[4]} · Pick ${m[5]}` : /^\d{4}-W\d{2}/.test(w) ? `Week plan ${w}` : w; };
   const inputs = useRef<Record<string, HTMLInputElement | null>>({});
   const upload = async (src: PickSrc, f: File) => {
     setBusy(src);
@@ -114,7 +129,7 @@ export default function DayPickBar({ day, setDay, rid, setRid, toast, refreshKey
         <label>Pick
           <select value={rid} onChange={(e) => setRid(e.target.value)}>
             <option value="">{rounds.length ? 'Choose the Pick…' : 'No Pick yet — create one'}</option>
-            {rounds.map((r) => <option key={r.id} value={r.id}>{pickLabel(r, names)} · {fmt(r.lines)} lines{r.reports.length ? ` · ${r.reports.length} report${r.reports.length === 1 ? '' : 's'}` : ''}</option>)}
+            {rounds.map((r) => <option key={r.id} value={r.id}>{pickLabel(r, names)}{r.job_id ? ` · JOB ${r.job_id}` : ''} · {fmt(r.lines)} lines{r.reports.length ? ` · ${r.reports.length} report${r.reports.length === 1 ? '' : 's'}` : ''}</option>)}
           </select>
         </label>
         {canEdit && <span className="dpb-new">
@@ -122,10 +137,13 @@ export default function DayPickBar({ day, setDay, rid, setRid, toast, refreshKey
             <option value="">Plant…</option>
             {plants.map((p) => <option key={p.code} value={p.code.toUpperCase()}>{p.name ? `${p.name} (${p.code})` : p.code}</option>)}
           </select>
+          <input className="dpb-job" value={newJob} onChange={(e) => setNewJob(e.target.value)} maxLength={60} placeholder="JOB ID (optional)" aria-label="JOB ID of the new Pick (optional)" />
           <button className="btn sm primary" onClick={createPick} disabled={!day}>+ Create Pick</button>
         </span>}
+        {cur && <span className="dpb-jobid" title="JOB ID of this Pick">JOB ID <b>{cur.job_id || '—'}</b>{canEdit && <button className="btn sm" onClick={editJob} aria-label="Edit the JOB ID">✎</button>}</span>}
         {cur && <button className="btn sm" onClick={() => setReport(true)} title="The plan report of this Pick (AVALABALE, ALRADY SEND, Pending, POSIBAL PENDING, QI, BLOCK, TRANSFER NOTE) — on screen and as Excel">📋 Plan report</button>}
         {report && rid && <PlanReport rid={rid} onClose={() => setReport(false)} />}
+        {kAfter !== null && <KorberAfter scopeRid={kAfter} pickName={ridName} toast={toast} onClose={() => setKAfter(null)} />}
         {cur && !boss && cur.imported === 1 && cur.created_by === getSession()?.user.username && <button className="btn sm danger" onClick={deleteWithHistory} title="This Pick was made from your Packing List: delete it with its plan and its picks">Delete imported Pick</button>}
         {boss && cur && <button className="btn sm danger" onClick={deletePick} title="Delete this Pick with its plan and its own reports">Delete Pick</button>}
         {boss && cur && <button className="btn sm danger" onClick={deleteWithHistory} title="Delete this Pick with its plan, reports AND its pick history (picks, packing lists, rejected rolls, balances)">Delete Pick + history</button>}
@@ -148,6 +166,7 @@ export default function DayPickBar({ day, setDay, rid, setRid, toast, refreshKey
                     <input ref={(el) => { inputs.current[r.src] = el; }} type="file" hidden accept=".xlsx,.xls,.xlsm,.csv" onChange={(e) => { const f = e.target.files?.[0]; if (f) void upload(r.src as PickSrc, f); e.target.value = ''; }} />
                   </>}
                   {r.own && <button className="btn sm" title="Download the Excel file as it was uploaded for this Pick" onClick={() => downloadLatest(r.src, rid).then((n) => toast(`${n} downloaded`)).catch((e) => toast(e instanceof Error ? e.message : 'Could not download.'))}>⬇ Original</button>}
+                  {r.src === 'korber' && u && <button className="btn sm" title="Download this Korber Inventory with each pallet's Actual Qty reduced by the picks saved after its upload (choose the Picks)" onClick={() => setKAfter(r.own ? rid : '')}>⬇ After picks</button>}
                   {admin && r.own && r.src !== 'plan' && <button className="btn sm danger" onClick={() => clearOwn(r.src)}>Remove</button>}
                 </div>
               </div>

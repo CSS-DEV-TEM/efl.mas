@@ -44,6 +44,19 @@ export function listFiles(q: { rid?: string | null; src?: string } = {}) {
   return api<{ files: KeptFile[]; total: { n: number; size: number }; keep: number; max: number }>('/api/files' + (p.toString() ? '?' + p : ''));
 }
 
+/** v204: the bytes of a kept file (to read it again in the browser) */
+export async function fetchFileBytes(f: Pick<KeptFile, 'id' | 'parts'>): Promise<Uint8Array> {
+  const chunks: Uint8Array[] = [];
+  for (let n = 0; n < f.parts; n++) {
+    const { data } = await api<{ data: string }>(`/api/files/part?id=${f.id}&n=${n}`);
+    const bin = atob(data); const u = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+    chunks.push(u);
+  }
+  const out = new Uint8Array(chunks.reduce((t, c) => t + c.length, 0));
+  let at = 0; for (const c of chunks) { out.set(c, at); at += c.length; }
+  return out;
+}
 /** Downloads a kept file: the same bytes and name as the file that was uploaded. */
 export async function downloadFile(f: Pick<KeptFile, 'id' | 'name' | 'mime' | 'parts'>) {
   const chunks: Uint8Array[] = [];

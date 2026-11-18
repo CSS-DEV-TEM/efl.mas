@@ -8,6 +8,8 @@ import { COV_COLOR } from '@/components/Charts';
 import PlantSummary from '@/components/PlantSummary';
 import PlanPicks from '@/components/PlanPicks';
 import { fmtTime, type PlantInfo } from '@/lib/summary';
+import { EMPTY_REPICK, loadRepick, lineRef as repRef, type BalCat, type RepickData } from '@/lib/repick';
+import { avail as urLeftOf } from '@/lib/calc';
 import { api, userParam } from '@/lib/api';
 import { useRefreshOnActivity } from '@/lib/freshness';
 import { COVERAGES, periodOf, type DispatchSummary, ago, compact, coverage, fmt, fmtDate, isDone, lineRef, totals, type Coverage, type Line, type Upload, type WeekInfo } from '@/lib/calc';
@@ -70,7 +72,36 @@ export function repOfLines(ls: Line[], repMap: Map<string, PlanReportRow> | null
     block: sumU((x) => x.block), blockN: u.filter((x) => x.block > 1e-9).length, qiSent: sumU((x) => x.qi_sent ?? 0), blockSent: sumU((x) => x.block_sent ?? 0), possible: pp.reduce((t0, x) => t0 + Number(x.possible), 0), possibleN: pp.length,
     tnCount: tns.size, tnLines: u.filter((x) => x.tn).length, tnQty: u.reduce((t0, x) => t0 + (Number(x.tn_qty) || 0), 0), tnUr: u.reduce((t0, x) => t0 + (Number(x.tn_ur) || 0), 0) };
 }
-export interface DashKpi { t: ReturnType<typeof totals>; planUr: ReturnType<typeof planUrOf>; rep: ReturnType<typeof repOfLines>; rolls: ReturnType<typeof rollsOfLines>; picked: { qty: number; lines: number } }
+export interface DashKpi { t: ReturnType<typeof totals>; planUr: ReturnType<typeof planUrOf>; rep: ReturnType<typeof repOfLines>; rolls: ReturnType<typeof rollsOfLines>; picked: { qty: number; lines: number }; rp: ReturnType<typeof repickOf> }
+/**
+ * v203: after the first Pick all matched — the first UR / QI / Block of the lines, what the reports uploaded since add (new UR,
+ * QI / Block released), what can be picked again (open balance, at most the UR left), the runs, and the balances completed
+ * by hand (Block / QI / Dispatched / Shortage: the balance goes to that category and becomes 0)
+ */
+export function repickOf(ls: Line[], d: RepickData) {
+  const base = new Map(d.base.map((b) => [`${b.rid}|${b.key}|${b.date}`, b]));
+  const close = new Map(d.close.map((c) => [`${c.rid}|${c.key}|${c.date}`, c]));
+  const closed: Record<BalCat, number> = { block: 0, qi: 0, dispatched: 0, shortage: 0 };
+  let firstUr = 0, firstQi = 0, firstBlock = 0, newUr = 0, qiRel = 0, blockRel = 0, reLines = 0, reQty = 0, based = 0, closedN = 0, balance = 0;
+  const open: { l: Line; bal: number }[] = [], closedLines: Line[] = [];
+  for (const l of ls) {
+    const ref = repRef(l), b = base.get(ref), c = close.get(ref);
+    const q = Number(l.qty) || 0, ur = Math.max(0, Number(l.ur) || 0), qi = Number(l.qi) || 0, bl = Number(l.block) || 0;
+    if (b) {
+      based++; firstUr += Math.min(q, Math.max(0, b.ur)); firstQi += b.qi; firstBlock += b.block;
+      newUr += Math.max(0, ur - b.ur); qiRel += Math.max(0, b.qi - qi); blockRel += Math.max(0, b.block - bl);
+    }
+    if (c) { closed[c.cat] = (closed[c.cat] ?? 0) + c.qty; closedN++; closedLines.push(l); continue; }
+    // the balance of the line: plan QTY − dispatched
+    const lb = Math.max(0, q - (Number(l.dispatched) || 0));
+    balance += lb;
+    if (lb > 1e-9) open.push({ l, bal: lb });
+    if (b && !isDone(l)) { const can = Math.max(0, Math.min(q - (Number(l.picked) || 0), Math.max(0, Number(urLeftOf(l)) || 0))); if (can > 1e-9) { reLines++; reQty += can; } }
+  }
+  const runs = Math.max(0, ...d.runs.filter((r) => ls.some((l) => l.week === r.rid)).map((r) => r.n));
+  const jobs = Array.from(new Set(d.jobs.filter((j) => ls.some((l) => l.week === j.rid)).map((j) => j.job_id)));
+  return { jobs, based, firstUr, firstQi, firstBlock, newUr, qiRel, blockRel, reLines, reQty, runs, closed, closedN, closedQty: closed.block + closed.qi + closed.dispatched + closed.shortage, balance, open, closedLines };
+}
 /** the Picked card: QTY of the saved picks and the SO / LI lines with a pick */
 export const pickedOf = (ls: Line[]) => ({ qty: ls.reduce((x, r) => x + (r.picked ?? 0), 0), lines: ls.filter((r) => (r.picked ?? 0) > 0).length });
 
@@ -216,7 +247,12 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
   }, [repIds.join(','), wPlant, data?.generatedAt]); // eslint-disable-line react-hooks/exhaustive-deps
   const rep = useMemo(() => repOfLines(scoped, repMap), [repMap, scoped]);
   // v200: the same figures for each row of the Summary (plant / Pick)
-  const kpiOf = useCallback((ls: Line[]): DashKpi => ({ t: totals(ls), planUr: planUrOf(ls), rep: repOfLines(ls, repMap), rolls: rollsOfLines(ls, data?.pickRolls), picked: pickedOf(ls) }), [repMap, data?.pickRolls]);
+  // v203: first UR, runs and balances completed by hand of the plan's Picks
+  const [repick, setRepick] = useState<RepickData>(EMPTY_REPICK);
+  const repickRids = useMemo(() => Array.from(new Set((data?.rows || []).map((l) => l.week))).sort().join(','), [data]);
+  const loadRp = useCallback(() => loadRepick(repickRids.split(',')).then(setRepick), [repickRids]);
+  useEffect(() => { void loadRp(); }, [loadRp, data]);
+  const kpiOf = useCallback((ls: Line[]): DashKpi => ({ t: totals(ls), planUr: planUrOf(ls), rep: repOfLines(ls, repMap), rolls: rollsOfLines(ls, data?.pickRolls), picked: pickedOf(ls), rp: repickOf(ls, repick) }), [repMap, data?.pickRolls, repick]);
   // v164: the table's TN-UR column (from the plan report)
   const ledgerRows = useMemo(() => (!repMap ? tableRows : tableRows.map((l) => { const x = repMap.get(`${l.week}|${l.key}|${l.date ?? ''}`); return x && x.tn_ur ? { ...l, tn_ur: Number(x.tn_ur) } : l; })), [tableRows, repMap]);
   const tips = useMemo(() => insights(scoped, data?.uploads || [], today, data?.dispatch), [scoped, data?.uploads, today, data?.dispatch]);
@@ -518,7 +554,7 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
           received={isDay ? (data!.received || []) : (data!.received || []).filter((r) => (r.period ?? data!.week) === (date || data!.week))} week={isDay ? period : date || data!.week!} day={isDay ? data!.day : date}
           canTarget={!guest && user.role === 'admin'} canEdit={canEdit} time={data!.time} live={live === 'live'} updatedAt={data!.generatedAt}
           onPlant={(c) => { setPlant(rows.some((r) => (r.plant || '').toUpperCase() === c) ? (rows.find((r) => (r.plant || '').toUpperCase() === c)!.plant || '') : ''); setView({ kind: 'all' }); setTab('details'); }}
-          onSaved={(m) => { toast(m); load(); }} kpi={kpiOf} />
+          onSaved={(m) => { toast(m); load(); }} kpi={kpiOf} onRepick={() => { void loadRp(); }} />
       )}
 
 
