@@ -725,7 +725,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 134; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 135; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -4089,8 +4089,9 @@ async function handlePick(env: Env, req: Request, p: string) {
     const arg = day || week || colomboDay();
     const [reqs, rolls, days, hdr] = await env.DB.batch([
       env.DB.prepare(`SELECT * FROM pick_req WHERE ${where} ORDER BY day, by_user, seq`).bind(arg, owner),
-      // prior = what was picked from the pallet before this pick (a cut roll's balance picked later is not a new cut)
-      env.DB.prepare(`SELECT picks.*, (SELECT COALESCE(SUM(q.qty), 0) FROM picks q WHERE q.pallet = picks.pallet AND q.cancelled_at IS NULL AND q.id < picks.id) prior FROM picks WHERE ${where} ORDER BY req_id, id`).bind(arg, owner),
+      // prior = what was picked from the pallet before this pick (a cut roll's balance picked later is not a new cut) —
+      // v198: with what was picked outside the system before it (Korber file of picked pallets)
+      env.DB.prepare(`SELECT picks.*, (SELECT COALESCE(SUM(q.qty), 0) FROM picks q WHERE q.pallet = picks.pallet AND q.cancelled_at IS NULL AND q.id < picks.id) + (SELECT COALESCE(SUM(u.qty), 0) FROM pallet_used u WHERE u.pallet = picks.pallet AND u.at < picks.at) prior FROM picks WHERE ${where} ORDER BY req_id, id`).bind(arg, owner),
       env.DB.prepare("SELECT d day, COUNT(*) n, COUNT(*) open FROM (SELECT day d FROM pick_req WHERE ?1 IS NULL OR by_user = ?1 UNION ALL SELECT substr(week, 1, 10) d FROM pick_req WHERE week GLOB '????-??-??~*' AND substr(week, 1, 10) <> day AND (?1 IS NULL OR by_user = ?1)) GROUP BY d ORDER BY d DESC LIMIT 60").bind(owner),
       env.DB.prepare("SELECT v FROM config WHERE k = 'korber_header'"),
     ]);
