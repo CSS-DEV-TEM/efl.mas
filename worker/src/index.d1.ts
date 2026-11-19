@@ -725,7 +725,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 132; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 133; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1432,7 +1432,7 @@ async function handleFollow(env: Env, req: Request) {
     const sc = await scopeOf(env, rid);
     const senv = scopedEnv(env, sc);
     // the ZMMBE UR is as of its upload: what was picked for the SO line since then is no longer UR
-    const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid = ?").bind(sc.stock).first<{ at: string | null }>())?.at ?? '';
+    const zAt = await zBaseAt(env, rid, (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid = ?").bind(sc.stock).first<{ at: string | null }>())?.at ?? '');
     const out: Row[] = [];
     for (const { ref: r0, bal: bal0 } of items) {
       const [wk, so, li, item, date] = r0.split('|');
@@ -1785,7 +1785,7 @@ async function planReportOf(env: Env, req: Request) {
     for (const x of (await senv.DB.prepare(`SELECT to_so, to_li, material, GROUP_CONCAT(DISTINCT tn) tn, ROUND(SUM(qty), 3) tn_qty, ROUND(SUM(tqty), 3) tn_tqty, GROUP_CONCAT(DISTINCT status) tn_status FROM ztrr GROUP BY to_so, to_li, material`).all<Row>()).results)
       tn.set(`${x.to_so}|${x.to_li}|${x.material}`, x);
     // picks after the latest ZMMBE upload are not in its ALRADY SEND yet (the same rule as the pick's "to pick")
-    const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(sr).first<{ at: string | null }>())?.at ?? '';
+    const zAt = await zBaseAt(env, sr, (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(sr).first<{ at: string | null }>())?.at ?? '');
     const pk = new Map((await env.DB.prepare('SELECT line, ROUND(SUM(qty), 3) q, ROUND(SUM(CASE WHEN at > ?2 THEN qty ELSE 0 END), 3) qa, COUNT(DISTINCT pallet) n FROM picks WHERE week = ?1 AND cancelled_at IS NULL GROUP BY line').bind(rid, zAt).all<Row>()).results.map((x) => [String(x.line), x]));
     const tu = await tnUrOf(env, senv, sr, JSON.parse(keys) as string[]);
     scs.set(sr, { tu, st, tn, pk, hasSent: !!(await senv.DB.prepare('SELECT /*exact*/ 1 FROM stock_sent LIMIT 1').first()), zm: !!(await senv.DB.prepare("SELECT /*exact*/ 1 FROM stock WHERE src = 'zmmbe' LIMIT 1").first()) });
@@ -2008,6 +2008,23 @@ async function handleExt(env: Env, req: Request, p: string) {
   throw new HttpError(404, 'Unknown data API path — GET /api/ext/v1 lists them.');
 }
 
+/**
+ * v197 (API 133): the ZMMBE time the "picked since then" counts from. Normally the latest ZMMBE upload: picks before it are
+ * taken as already out of its UR. But once a Pick's first Pick all matched has run (its first UR), a ZMMBE uploaded again
+ * that day (QI / Block released) still has the rolls picked since the first one in its UR — SAP moves them only when they
+ * go to the plant. So for that Pick the count starts at the ZMMBE that was current when its first run began: released
+ * QI / Block can be picked, a roll already picked is not counted as UR a second time.
+ */
+async function zBaseAt<T extends string | null | undefined>(env: Env, rid: string | null | undefined, zAt: T): Promise<T | string> {
+  if (!rid || !zAt) return zAt;
+  try {
+    const r1 = await env.DB.prepare('SELECT started_at FROM pick_run WHERE rid = ? AND n = 1').bind(rid).first<{ started_at: string }>();
+    if (!r1 || String(r1.started_at) >= String(zAt)) return zAt;
+    const z0 = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') AND uploaded_at <= ?2").bind(rid, r1.started_at).first<{ at: string | null }>())?.at;
+    return z0 && z0 < String(zAt) ? z0 : zAt;
+  } catch { return zAt; }
+}
+
 async function handleRepick(env: Env, req: Request) {
   if (req.method === 'GET') {
     await requireUser(env, req);
@@ -2218,13 +2235,14 @@ async function handlePullPlan(env: Env, req: Request) {
   const pnorm = (v: unknown) => String(v ?? '').trim().toUpperCase().replace(/\s+/g, '');
   const wPlant = ptype === 'week' ? pnorm(sp.get('plant')) : '';
   const weekPlants = ptype === 'week' && week ? (await env.DB.prepare("SELECT DISTINCT upper(replace(trim(COALESCE(plant, '')), ' ', '')) p FROM plan WHERE week = ? AND plan_type = 'week' AND (?2 IS NULL OR owner = ?2) ORDER BY 1").bind(week, owner).all<{ p: string }>()).results.map((x) => x.p) : [];
-  const groups: { period: string | null; sc: Scope; env: Env; zAt?: string; plant?: string }[] = [];
+  const groups: { period: string | null; sc: Scope; env: Env; zAt?: string; zPk?: string; plant?: string }[] = [];
   const pers: { per: string | null; plant?: string }[] = ptype === 'day' ? periods.map((per) => ({ per })) : (wPlant ? [wPlant] : weekPlants.length ? weekPlants : ['']).map((plant) => ({ per: week, plant }));
   for (const { per, plant } of pers) {
     const sc = await scopeOf(env, plant !== undefined ? weekPlantRid(per, plant) : per); // a Pick's or a week plant's own reports (else the shared ones)
     // stock "as of": the latest FULL ZMMBE upload of that scope (a part file added to it does not refresh the other rows)
     const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid = ? AND COALESCE(mode, '') <> 'add'").bind(sc.stock).first<{ at: string | null }>())?.at ?? undefined;
-    groups.push({ period: per, sc, env: scopedEnv(env, sc), zAt, plant });
+    // v197: what was picked counts from the ZMMBE of the Pick's first run (a ZMMBE uploaded again still holds those rolls)
+    groups.push({ period: per, sc, env: scopedEnv(env, sc), zAt, zPk: await zBaseAt(env, per, zAt), plant });
   }
   // the latest upload of each report this view reads: a Pick's own (else the shared one); the whole day / a week: the shared ones
   // (the whole day, all its Picks: the Pick with the latest ZMMBE — not the old shared uploads)
@@ -2339,8 +2357,8 @@ async function handlePullPlan(env: Env, req: Request) {
   const picksOf = (w: string | null) => pickAll.filter((x) => x.week === w);
   // UR is stock of the SO / LI / Item, not of one plan line: every pick after the ZMMBE takes from it —
   // also picks of its other lines (another Pick, another day). The full picked QTY counts (a full roll over the plan is gone too).
-  for (const g of ptype === 'day' ? groups : [{ period: week, zAt } as { period: string | null; zAt?: string }]) {
-    const pa = await picksAt(g.zAt);
+  for (const g of ptype === 'day' ? groups : [{ period: week, zAt, zPk: await zBaseAt(env, week, zAt) } as { period: string | null; zAt?: string; zPk?: string }]) {
+    const pa = await picksAt(g.zPk ?? g.zAt);
     const rs = ptype === 'day' ? plan.filter((r) => r.week === g.period) : plan;
     applyPicks(rs, pa.filter((x) => x.week === g.period));
     const takenAfter = new Map<string, number>();
@@ -2865,7 +2883,7 @@ async function tallyInfo(env: Env, pallet: string, src: Row, used: Map<string, n
       .bind(normId(src.item), normId(src.li)).all<Row>()).results.filter((x) => !plantLocs.has(up(normId(x.sloc))))
       // only an SO of the same SO Plant as the cut roll's SO line (ZMMBE SO Plant; else the Pick's plant)
       .filter((x) => srcPlants.has(sq(x.so_plant)));
-    const zAt = (await E.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(lrid).first<{ at: string | null }>())?.at ?? '';
+    const zAt = await zBaseAt(E, lrid, (await E.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(lrid).first<{ at: string | null }>())?.at ?? '');
     // the SO lines the roll was cut for (in the plan): their own UR takes the balance first
     const ownLines = new Set([`${normId(src.so)}|${normId(src.li)}`, ...pp.picks.map((x) => `${normId(x.so)}|${normId(x.li)}`)]);
     for (const key of Array.from(new Set(st.map((x) => String(x.key))))) {
@@ -5331,14 +5349,15 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
   const planQty = r3(Number(line.qty));
   // the same SO / LI / Item on other lines of this plan (a week plan has it on several days): what they picked since the ZMMBE
   // upload is not in its UR yet — taken off this line's UR, so the UR is never picked twice
-  const zAt0 = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(srid).first<{ at: string | null }>())?.at ?? '';
+  const zAt0 = await zBaseAt(env, week, (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(srid).first<{ at: string | null }>())?.at ?? '');
   const otherAfter = r3(Number((await env.DB.prepare("SELECT COALESCE(SUM(qty), 0) q FROM picks WHERE week = ?1 AND substr(line, 1, length(?2) + 1) = ?2 || '|' AND line <> ?3 AND cancelled_at IS NULL AND at > ?4").bind(week, key, lineId, zAt0).first<{ q: number }>())?.q ?? 0));
   const urFree = Math.max(0, r3(urTotal - otherAfter));
   if (otherAfter > 1e-9) steps.push(`${otherAfter} of this SO / LI / Item was picked for its other plan line(s) since the ZMMBE upload: UR ${urTotal} − ${otherAfter} = ${urFree} for this line.`);
   // 1. what to pick: the plan QTY itself (less what this line already picked), at most the warehouse UR.
   // ALRADY SEND / POSIBAL PENDING are report columns only — they do not lower the QTY to pick.
   // The UR: picks saved before the ZMMBE upload are already out of it; picks after it are not yet (taken off here).
-  const zAtL = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(srid).first<{ at: string | null }>())?.at ?? null;
+  // v197: a ZMMBE uploaded again after the Pick's first run still holds the rolls picked since the first one (zBaseAt)
+  const zAtL = await zBaseAt(env, week, (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(srid).first<{ at: string | null }>())?.at ?? null);
   const afterL = zAtL ? Number((await env.DB.prepare('SELECT COALESCE(SUM(qty), 0) q FROM picks WHERE week = ? AND line = ? AND cancelled_at IS NULL AND at > ?').bind(week, lineId, zAtL).first<{ q: number }>())?.q ?? 0) : pickedLine;
   const leftL = Math.max(0, r3(Math.min(planQty - pickedLine, urFree - afterL)));
   let need = r3(pickedLine + leftL);
@@ -6505,7 +6524,7 @@ async function reconOf(env: Env, rid: string) {
   }
   const batches = Array.from(new Set(stock.filter((x) => Number(x.ur) > 0).map((x) => normId(x.batch)).filter(Boolean)));
   // picks saved after the ZMMBE upload are not out of its UR yet: taken off here, by SO line and batch (as the pick window does)
-  const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(rid).first<{ at: string | null }>())?.at ?? '';
+  const zAt = await zBaseAt(env, rid, (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(rid).first<{ at: string | null }>())?.at ?? '');
   const after = new Map<string, number>(); // item|batch → qty
   if (zAt) for (const x of (await env.DB.prepare("SELECT p.line, p.item, p.batch, p.qty FROM picks p WHERE p.at > ?1 AND p.cancelled_at IS NULL AND EXISTS (SELECT 1 FROM json_each(?2) j WHERE substr(p.line, 1, length(j.value) + 1) = j.value || '|')").bind(zAt, JSON.stringify(keys)).all<Row>()).results) {
     const k = normId(x.item) + '|' + normId(String(x.batch ?? '').split(',')[0]); after.set(k, r3((after.get(k) ?? 0) + Number(x.qty || 0)));
