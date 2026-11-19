@@ -1665,7 +1665,22 @@ function PickHistoryCard({ canEdit, toast, onChanged, plApi }: { canEdit: boolea
   useEffect(() => { let on = true; void loadRepick(ridList.split(',')).then((d) => { if (on) { setRuns(d.runs); setJobs(Object.fromEntries(d.jobs.map((j) => [j.rid, j.job_id]))); } }); return () => { on = false; }; }, [ridList, h]);
   const [runSel, setRunSel] = useState(0);
   useEffect(() => { setRunSel(0); }, [day, pickId]);
-  const reqRun = (r: { week: string; at: string }) => runOf(runs, r.week, r.at);
+  // v207: a cut roll's balance tallied to another SO line (at a Packing List download, maybe after a balance pick began) is in the
+  // run of the pick that cut the roll — the first pick of that pallet that is not a tally
+  const tallyRun = useMemo(() => {
+    const m = new Map<number, number>();
+    const ps = (h?.picks || []).filter((p) => !p.cancelled_at);
+    const reqById = new Map((h?.requests || []).map((r) => [r.id, r]));
+    const isTally = (p: { note?: string | null }) => String(p.note ?? '').startsWith('Cut roll balance tallied');
+    for (const p of ps) {
+      if (!isTally(p) || m.has(p.req_id)) continue;
+      const src = ps.filter((x) => x.pallet === p.pallet && !isTally(x) && x.at <= p.at).sort((a, b) => a.at.localeCompare(b.at))[0];
+      const sr = src && reqById.get(src.req_id);
+      if (sr) m.set(p.req_id, runOf(runs, sr.week, sr.at));
+    }
+    return m;
+  }, [h, runs]);
+  const reqRun = (r: { id?: number; week: string; at: string }) => (r.id !== undefined && tallyRun.get(r.id)) || runOf(runs, r.week, r.at);
   const runNs = Array.from(new Set((h?.requests || []).filter((r) => !r.cancelled_at && (!pickId || r.week === pickId)).map(reqRun))).sort((a, b) => a - b);
   const shownReqs = (h?.requests || []).filter((r) => (!pickId || r.week === pickId) && (!runSel || reqRun(r) === runSel));
   const live = shownReqs.filter((r) => !r.cancelled_at);

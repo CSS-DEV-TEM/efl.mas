@@ -725,7 +725,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 133; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 134; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -2015,12 +2015,24 @@ async function handleExt(env: Env, req: Request, p: string) {
  * go to the plant. So for that Pick the count starts at the ZMMBE that was current when its first run began: released
  * QI / Block can be picked, a roll already picked is not counted as UR a second time.
  */
+const zBaseMemo = new Map<string, { v: string; t: number }>();
 async function zBaseAt<T extends string | null | undefined>(env: Env, rid: string | null | undefined, zAt: T): Promise<T | string> {
   if (!rid || !zAt) return zAt;
+  // the same Pick and ZMMBE time always give the same answer: kept a minute (Pick all matched asks for every line)
+  const mk = `${env.DIV ?? ''}|${rid}|${zAt}`, m = zBaseMemo.get(mk);
+  if (m && Date.now() - m.t < 60e3) return m.v;
+  const v = await zBaseAt0(env, rid, zAt);
+  if (zBaseMemo.size > 500) zBaseMemo.clear();
+  zBaseMemo.set(mk, { v: String(v), t: Date.now() });
+  return v;
+}
+async function zBaseAt0<T extends string | null | undefined>(env: Env, rid: string, zAt: T): Promise<T | string> {
   try {
     const r1 = await env.DB.prepare('SELECT started_at FROM pick_run WHERE rid = ? AND n = 1').bind(rid).first<{ started_at: string }>();
     if (!r1 || String(r1.started_at) >= String(zAt)) return zAt;
-    const z0 = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') AND uploaded_at <= ?2").bind(rid, r1.started_at).first<{ at: string | null }>())?.at;
+    // the Pick's own ZMMBE when it has one (as the rest of the system reads it), else the shared one
+    const own = await env.DB.prepare("SELECT 1 FROM uploads WHERE src = 'zmmbe' AND rid = ? LIMIT 1").bind(rid).first();
+    const z0 = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid = ?1 AND uploaded_at <= ?2").bind(own ? rid : '', r1.started_at).first<{ at: string | null }>())?.at;
     return z0 && z0 < String(zAt) ? z0 : zAt;
   } catch { return zAt; }
 }
@@ -2056,6 +2068,12 @@ async function handleRepick(env: Env, req: Request) {
       return json({ ok: true, n: 1, first: true, newRun: true, base: base.length });
     }
     // a report uploaded (for this Pick, or shared) since the last run began: the balance pick is a new run
+    // a line that came into the Pick after its first run: its first UR is as at the first run it is in (lines with one are kept)
+    {
+      const at = now();
+      const add = (b.base || []).filter((x) => x && typeof x.key === 'string').slice(0, 3000).map((x) => env.DB.prepare('INSERT OR IGNORE INTO ur_base (rid, key, date, qty, ur, qi, block, at) VALUES (?,?,?,?,?,?,?,?)').bind(rid, x.key, x.date ?? '', num(x.qty), num(x.ur), num(x.qi), num(x.block), at));
+      for (let i = 0; i < add.length; i += 90) await env.DB.batch(add.slice(i, i + 90));
+    }
     const up = await env.DB.prepare("SELECT COUNT(*) n FROM uploads WHERE rid IN (?1, '') AND uploaded_at > ?2").bind(rid, last.started_at).first<{ n: number }>();
     if (!Number(up?.n)) return json({ ok: true, n: last.n, first: last.n === 1, newRun: false });
     const n = Number(last.n) + 1;
@@ -5349,15 +5367,16 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
   const planQty = r3(Number(line.qty));
   // the same SO / LI / Item on other lines of this plan (a week plan has it on several days): what they picked since the ZMMBE
   // upload is not in its UR yet — taken off this line's UR, so the UR is never picked twice
-  const zAt0 = await zBaseAt(env, week, (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(srid).first<{ at: string | null }>())?.at ?? '');
+  // (the same ZMMBE time for both counts below — read once)
+  const zAtL = await zBaseAt(env, week, (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(srid).first<{ at: string | null }>())?.at ?? null);
+  const zAt0 = zAtL ?? '';
   const otherAfter = r3(Number((await env.DB.prepare("SELECT COALESCE(SUM(qty), 0) q FROM picks WHERE week = ?1 AND substr(line, 1, length(?2) + 1) = ?2 || '|' AND line <> ?3 AND cancelled_at IS NULL AND at > ?4").bind(week, key, lineId, zAt0).first<{ q: number }>())?.q ?? 0));
   const urFree = Math.max(0, r3(urTotal - otherAfter));
   if (otherAfter > 1e-9) steps.push(`${otherAfter} of this SO / LI / Item was picked for its other plan line(s) since the ZMMBE upload: UR ${urTotal} − ${otherAfter} = ${urFree} for this line.`);
   // 1. what to pick: the plan QTY itself (less what this line already picked), at most the warehouse UR.
   // ALRADY SEND / POSIBAL PENDING are report columns only — they do not lower the QTY to pick.
   // The UR: picks saved before the ZMMBE upload are already out of it; picks after it are not yet (taken off here).
-  // v197: a ZMMBE uploaded again after the Pick's first run still holds the rolls picked since the first one (zBaseAt)
-  const zAtL = await zBaseAt(env, week, (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zmmbe' AND rid IN (?1, '') ORDER BY (rid = ?1) DESC").bind(srid).first<{ at: string | null }>())?.at ?? null);
+  // v197: a ZMMBE uploaded again after the Pick's first run still holds the rolls picked since the first one (zBaseAt — zAtL above)
   const afterL = zAtL ? Number((await env.DB.prepare('SELECT COALESCE(SUM(qty), 0) q FROM picks WHERE week = ? AND line = ? AND cancelled_at IS NULL AND at > ?').bind(week, lineId, zAtL).first<{ q: number }>())?.q ?? 0) : pickedLine;
   const leftL = Math.max(0, r3(Math.min(planQty - pickedLine, urFree - afterL)));
   let need = r3(pickedLine + leftL);
