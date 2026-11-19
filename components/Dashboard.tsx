@@ -82,7 +82,7 @@ export function repickOf(ls: Line[], d: RepickData) {
   const base = new Map(d.base.map((b) => [`${b.rid}|${b.key}|${b.date}`, b]));
   const close = new Map(d.close.map((c) => [`${c.rid}|${c.key}|${c.date}`, c]));
   const closed: Record<BalCat, number> = { block: 0, qi: 0, dispatched: 0, shortage: 0 };
-  let firstUr = 0, firstQi = 0, firstBlock = 0, newUr = 0, qiRel = 0, blockRel = 0, reLines = 0, reQty = 0, based = 0, closedN = 0, balance = 0;
+  let firstUr = 0, firstQi = 0, firstBlock = 0, newUr = 0, qiRel = 0, blockRel = 0, reLines = 0, reQty = 0, based = 0, closedN = 0, balance = 0, urBalance = 0, urBalLines = 0;
   const open: { l: Line; bal: number }[] = [], closedLines: Line[] = [];
   for (const l of ls) {
     const ref = repRef(l), b = base.get(ref), c = close.get(ref);
@@ -94,13 +94,16 @@ export function repickOf(ls: Line[], d: RepickData) {
     if (c) { closed[c.cat] = (closed[c.cat] ?? 0) + c.qty; closedN++; closedLines.push(l); continue; }
     // the balance of the line: plan QTY − dispatched
     const lb = Math.max(0, q - (Number(l.dispatched) || 0));
+    // v209: the Plan UR balance of the line: its Plan UR (QTY, at most its UR) − dispatched
+    const ub = Math.max(0, Math.min(q, ur) - (Number(l.dispatched) || 0));
+    urBalance += ub; if (ub > 1e-9) urBalLines++;
     balance += lb;
     if (lb > 1e-9) open.push({ l, bal: lb });
     if (b && !isDone(l)) { const can = Math.max(0, Math.min(q - (Number(l.picked) || 0), Math.max(0, Number(urLeftOf(l)) || 0))); if (can > 1e-9) { reLines++; reQty += can; } }
   }
   const runs = Math.max(0, ...d.runs.filter((r) => ls.some((l) => l.week === r.rid)).map((r) => r.n));
   const jobs = Array.from(new Set(d.jobs.filter((j) => ls.some((l) => l.week === j.rid)).map((j) => j.job_id)));
-  return { jobs, based, firstUr, firstQi, firstBlock, newUr, qiRel, blockRel, reLines, reQty, runs, closed, closedN, closedQty: closed.block + closed.qi + closed.dispatched + closed.shortage, balance, open, closedLines };
+  return { jobs, based, firstUr, firstQi, firstBlock, newUr, qiRel, blockRel, reLines, reQty, runs, closed, closedN, closedQty: closed.block + closed.qi + closed.dispatched + closed.shortage, balance, urBalance, urBalLines, open, closedLines };
 }
 /** the Picked card: QTY of the saved picks and the SO / LI lines with a pick */
 export const pickedOf = (ls: Line[]) => ({ qty: ls.reduce((x, r) => x + (r.picked ?? 0), 0), lines: ls.filter((r) => (r.picked ?? 0) > 0).length });

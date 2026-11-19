@@ -97,11 +97,13 @@ export default function PlantSummary({ rows, plants, received = [], week, day, c
     { card: 'KFC / PFC UR', tip: 'UR at the KFC and PFC storage locations', subs: [
       { h: 'KFC', get: (k) => ({ v: k.t.kfc_ur, k: 'q' }) }, { h: 'PFC', get: (k) => ({ v: k.t.pfc_ur, k: 'q' }) }] },
     // v202: Plan UR and Dispatched in one place — what the UR covers of the plan, what is dispatched of it, and what is left
-    { card: 'Plan UR · Dispatched', tip: "Plan UR: each line's QTY, at most its UR (Total − QI − Block − Assigned) · Dispatched: QTY dispatched and lines complete · Balance: Plan UR − Dispatched", subs: [
+    { card: 'Plan UR · Dispatched', tip: "Plan UR: each line's QTY, at most its UR (Total − QI − Block − Assigned) · Dispatched: QTY dispatched and lines complete · Plan UR balance: Plan UR − Dispatched · Balance: Plan QTY − Dispatched", subs: [
       { h: 'Plan UR', get: (k) => ({ v: k.planUr.v, k: 'q', cls: 'strong' }) }, { h: 'Lines short', get: (k) => ({ v: k.planUr.short, k: 'n', cls: k.planUr.short ? 'warn-t' : '' }) },
       { h: 'Dispatched', get: (k) => ({ v: k.t.dispatched + k.rp.closed.dispatched, k: 'q', cls: 'strong', title: k.rp.closed.dispatched ? `incl. ${fmt(k.rp.closed.dispatched, 2)} completed by hand` : undefined }) }, { h: 'Lines', get: (k) => ({ v: k.t.dispatchedLines, k: 'n' }) },
       // v203: the balance of each open line (plan QTY − dispatched); a line completed by hand is 0 (its balance is in the category chosen)
-      { h: 'Balance', get: (k) => ({ v: k.rp.balance, k: 'q', cls: 'strong' }) },
+      // v209: what the Plan UR still has to send — each line's Plan UR − dispatched (a line completed by hand is 0)
+      { h: 'Plan UR balance', get: (k) => ({ v: k.rp.urBalance, k: 'q', cls: 'strong', title: `Plan UR − Dispatched, line by line · ${k.rp.urBalLines} line${k.rp.urBalLines === 1 ? '' : 's'} with a balance` }) },
+      { h: 'Balance', get: (k) => ({ v: k.rp.balance, k: 'q', cls: 'strong', title: 'Plan QTY − Dispatched (the balance Complete closes)' }) },
       { h: 'Completed', get: (k) => ({ v: k.rp.closedQty || null, k: 'q', cls: k.rp.closedN ? 'done-t' : '', title: k.rp.closedN ? `${k.rp.closedN} line${k.rp.closedN === 1 ? '' : 's'} completed by hand — ${BAL_CATS.filter((x) => k.rp.closed[x.v] > 1e-9).map((x) => `${x.label} ${fmt(k.rp.closed[x.v], 2)}`).join(' · ')}` : undefined }) }] },
     // v203: the first Pick all matched kept each line's UR / QI / Block; what the reports uploaded since then add, and what can be picked again
     { card: 'First UR · Re-pick', tip: 'First UR / QI / Block: as at the first Pick all matched of the Pick · New UR: UR uploaded since then · QI / Block released: since then · Re-pick: open balance, at most the UR left · Runs: Pick all matched runs (2+ = balance picks)', subs: [
