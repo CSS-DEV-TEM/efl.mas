@@ -2045,3 +2045,22 @@ input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, te
 .ka-dlg label input { width: auto; margin: 0; flex: none; }
 .ka-dlg label input[type="checkbox"] { width: 16px !important; min-width: 16px !important; height: 16px; padding: 0 !important; }
 .ka-dlg label, .ka-dlg label span, .ka-dlg label b, .ka-dlg label small { text-align: left !important; }
+
+/* v206: Responsible and PLANT stay in place while the summary scrolls sideways */
+.psum.psum-cards .fz1, .psum.psum-cards .fz2 { position: sticky; z-index: 2; }
+.psum.psum-cards .fz1 { left: 0; width: 120px; min-width: 120px; max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
+.psum.psum-cards .fz2 { left: 120px; min-width: 150px; box-shadow: 2px 0 0 #ff8a3d; }
+.psum.psum-cards thead th.fz1, .psum.psum-cards thead th.fz2 { z-index: 4; }
+.psum.psum-cards tbody td.fz1, .psum.psum-cards tbody td.fz2 { background: linear-gradient(var(--panel), var(--panel)), #fff; }
+:root[data-theme="dark"] .psum.psum-cards tbody td.fz1, :root[data-theme="dark"] .psum.psum-cards tbody td.fz2 { background: linear-gradient(var(--panel), var(--panel)), #1f1d18; }
+.psum.psum-cards tbody tr:hover td.fz1, .psum.psum-cards tbody tr:hover td.fz2 { background: linear-gradient(var(--accent-soft), var(--accent-soft)), linear-gradient(var(--panel), var(--panel)), #fff; }
+
+/* v206: picked pallets (Korber) and the data API */
+.used-card .table-head { gap: 14px; align-items: flex-start; }
+.used-tbl td, .used-tbl th { white-space: nowrap; }
+.api-make { display: flex; gap: 8px; margin: 10px 0; }
+.api-make input { flex: 1; }
+.api-made .api-key { display: flex; gap: 8px; align-items: center; margin-top: 6px; flex-wrap: wrap; }
+.api-made code { font-size: 13px; padding: 4px 8px; background: rgba(0,0,0,.06); border-radius: 6px; word-break: break-all; }
+.api-ex code { font-size: 12px; word-break: break-all; }
+.psum.psum-cards thead th.fz1, .psum.psum-cards thead th.fz2 { z-index: 8 !important; background: #111; }

@@ -143,7 +143,7 @@ function DataPage() {
 }
 
 interface PalletPick { id: number; day: string; plan: string; so: string; li: string; item: string; qty: number; roll_qty: number; partial: number; shade: string | null; batch: string | null; note: string | null; by_user: string; at: string; seq: number | null; pick_no: string | null; kind: string | null; auto: number | null }
-interface PalletRes { pallet: string; korber: { item: string; lot: string | null; qty: number; location: string | null } | null; picks: PalletPick[]; rejects: { id: number; day: string; plan: string; so: string; li: string; qty: number; reason: string; by_user: string; replaced_by: string | null }[]; picked: number; base: number; left: number }
+interface PalletRes { pallet: string; korber: { item: string; lot: string | null; qty: number; location: string | null } | null; picks: PalletPick[]; rejects: { id: number; day: string; plan: string; so: string; li: string; qty: number; reason: string; by_user: string; replaced_by: string | null }[]; picked: number; base: number; left: number; /** v206: picked outside the system (Korber file of picked pallets) */ used?: { qty: number; file_name: string; by_user: string; at: string }[]; usedQty?: number }
 /** A Korber pallet's history (every pick of it, all days / Picks / users) — and, for Admin / Head, delete it. */
 function PalletHistory({ boss, toast }: { boss: boolean; toast: (m: string) => void }) {
   const [q, setQ] = useState('');
@@ -181,7 +181,8 @@ function PalletHistory({ boss, toast }: { boss: boolean; toast: (m: string) => v
             <div><span>Pallet</span><b className="mono" style={{ fontSize: 15 }}>{res.pallet}</b><small>{res.korber ? `${res.korber.item} · lot ${res.korber.lot ?? '–'} · ${res.korber.location ?? ''}` : 'not in a Korber upload'}</small></div>
             <div><span>Roll QTY</span><b>{fmtQty(res.base)}</b></div>
             <div><span>Picked</span><b>{fmtQty(res.picked)}</b><small>{res.picks.length} pick{res.picks.length === 1 ? '' : 's'}</small></div>
-            <div className={res.left > 1e-9 && res.picked > 0 ? 'em' : ''}><span>{res.picked > 0 ? (res.left > 1e-9 ? 'Cut roll — balance' : 'Picked in full') : 'Not picked'}</span><b>{fmtQty(res.left)}</b></div>
+            {res.used?.length ? <div><span>Picked outside</span><b>{fmtQty(res.usedQty ?? 0)}</b><small title={res.used.map((u) => `${u.file_name} · ${u.by_user} · ${new Date(u.at).toLocaleString()} · ${fmtQty(u.qty)}`).join('\n')}>{res.used.map((u) => u.file_name).filter((v, i, a) => a.indexOf(v) === i).join(', ')}</small></div> : null}
+            <div className={res.left > 1e-9 && (res.picked > 0 || (res.usedQty ?? 0) > 0) ? 'em' : ''}><span>{res.picked > 0 || (res.usedQty ?? 0) > 0 ? (res.left > 1e-9 ? 'Cut roll — balance' : 'Picked in full') : 'Not picked'}</span><b>{fmtQty(res.left)}</b></div>
           </div>
           {!res.picks.length && !res.rejects.length ? <p className="muted">This pallet has no pick history.</p> : (
             <div className="table-wrap" style={{ maxHeight: 340, marginTop: 8 }}>

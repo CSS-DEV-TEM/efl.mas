@@ -141,8 +141,8 @@ export default function PlantSummary({ rows, plants, received = [], week, day, c
     const k = K(r);
     return (
       <tr key={r.code} className={isTotal ? 'total' : ''} onClick={isTotal ? undefined : () => onPlant(r.plantCode)} title={isTotal ? '' : `Show ${r.name} lines`}>
-        <td>{isTotal ? '' : r.responsible}</td>
-        <td className="pname">{r.name}{!isTotal && !r.name.startsWith(r.plantCode) && <small>{r.plantCode}</small>}{!isTotal && k && k.rp.jobs.length > 0 && <small className="psum-job">JOB {k.rp.jobs.join(', ')}</small>}</td>
+        <td className="fz1">{isTotal ? '' : r.responsible}</td>
+        <td className="pname fz2">{r.name}{!isTotal && !r.name.startsWith(r.plantCode) && <small>{r.plantCode}</small>}{!isTotal && k && k.rp.jobs.length > 0 && <small className="psum-job">JOB {k.rp.jobs.join(', ')}</small>}</td>
         {COLS.map((g, gi) => g.subs.map((sub, si) => { const cl = k ? sub.get(k, r) : { v: null }; return <td key={`${gi}.${si}`} className={`n ${si === 0 ? 'g0' : ''} ${cl.cls || ''}${fl(r.code, g.card + sub.h)}`} title={cl.title}>{show(cl)}</td>; }))}
         {kpi && <td className="g0 psum-act">{!isTotal && k && canEdit && <>
           {k.rp.open.length > 0 && <button type="button" className="btn sm" onClick={(e) => { e.stopPropagation(); setDone({ r, k }); }} title="Complete the balance of this row by hand: Block, QI, Dispatched or Shortage">✓ Complete</button>}
@@ -177,7 +177,7 @@ export default function PlantSummary({ rows, plants, received = [], week, day, c
       <div className="psum-wrap">
         <table className="psum psum-cards">
           <thead>
-            <tr className="grp"><th rowSpan={2}>Responsible</th><th rowSpan={2}>PLANT</th>
+            <tr className="grp"><th rowSpan={2} className="fz1">Responsible</th><th rowSpan={2} className="fz2">PLANT</th>
               {COLS.map((g) => <th key={g.card} colSpan={g.subs.length} className="g0" title={g.tip} data-nofilter>{g.card}</th>)}
               {kpi && <th rowSpan={2} className="g0" data-nofilter title="Complete the balance by hand (Block / QI / Dispatched / Shortage) — or undo it">Balance</th>}</tr>
             <tr className="sub">{COLS.flatMap((g) => g.subs.map((x, i) => <th key={g.card + x.h} className={`n ${i === 0 ? 'g0' : ''}`} data-nofilter>{x.h}</th>))}</tr>

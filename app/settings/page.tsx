@@ -6,6 +6,7 @@ import { ClearDatabase, UsersAdmin } from '@/components/AdminUsers';
 import BackupRestore from '@/components/BackupRestore';
 import DataManager from '@/components/DataManager';
 import Maintenance from '@/components/Maintenance';
+import DataApi from '@/components/DataApi';
 import { api } from '@/lib/api';
 import type { PlantInfo } from '@/lib/summary';
 
@@ -19,7 +20,7 @@ export interface ManualBlock { on: boolean; until: string | null; msg: string; b
 export interface BlockLoc { wh: string; loc: string; note?: string }
 export interface PlantPair { plant: string; soPlant: string; link: string }
 
-const TABS = [['plants', 'Plants'], ['zmmbe', 'ZMMBE plants'], ['reports', 'Locations'], ['time', 'Time setup'], ['plans', 'Plans (data change)'], ['pick', 'Pick rules'], ['users', 'Users & roles'], ['data', 'Data manager'], ['backup', 'Backup & Restore'], ['database', 'Database'], ['maint', 'Maintenance']] as const;
+const TABS = [['plants', 'Plants'], ['zmmbe', 'ZMMBE plants'], ['reports', 'Locations'], ['time', 'Time setup'], ['plans', 'Plans (data change)'], ['pick', 'Pick rules'], ['users', 'Users & roles'], ['data', 'Data manager'], ['backup', 'Backup & Restore'], ['database', 'Database'], ['api', 'Data API'], ['maint', 'Maintenance']] as const;
 type Tab = (typeof TABS)[number][0];
 
 /** Admin only: the system settings. Head accounts can do everything else but cannot open this page. */
@@ -48,6 +49,7 @@ function Settings() {
       {tab === 'data' && <DataManager toast={toast} />}
       {tab === 'backup' && <BackupRestore toast={toast} />}
       {tab === 'database' && <ClearDatabase toast={toast} />}
+      {tab === 'api' && <DataApi toast={toast} />}
       {tab === 'maint' && <Maintenance toast={toast} />}
     </main>
   );

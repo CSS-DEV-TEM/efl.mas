@@ -189,6 +189,11 @@ const BASE_SCHEMA = [
   'CREATE TABLE IF NOT EXISTS pick_run (rid TEXT NOT NULL, n INTEGER NOT NULL, started_at TEXT NOT NULL, by_user TEXT, PRIMARY KEY (rid, n))',
   `CREATE TABLE IF NOT EXISTS ur_base (rid TEXT NOT NULL, key TEXT NOT NULL, date TEXT NOT NULL DEFAULT '', qty REAL, ur REAL, qi REAL, block REAL, at TEXT, PRIMARY KEY (rid, key, date))`,
   `CREATE TABLE IF NOT EXISTS bal_close (rid TEXT NOT NULL, key TEXT NOT NULL, date TEXT NOT NULL DEFAULT '', plant TEXT, cat TEXT NOT NULL, qty REAL NOT NULL, by_user TEXT, at TEXT, PRIMARY KEY (rid, key, date))`,
+  // v196 (API 132): pallets picked outside the system (a Korber file of picked pallets) and the keys of the data API
+  'CREATE TABLE IF NOT EXISTS pallet_used (id INTEGER PRIMARY KEY AUTOINCREMENT, batch TEXT NOT NULL, pallet TEXT NOT NULL, item TEXT, lot TEXT, qty REAL NOT NULL, file_name TEXT, by_user TEXT, at TEXT NOT NULL)',
+  'CREATE INDEX IF NOT EXISTS pallet_used_pallet ON pallet_used(pallet)',
+  'CREATE INDEX IF NOT EXISTS pallet_used_batch ON pallet_used(batch)',
+  'CREATE TABLE IF NOT EXISTS api_key (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, prefix TEXT NOT NULL, hash TEXT NOT NULL UNIQUE, created_by TEXT, created_at TEXT, last_used_at TEXT, uses INTEGER DEFAULT 0, revoked_at TEXT)',
   'CREATE TABLE IF NOT EXISTS picks (id INTEGER PRIMARY KEY AUTOINCREMENT, req_id INTEGER NOT NULL, day TEXT, week TEXT, line TEXT, so TEXT, li TEXT, item TEXT, pallet TEXT NOT NULL, qty REAL NOT NULL, roll_qty REAL, partial INTEGER DEFAULT 0, shade TEXT, lot TEXT, insp_lot TEXT, batch TEXT, note TEXT, by_user TEXT, at TEXT, cancelled_at TEXT, cancelled_by TEXT, korber TEXT, tn TEXT)',
   `CREATE TABLE IF NOT EXISTS plan ( key TEXT NOT NULL, so TEXT NOT NULL, li TEXT NOT NULL, item TEXT NOT NULL, date TEXT, qty REAL NOT NULL DEFAULT 0, plant TEXT, remarks TEXT, row_no INTEGER NOT NULL , week TEXT, src_user TEXT, src_at TEXT, owner TEXT, plan_type TEXT DEFAULT 'week', follow_of TEXT, plan_date TEXT)`,
   'CREATE TABLE IF NOT EXISTS plan_day (day TEXT PRIMARY KEY, created_by TEXT, created_at TEXT)',
@@ -271,7 +276,7 @@ const BASE_SCHEMA = [
 ];
 /** per system (each has its own database) */
 const schemaDone = new Set<string>();
-const SCHEMA_V = '43';
+const SCHEMA_V = '44';
 async function ensureSchema(env: Env) {
   const dk = env.DIV || 'active';
   if (schemaDone.has(dk) || !env.DB) return;
@@ -536,6 +541,13 @@ async function ensureSchema(env: Env) {
     'CREATE INDEX IF NOT EXISTS zinr_doc_rid ON zinr(mat_doc, rid)', 'CREATE INDEX IF NOT EXISTS zroll_doc_rid_doc ON zroll_doc(rid, mat_doc)']) {
     try { await env.DB.prepare(q).run(); } catch { /* already there */ }
   }
+  // schema 44: pallets picked outside the system, data API keys
+  await env.DB.batch([
+    env.DB.prepare('CREATE TABLE IF NOT EXISTS pallet_used (id INTEGER PRIMARY KEY AUTOINCREMENT, batch TEXT NOT NULL, pallet TEXT NOT NULL, item TEXT, lot TEXT, qty REAL NOT NULL, file_name TEXT, by_user TEXT, at TEXT NOT NULL)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS pallet_used_pallet ON pallet_used(pallet)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS pallet_used_batch ON pallet_used(batch)'),
+    env.DB.prepare('CREATE TABLE IF NOT EXISTS api_key (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, prefix TEXT NOT NULL, hash TEXT NOT NULL UNIQUE, created_by TEXT, created_at TEXT, last_used_at TEXT, uses INTEGER DEFAULT 0, revoked_at TEXT)'),
+  ]);
   // schema 43: JOB ID, Pick all matched runs, first UR, balances completed by hand
   await env.DB.batch([
     env.DB.prepare('CREATE TABLE IF NOT EXISTS pick_job (rid TEXT PRIMARY KEY, job_id TEXT, by_user TEXT, at TEXT)'),
@@ -650,7 +662,7 @@ function corsHeaders(env: Env, req: Request): Record<string, string> {
   return {
     'Access-Control-Allow-Origin': allow,
     'Access-Control-Allow-Methods': 'GET,POST,PATCH,DELETE,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type,Authorization,X-Div',
+    'Access-Control-Allow-Headers': 'Content-Type,Authorization,X-Div,X-API-Key',
     'Access-Control-Max-Age': '86400',
     // v126: the website reads the data meter of each answer (rows read / written, queries) for the live data counter
     'Access-Control-Expose-Headers': 'x-d1-rows-read,x-d1-rows-written,x-d1-queries',
@@ -713,7 +725,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 131; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 132; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1301,7 +1313,7 @@ async function cached<T>(env: Env, k: string, make: () => Promise<T>): Promise<T
  * Never in a backup: the users and their passwords, the login key and the database link (config).
  */
 // the original Excel files are not in a backup (they are big; the reports' data is)
-const BACKUP_SKIP = new Set(['users', 'presence', 'live_day', 'cand_cache', 'sqlite_sequence', '_cf_METADATA', '_cf_KV', 'upload_file', 'upload_file_part']);
+const BACKUP_SKIP = new Set(['users', 'api_key', 'presence', 'live_day', 'cand_cache', 'sqlite_sequence', '_cf_METADATA', '_cf_KV', 'upload_file', 'upload_file_part']);
 const CONFIG_SECRET = "k IN ('jwt_secret', 'database_url', 'schema_v', 'rev', 'unlock_pw', 'maint', 'maint_pw') OR k LIKE 'c\\_%' ESCAPE '\\'";
 async function backupTables(env: Env) {
   const t = (await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\' ORDER BY name").all<{ name: string }>()).results;
@@ -1853,6 +1865,149 @@ async function handleZroll(env: Env, req: Request) {
  * Nothing here changes a pick or the matching: the picks of a run are the picks saved after it began.
  */
 const BAL_CATS = ['block', 'qi', 'dispatched', 'shortage'];
+/**
+ * v196 (API 132): a Korber file of pallets picked OUTSIDE this system (only those pallets; Actual Qty = the QTY taken).
+ * Each row counts as a pick of that pallet (palletPicksMany), so the system does not pick that QTY again — every Pick,
+ * every day. An upload is one batch: it can be removed (undo) and the QTY is free again.
+ *   POST   /api/used {fileName, rows:[{pallet,item,lot,qty}]}  → {batch, pallets, qty, over, unknown}
+ *   GET    /api/used                                           → the uploads (batches); ?batch= its rows
+ *   DELETE /api/used?batch=                                    → undo
+ */
+async function handleUsed(env: Env, req: Request) {
+  const url = new URL(req.url);
+  if (req.method === 'GET') {
+    await requireUser(env, req);
+    const b = url.searchParams.get('batch');
+    if (b) return json({ rows: (await env.DB.prepare('SELECT pallet, item, lot, qty FROM pallet_used WHERE batch = ? ORDER BY id').bind(b).all<Row>()).results });
+    return json({ batches: (await env.DB.prepare('SELECT batch, MAX(file_name) file_name, MAX(by_user) by_user, MAX(at) at, COUNT(*) n, ROUND(SUM(qty), 3) qty FROM pallet_used GROUP BY batch ORDER BY MAX(at) DESC LIMIT 200').all<Row>()).results });
+  }
+  const s = await requireUser(env, req, 'editor');
+  if (req.method === 'DELETE') {
+    const b = url.searchParams.get('batch') || '';
+    const n = await env.DB.prepare('SELECT COUNT(*) n, ROUND(SUM(qty), 3) q, MAX(file_name) f FROM pallet_used WHERE batch = ?').bind(b).first<Row>();
+    if (!Number(n?.n)) throw new HttpError(404, 'That upload is not there any more.');
+    await env.DB.batch([
+      env.DB.prepare('DELETE FROM pallet_used WHERE batch = ?').bind(b),
+      env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'picked-pallets', `Removed ${n?.f ?? ''}: ${n?.n} pallet${Number(n?.n) === 1 ? '' : 's'}, ${n?.q} QTY free again`),
+    ]);
+    await broadcast(env, { type: 'data', src: 'used', by: s.u, rows: Number(n?.n) });
+    return json({ ok: true, removed: Number(n?.n), qty: Number(n?.q) });
+  }
+  if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed.');
+  const b = (await req.json()) as { fileName?: string; rows?: { pallet?: unknown; item?: unknown; lot?: unknown; qty?: unknown }[] };
+  const rows = (b.rows || []).map((r) => ({ pallet: up(r.pallet), item: normId(r.item), lot: String(r.lot ?? '').trim(), qty: r3(Number(String(r.qty ?? '').replace(/,/g, '')) || 0) })).filter((r) => r.pallet && r.qty > 0);
+  if (!rows.length) throw new HttpError(400, 'No pallet with an Actual Qty above 0 in the file.');
+  if (rows.length > 20000) throw new HttpError(400, 'Too many rows (20 000 at most).');
+  // what each pallet has now (before this upload): QTY over it is still saved, and reported
+  const ppm = await palletPicksMany(env, Array.from(new Set(rows.map((r) => r.pallet))));
+  const kq = new Map<string, number>();
+  const pals = Array.from(new Set(rows.map((r) => r.pallet)));
+  for (let i = 0; i < pals.length; i += 400) for (const k of (await env.DB.prepare('SELECT pallet, MAX(qty) q FROM korber WHERE pallet IN (SELECT value FROM json_each(?)) GROUP BY pallet').bind(JSON.stringify(pals.slice(i, i + 400))).all<Row>()).results) kq.set(up(k.pallet), Number(k.q) || 0);
+  let over = 0, unknown = 0;
+  const sum = new Map<string, number>();
+  for (const r of rows) sum.set(r.pallet, r3((sum.get(r.pallet) ?? 0) + r.qty));
+  for (const [pl, q] of Array.from(sum.entries())) {
+    const h = ppm.get(pl);
+    const have = h && h.picks.length ? Math.max(0, r3((h.base ?? h.full ?? 0) - h.before)) : kq.get(pl);
+    if (have === undefined) unknown++; else if (q > have + 0.0005) over++;
+  }
+  const at = now(), batch = 'U' + Date.now().toString(36), fn = String(b.fileName || 'Korber picked pallets').slice(0, 120);
+  const stmts = rows.map((r) => env.DB.prepare('INSERT INTO pallet_used (batch, pallet, item, lot, qty, file_name, by_user, at) VALUES (?,?,?,?,?,?,?,?)').bind(batch, r.pallet, r.item || null, r.lot || null, r.qty, fn, s.u, at));
+  const qty = r3(rows.reduce((t, r) => t + r.qty, 0));
+  stmts.push(env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(at, s.u, 'picked-pallets', `${fn}: ${sum.size} pallet${sum.size === 1 ? '' : 's'}, ${qty} QTY saved as picked (not picked again)`));
+  for (let i = 0; i < stmts.length; i += 90) await env.DB.batch(stmts.slice(i, i + 90));
+  await broadcast(env, { type: 'data', src: 'used', by: s.u, rows: rows.length });
+  return json({ ok: true, batch, pallets: sum.size, rows: rows.length, qty, over, unknown });
+}
+
+/**
+ * v196 (API 132): the data API — read-only, with an API key the Admin makes in Settings (shown once, kept only as a hash,
+ * revoked any time). Users / passwords / keys are never in it.
+ *   GET /api/ext/v1                    → what there is
+ *   GET /api/ext/v1/plan   ?type=day&day=YYYY-MM-DD[&round=<Pick>]  |  ?type=week&week=YYYY-Www   — plan lines + status
+ *   GET /api/ext/v1/picks  ?day=YYYY-MM-DD | ?from=&to= (pick days, 62 at most) [&pick=<Pick>] [&cancelled=1]  — picked rolls
+ *   &format=csv for CSV (default JSON) · &div=kreeda for MAS Kreeda · the key: header X-API-Key (or Authorization: Bearer, or &key=)
+ */
+const sha256hex = async (t: string) => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(t)))).map((b) => b.toString(16).padStart(2, '0')).join('');
+async function handleApiKeys(env: Env, req: Request) {
+  const s = await requireUser(env, req, 'admin');
+  const db = env.MAIN ?? env.DB;
+  if (req.method === 'GET') return json({ keys: (await db.prepare('SELECT id, name, prefix, created_by, created_at, last_used_at, uses, revoked_at FROM api_key ORDER BY id DESC').all<Row>()).results });
+  if (req.method === 'POST') {
+    const b = (await req.json()) as { name?: string };
+    const name = String(b.name ?? '').trim().slice(0, 60);
+    if (!name) throw new HttpError(400, 'Give the key a name (who / what uses it).');
+    const rnd = b64url(crypto.getRandomValues(new Uint8Array(24)).buffer as ArrayBuffer).replace(/[^A-Za-z0-9]/g, '');
+    const prefix = rnd.slice(0, 8), key = `mas_${prefix}_${rnd.slice(8)}`;
+    await db.batch([
+      db.prepare('INSERT INTO api_key (name, prefix, hash, created_by, created_at) VALUES (?,?,?,?,?)').bind(name, prefix, await sha256hex(key), s.u, now()),
+      db.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'api-key', `Made data API key "${name}" (mas_${prefix}_…)`),
+    ]);
+    return json({ ok: true, name, key, prefix });
+  }
+  if (req.method === 'DELETE') {
+    const id = Number(new URL(req.url).searchParams.get('id'));
+    const k = await db.prepare('SELECT name, prefix FROM api_key WHERE id = ? AND revoked_at IS NULL').bind(id).first<Row>();
+    if (!k) throw new HttpError(404, 'No such key (or revoked already).');
+    await db.batch([
+      db.prepare('UPDATE api_key SET revoked_at = ? WHERE id = ?').bind(now(), id),
+      db.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'api-key', `Revoked data API key "${k.name}" (mas_${k.prefix}_…)`),
+    ]);
+    return json({ ok: true });
+  }
+  throw new HttpError(405, 'Method not allowed.');
+}
+const csvOf = (head: string[], rows: Row[]) => {
+  const q = (v: unknown) => { if (v === null || v === undefined) return ''; const t = String(v); return /[",\n\r]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+  return [head.join(','), ...rows.map((r) => head.map((h) => q(r[h])).join(','))].join('\r\n');
+};
+const PLAN_FIELDS = ['pick', 'job_id', 'plan_type', 'date', 'plant', 'so', 'li', 'item', 'qty', 'ur', 'qi', 'block', 'kfc_ur', 'pfc_ur', 'picked', 'picked_rolls', 'dispatched', 'balance', 'status', 'remarks', 'comment', 'vehicle', 'tn_number', 'tn_qty', 'updated_by', 'updated_at', 'last_pick_at'];
+const PICK_FIELDS = ['pick_id', 'pick_req', 'pick_no', 'pick', 'job_id', 'pick_day', 'at', 'by_user', 'kind', 'so', 'li', 'item', 'pallet', 'lot', 'insp_lot', 'batch', 'shade', 'qty', 'roll_qty', 'partial', 'tn', 'cancelled_at'];
+async function handleExt(env: Env, req: Request, p: string) {
+  if (req.method !== 'GET') throw new HttpError(405, 'The data API is read-only (GET).');
+  const url = new URL(req.url), sp = url.searchParams;
+  const h = req.headers.get('Authorization') || '';
+  const key = (req.headers.get('X-API-Key') || (h.startsWith('Bearer mas_') ? h.slice(7) : '') || sp.get('key') || '').trim();
+  if (!/^mas_[A-Za-z0-9]{8}_[A-Za-z0-9]{10,}$/.test(key)) throw new HttpError(401, 'API key needed: header X-API-Key (Settings → Data API).');
+  const db = env.MAIN ?? env.DB;
+  const k = await db.prepare('SELECT id, name FROM api_key WHERE hash = ? AND revoked_at IS NULL').bind(await sha256hex(key)).first<{ id: number; name: string }>();
+  if (!k) throw new HttpError(401, 'This API key is not valid (or was revoked).');
+  try { await db.prepare('UPDATE api_key SET last_used_at = ?, uses = COALESCE(uses, 0) + 1 WHERE id = ?').bind(now(), k.id).run(); } catch { /* only a count */ }
+  const csv = (sp.get('format') || '').toLowerCase() === 'csv';
+  const out = (name: string, head: string[], rows: Row[], meta: Record<string, unknown>) => csv
+    ? new Response(csvOf(head, rows), { headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `inline; filename="${name}.csv"`, 'Cache-Control': 'no-store' } })
+    : json({ ok: true, ...meta, count: rows.length, fields: head, rows: rows.map((r) => Object.fromEntries(head.map((f) => [f, r[f] ?? null]))) });
+  const jobs = async (rids: string[]) => new Map((rids.length ? (await env.DB.prepare('SELECT rid, job_id FROM pick_job WHERE rid IN (SELECT value FROM json_each(?))').bind(JSON.stringify(Array.from(new Set(rids)))).all<Row>()).results : []).map((j) => [String(j.rid), String(j.job_id)]));
+  const what = p.replace(/^\/api\/ext\/v1\/?/, '');
+  if (!what) return json({ ok: true, api: 'MAS shade tracker data API', version: API_VERSION, key: k.name, system: env.DIV ?? 'active',
+    endpoints: { plan: '/api/ext/v1/plan?type=day&day=YYYY-MM-DD[&round=<Pick id>]  or  ?type=week&week=YYYY-Www', picks: '/api/ext/v1/picks?day=YYYY-MM-DD  or  ?from=YYYY-MM-DD&to=YYYY-MM-DD [&pick=<Pick id>] [&cancelled=1]' },
+    options: { format: 'csv (default json)', div: 'kreeda (default active)', key: 'header X-API-Key: <key>' } });
+  if (what === 'plan') {
+    // the plan lines as the website shows them: the pull plan, read as a read-only user for this one request
+    const type = sp.get('type') === 'week' ? 'week' : 'day';
+    const q = new URLSearchParams({ type });
+    for (const x of ['day', 'week', 'round']) { const v = sp.get(x); if (v) q.set(x, v); }
+    const tok = await signToken(env, { u: `api:${k.name}`, role: 'viewer', exp: Date.now() + 120e3 });
+    const r = await handlePullPlan(env, new Request(`${url.origin}/api/pullplan?${q}`, { headers: { Authorization: `Bearer ${tok}` } }));
+    const d = (await r.json()) as { rows?: Row[]; day?: string | null; week?: string | null; type?: string };
+    const rows0 = d.rows ?? [];
+    const jm = await jobs(rows0.map((x) => String(x.week)));
+    const rows = rows0.map((x) => ({ ...x, pick: x.week, job_id: jm.get(String(x.week)) ?? null, plan_type: type }) as Row);
+    return out(`plan_${type === 'day' ? d.day ?? sp.get('day') ?? '' : d.week ?? sp.get('week') ?? ''}`, PLAN_FIELDS, rows, { type, day: d.day ?? null, week: d.week ?? null });
+  }
+  if (what === 'picks') {
+    const day = sp.get('day'), from = sp.get('from') || day, to = sp.get('to') || day, pick = sp.get('pick');
+    if (!from || !to || !/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) throw new HttpError(400, 'Give ?day=YYYY-MM-DD or ?from=YYYY-MM-DD&to=YYYY-MM-DD (pick days).');
+    if ((Date.parse(to) - Date.parse(from)) / 864e5 > 62) throw new HttpError(400, '62 days at most per call.');
+    const rows0 = (await env.DB.prepare(`SELECT p.id pick_id, p.req_id pick_req, r.pick_no, p.week pick, p.day pick_day, p.at, p.by_user, r.kind, p.so, p.li, p.item, p.pallet, p.lot, p.insp_lot, p.batch, p.shade, p.qty, p.roll_qty, p.partial, p.tn, p.cancelled_at
+      FROM picks p LEFT JOIN pick_req r ON r.id = p.req_id WHERE p.day BETWEEN ?1 AND ?2 AND (?3 IS NULL OR p.week = ?3) AND (?4 = 1 OR p.cancelled_at IS NULL) ORDER BY p.id LIMIT 50001`).bind(from, to, pick, sp.get('cancelled') === '1' ? 1 : 0).all<Row>()).results;
+    if (rows0.length > 50000) throw new HttpError(400, 'More than 50 000 rows: ask for fewer days.');
+    const jm = await jobs(rows0.map((x) => String(x.pick)));
+    return out(`picks_${from}${to !== from ? '_' + to : ''}`, PICK_FIELDS, rows0.map((x) => ({ ...x, job_id: jm.get(String(x.pick)) ?? null }) as Row), { from, to, pick: pick ?? null });
+  }
+  throw new HttpError(404, 'Unknown data API path — GET /api/ext/v1 lists them.');
+}
+
 async function handleRepick(env: Env, req: Request) {
   if (req.method === 'GET') {
     await requireUser(env, req);
@@ -2430,7 +2585,7 @@ const CLEAR_GROUPS: Record<string, { label: string; tables: string[] }> = {
   plan: { label: 'Day plans (days, Picks, plan lines) + dashboard edits', tables: ['plan', 'line_status', 'plant_received', 'stock_release', 'dispatch_assign', 'pick_round', 'plan_day', 'follow_close', 'pick_job', 'bal_close'] },
   stock: { label: 'Stock reports (ZMMBE, KFC, PFC, PLANT, TRR)', tables: ['stock', 'stock_sent', 'trr'] },
   pickdata: { label: 'Pick data (ZINR, ZCOMENT VIEW, Korber, ZROLLMGT, ZMM_TRR)', tables: ['zinr', 'zcoment', 'korber', 'zroll', 'ztrr'] },
-  picks: { label: 'Pick history + packing lists', tables: ['picks', 'pick_req', 'pick_run', 'ur_base'] },
+  picks: { label: 'Pick history + packing lists', tables: ['picks', 'pick_req', 'pick_run', 'ur_base', 'pallet_used'] },
   dispatch: { label: 'Old dispatch uploads', tables: ['dispatch'] },
   settings: { label: 'Plant settings', tables: ['plant_info'] },
   history: { label: 'Upload history + activity log', tables: ['uploads', 'activity'] },
@@ -4096,20 +4251,24 @@ async function handlePick(env: Env, req: Request, p: string) {
     if (!pal) throw new HttpError(400, 'Scan or type a Korber pallet.');
     if (req.method === 'GET') {
       await requireUser(env, req);
-      const [pk, rj, kb] = await env.DB.batch([
+      const [pk, rj, kb, us] = await env.DB.batch([
         env.DB.prepare(`SELECT p.id, p.req_id, p.day, p.week, p.so, p.li, p.item, p.qty, p.roll_qty, p.partial, p.shade, p.batch, p.note, p.by_user, p.at, q.seq, q.pick_no, q.kind, q.auto
           FROM picks p LEFT JOIN pick_req q ON q.id = p.req_id WHERE p.pallet = ? AND p.cancelled_at IS NULL ORDER BY p.at`).bind(pal),
         env.DB.prepare('SELECT id, day, week, so, li, qty, reason, by_user, at, replaced_by FROM pick_reject WHERE pallet = ? ORDER BY id').bind(pal),
         env.DB.prepare('SELECT pallet, item, lot, qty, location, rid FROM korber WHERE pallet = ? ORDER BY rid DESC LIMIT 1').bind(pal),
+        // v196: picked outside the system (Korber file of picked pallets)
+        env.DB.prepare('SELECT qty, file_name, by_user, at, batch FROM pallet_used WHERE pallet = ? ORDER BY id').bind(pal),
       ]);
+      const used = us.results as Row[];
       const rows: Row[] = (pk.results as Row[]).map((x) => ({ ...x, plan: periodLabel(x.week) }));
       const k = (kb.results as Row[])[0] ?? null;
       const picked = r3(rows.reduce((t, x) => t + Number(x.qty), 0));
       const base = rows.length ? Number(rows[0].roll_qty ?? k?.qty ?? 0) : Number(k?.qty ?? 0);
       // v185: less in the Korber Inventory than the history leaves: the Korber QTY
-      const pp = rows.length ? await palletPicks(env, pal) : null;
+      const pp = rows.length || used.length ? await palletPicks(env, pal) : null;
       const left = pp && pp.base !== null ? Math.max(0, r3(pp.base - pp.before)) : Math.max(0, r3(base - picked));
-      return json({ pallet: pal, korber: k, picks: rows, rejects: (rj.results as Row[]).map((x) => ({ ...x, plan: periodLabel(x.week) })), picked, base, left, ...(pp?.korberLow ? { korberLow: pp.korberLow, note: lowText(pp.korberLow) } : {}) });
+      const usedQty = r3(used.reduce((t, x) => t + Number(x.qty || 0), 0));
+      return json({ pallet: pal, korber: k, picks: rows, rejects: (rj.results as Row[]).map((x) => ({ ...x, plan: periodLabel(x.week) })), picked, base, left, ...(used.length ? { used, usedQty } : {}), ...(pp?.korberLow ? { korberLow: pp.korberLow, note: lowText(pp.korberLow) } : {}) });
     }
     if (req.method === 'DELETE') {
       const s = await requireUser(env, req, 'editor');
@@ -4811,6 +4970,13 @@ async function palletPicksMany(env: Env, pallets: unknown[], kenv?: Env): Promis
       const k0 = String(x.pallet); if (!byP.has(k0)) byP.set(k0, []); byP.get(k0)!.push(x);
     }
   }
+  // v196: pallets picked outside the system (Korber file of picked pallets): each row counts as a pick of that QTY
+  for (let i = 0; i < ids.length; i += 400) {
+    for (const x of (await env.DB.prepare(`SELECT pallet, qty, by_user, at, file_name FROM pallet_used WHERE pallet IN (SELECT value FROM json_each(?)) ORDER BY id`).bind(JSON.stringify(ids.slice(i, i + 400))).all<Row>()).results) {
+      const k0 = String(x.pallet); if (!byP.has(k0)) byP.set(k0, []);
+      byP.get(k0)!.push({ pallet: x.pallet, day: String(x.at ?? '').slice(0, 10), by_user: x.by_user, qty: x.qty, roll_qty: null, week: '', so: '', li: '', at: x.at, req_id: 0, pick_no: null, used: x.file_name ?? 'upload' });
+    }
+  }
   // the Korber row of each pallet that has a history (the newest upload when there are several)
   const hist = Array.from(new Set(Array.from(byP.keys()).map(up)));
   const kq = new Map<string, { qty: number; upAt: string }>();
@@ -4824,8 +4990,11 @@ async function palletPicksMany(env: Env, pallets: unknown[], kenv?: Env): Promis
   for (const id of ids) {
     const ph = byP.get(id) ?? [];
     if (!ph.length) { out.set(id, emptyHist()); continue; }
-    const picks: PalletPick[] = ph.map((x) => ({ day: String(x.day), by_user: String(x.by_user), qty: Number(x.qty), plan: periodLabel(x.week), so: String(x.so ?? ''), li: String(x.li ?? ''), pick_no: (x.pick_no as string | null) ?? null, at: String(x.at ?? ''), req: Number(x.req_id) }));
-    const full = Number(ph[0].roll_qty);
+    const picks: PalletPick[] = ph.map((x) => ({ day: String(x.day), by_user: String(x.by_user), qty: Number(x.qty), plan: x.used ? `Picked outside the system (${String(x.used)})` : periodLabel(x.week), so: String(x.so ?? ''), li: String(x.li ?? ''), pick_no: (x.pick_no as string | null) ?? null, at: String(x.at ?? ''), req: Number(x.req_id) }));
+    // the roll's full QTY: from its picks; a pallet only picked outside the system: its Korber Actual Qty
+    // (no picked-pallets upload on it: exactly as before — the first pick's roll QTY)
+    const fr = ph.find((x) => !x.used && x.roll_qty !== null && x.roll_qty !== undefined && Number.isFinite(Number(x.roll_qty)));
+    const full = !ph.some((x) => x.used) ? Number(ph[0].roll_qty) : fr ? Number(fr.roll_qty) : kq.has(up(id)) ? kq.get(up(id))!.qty : r3(ph.reduce((t, x) => t + Number(x.qty || 0), 0));
     const before = r3(picks.reduce((t, x) => t + x.qty, 0));
     let base: number | null = full, korberLow: KorberLow | null = null;
     const k = kq.get(up(id));
@@ -6770,6 +6939,9 @@ export default {
       else if (p === '/api/pullplan' && req.method === 'GET') res = await handlePullPlan(env, req);
       else if (p === '/api/rounds') res = await handleRounds(env, req);
       else if (p === '/api/repick') res = await handleRepick(env, req);
+      else if (p === '/api/used') res = await handleUsed(env, req);
+      else if (p === '/api/apikeys') res = await handleApiKeys(env, req);
+      else if (p === '/api/ext/v1' || p.startsWith('/api/ext/v1/')) res = await handleExt(env, req, p);
       // the Plant + SO Plant pairs in the ZMMBE uploads (for Settings → ZMMBE plants)
       else if (p === '/api/follow') res = await handleFollow(env, req);
       else if (p === '/api/zroll' && req.method === 'GET') res = await handleZroll(env, req);

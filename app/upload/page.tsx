@@ -13,6 +13,7 @@ import { useRefreshOnActivity } from '@/lib/freshness';
 import { ago, fmt, fmtDate, type Upload, type WeekInfo } from '@/lib/calc';
 import { TEMPLATES, downloadTemplate } from '@/lib/templates';
 import DayPickBar, { useDayPick } from '@/components/DayPickBar';
+import UsedPallets from '@/components/UsedPallets';
 import PlanReport from '@/components/PlanReport';
 import { todayLocal, weekDays, weekIdOf, weekOptions } from '@/lib/smart';
 import { keepFile } from '@/lib/files';
@@ -341,6 +342,7 @@ function Uploads() {
       </div>
 
       <DayPickBar day={day} setDay={setDay} rid={rid} setRid={setRid} toast={toast} refreshKey={barKey} onUploaded={() => { void loadStatus(); }} />
+      <UsedPallets canEdit={canEdit} toast={toast} />
 
       <div className="tabs" role="tablist" style={{ margin: '4px 0 2px' }}>
         <button role="tab" aria-selected={tab === 'upload'} className={tab === 'upload' ? 'on' : ''} onClick={() => setTab('upload')}>Upload reports</button>
