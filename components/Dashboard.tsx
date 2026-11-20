@@ -557,7 +557,7 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
           received={isDay ? (data!.received || []) : (data!.received || []).filter((r) => (r.period ?? data!.week) === (date || data!.week))} week={isDay ? period : date || data!.week!} day={isDay ? data!.day : date}
           canTarget={!guest && user.role === 'admin'} canEdit={canEdit} time={data!.time} live={live === 'live'} updatedAt={data!.generatedAt}
           onPlant={(c) => { setPlant(rows.some((r) => (r.plant || '').toUpperCase() === c) ? (rows.find((r) => (r.plant || '').toUpperCase() === c)!.plant || '') : ''); setView({ kind: 'all' }); setTab('details'); }}
-          onSaved={(m) => { toast(m); load(); }} kpi={kpiOf} onRepick={() => { void loadRp(); }} />
+          onSaved={(m) => { toast(m); load(); }} kpi={kpiOf} onRepick={() => { void loadRp(); }} repick={repick} toast={toast} />
       )}
 
 

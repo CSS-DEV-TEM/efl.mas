@@ -9,7 +9,7 @@ import KorberAfter from '@/components/KorberAfter';
 import { todayLocal } from '@/lib/smart';
 
 export interface DayRow { day: string; picks: number; lines: number }
-export interface PickRound { id: string; plant: string | null; round: number; lines: number; qty: number; src_at?: string | null; created_by?: string; reports: string[]; /** made from a Packing List (Import Packing List) */ imported?: number; /** v203: the JOB ID typed when the Pick was made (or later) */ job_id?: string | null }
+export interface PickRound { id: string; plant: string | null; round: number; lines: number; qty: number; src_at?: string | null; created_by?: string; reports: string[]; /** made from a Packing List (Import Packing List) */ imported?: number; /** v203: the JOB ID typed when the Pick was made (or later) */ job_id?: string | null; /** v212: the system's unique Pick ID */ pick_uid?: string | null }
 interface Report { src: string; uses: 'own' | 'shared' | 'none'; rows: number; missing?: string[]; own: { file_name: string | null; uploaded_by: string; uploaded_at: string } | null; shared: { file_name: string | null; uploaded_by: string; uploaded_at: string } | null }
 
 const REPORT_NAME: Record<string, string> = { plan: 'Plan', zmmbe: 'ZMMBE', zinr: 'ZINSR / ZINR', zcoment: 'ZCOMENT VIEW (optional)', korber: 'Korber Inventory', zroll: 'ZROLLMGT', ztrr: 'ZMM_TRR' };
@@ -62,9 +62,9 @@ export default function DayPickBar({ day, setDay, rid, setRid, toast, refreshKey
   const createPick = async () => {
     if (!newPlant) { toast('Choose the plant of the Pick'); return; }
     try {
-      const r = await api<{ rid: string; round: number }>('/api/rounds', { method: 'POST', body: { day, plant: newPlant, job_id: newJob.trim() || undefined } });
+      const r = await api<{ rid: string; round: number; pick_uid?: string | null }>('/api/rounds', { method: 'POST', body: { day, plant: newPlant, job_id: newJob.trim() || undefined } });
       setNewJob('');
-      setRid(r.rid); toast(`${pickLabel({ plant: newPlant, round: r.round }, names)}${newJob.trim() ? ` (JOB ID ${newJob.trim()})` : ''} created for ${fmtDate(day)} — upload its Plan, ZMMBE, ZINSR, ZCOMENT VIEW and Korber`);
+      setRid(r.rid); toast(`${pickLabel({ plant: newPlant, round: r.round }, names)}${r.pick_uid ? ` · Pick ID ${r.pick_uid}` : ''}${newJob.trim() ? ` (JOB ID ${newJob.trim()})` : ''} created for ${fmtDate(day)} — upload its Plan, ZMMBE, ZINSR, ZCOMENT VIEW and Korber`);
       await loadRounds(); void loadDays();
     } catch (e) { toast(e instanceof Error ? e.message : 'Could not create the Pick.'); }
   };
@@ -129,7 +129,7 @@ export default function DayPickBar({ day, setDay, rid, setRid, toast, refreshKey
         <label>Pick
           <select value={rid} onChange={(e) => setRid(e.target.value)}>
             <option value="">{rounds.length ? 'Choose the Pick…' : 'No Pick yet — create one'}</option>
-            {rounds.map((r) => <option key={r.id} value={r.id}>{pickLabel(r, names)}{r.job_id ? ` · JOB ${r.job_id}` : ''} · {fmt(r.lines)} lines{r.reports.length ? ` · ${r.reports.length} report${r.reports.length === 1 ? '' : 's'}` : ''}</option>)}
+            {rounds.map((r) => <option key={r.id} value={r.id}>{pickLabel(r, names)}{r.pick_uid ? ` · ${r.pick_uid}` : ''}{r.job_id ? ` · JOB ${r.job_id}` : ''} · {fmt(r.lines)} lines{r.reports.length ? ` · ${r.reports.length} report${r.reports.length === 1 ? '' : 's'}` : ''}</option>)}
           </select>
         </label>
         {canEdit && <span className="dpb-new">
@@ -140,6 +140,7 @@ export default function DayPickBar({ day, setDay, rid, setRid, toast, refreshKey
           <input className="dpb-job" value={newJob} onChange={(e) => setNewJob(e.target.value)} maxLength={60} placeholder="JOB ID (optional)" aria-label="JOB ID of the new Pick (optional)" />
           <button className="btn sm primary" onClick={createPick} disabled={!day}>+ Create Pick</button>
         </span>}
+        {cur?.pick_uid && <span className="dpb-uid" title="The system's unique ID of this Pick">Pick ID <b>{cur.pick_uid}</b></span>}
         {cur && <span className="dpb-jobid" title="JOB ID of this Pick">JOB ID <b>{cur.job_id || '—'}</b>{canEdit && <button className="btn sm" onClick={editJob} aria-label="Edit the JOB ID">✎</button>}</span>}
         {cur && <button className="btn sm" onClick={() => setReport(true)} title="The plan report of this Pick (AVALABALE, ALRADY SEND, Pending, POSIBAL PENDING, QI, BLOCK, TRANSFER NOTE) — on screen and as Excel">📋 Plan report</button>}
         {report && rid && <PlanReport rid={rid} onClose={() => setReport(false)} />}

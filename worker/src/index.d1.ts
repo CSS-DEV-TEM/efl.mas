@@ -189,6 +189,8 @@ const BASE_SCHEMA = [
   'CREATE TABLE IF NOT EXISTS pick_run (rid TEXT NOT NULL, n INTEGER NOT NULL, started_at TEXT NOT NULL, by_user TEXT, PRIMARY KEY (rid, n))',
   `CREATE TABLE IF NOT EXISTS ur_base (rid TEXT NOT NULL, key TEXT NOT NULL, date TEXT NOT NULL DEFAULT '', qty REAL, ur REAL, qi REAL, block REAL, at TEXT, PRIMARY KEY (rid, key, date))`,
   `CREATE TABLE IF NOT EXISTS bal_close (rid TEXT NOT NULL, key TEXT NOT NULL, date TEXT NOT NULL DEFAULT '', plant TEXT, cat TEXT NOT NULL, qty REAL NOT NULL, by_user TEXT, at TEXT, PRIMARY KEY (rid, key, date))`,
+  // v199 (API 136): the system's unique Pick ID of every Pick (kept when a Pick is deleted or the data is cleared: never given twice)
+  'CREATE TABLE IF NOT EXISTS pick_uid (rid TEXT PRIMARY KEY, uid TEXT NOT NULL UNIQUE, n INTEGER NOT NULL, created_at TEXT)',
   // v196 (API 132): pallets picked outside the system (a Korber file of picked pallets) and the keys of the data API
   'CREATE TABLE IF NOT EXISTS pallet_used (id INTEGER PRIMARY KEY AUTOINCREMENT, batch TEXT NOT NULL, pallet TEXT NOT NULL, item TEXT, lot TEXT, qty REAL NOT NULL, file_name TEXT, by_user TEXT, at TEXT NOT NULL)',
   'CREATE INDEX IF NOT EXISTS pallet_used_pallet ON pallet_used(pallet)',
@@ -276,7 +278,7 @@ const BASE_SCHEMA = [
 ];
 /** per system (each has its own database) */
 const schemaDone = new Set<string>();
-const SCHEMA_V = '44';
+const SCHEMA_V = '45';
 async function ensureSchema(env: Env) {
   const dk = env.DIV || 'active';
   if (schemaDone.has(dk) || !env.DB) return;
@@ -541,6 +543,10 @@ async function ensureSchema(env: Env) {
     'CREATE INDEX IF NOT EXISTS zinr_doc_rid ON zinr(mat_doc, rid)', 'CREATE INDEX IF NOT EXISTS zroll_doc_rid_doc ON zroll_doc(rid, mat_doc)']) {
     try { await env.DB.prepare(q).run(); } catch { /* already there */ }
   }
+  // schema 45: Pick IDs
+  await env.DB.batch([
+    env.DB.prepare('CREATE TABLE IF NOT EXISTS pick_uid (rid TEXT PRIMARY KEY, uid TEXT NOT NULL UNIQUE, n INTEGER NOT NULL, created_at TEXT)'),
+  ]);
   // schema 44: pallets picked outside the system, data API keys
   await env.DB.batch([
     env.DB.prepare('CREATE TABLE IF NOT EXISTS pallet_used (id INTEGER PRIMARY KEY AUTOINCREMENT, batch TEXT NOT NULL, pallet TEXT NOT NULL, item TEXT, lot TEXT, qty REAL NOT NULL, file_name TEXT, by_user TEXT, at TEXT NOT NULL)'),
@@ -725,7 +731,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 135; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 136; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1961,8 +1967,8 @@ const csvOf = (head: string[], rows: Row[]) => {
   const q = (v: unknown) => { if (v === null || v === undefined) return ''; const t = String(v); return /[",\n\r]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
   return [head.join(','), ...rows.map((r) => head.map((h) => q(r[h])).join(','))].join('\r\n');
 };
-const PLAN_FIELDS = ['pick', 'job_id', 'plan_type', 'date', 'plant', 'so', 'li', 'item', 'qty', 'ur', 'qi', 'block', 'kfc_ur', 'pfc_ur', 'picked', 'picked_rolls', 'dispatched', 'balance', 'status', 'remarks', 'comment', 'vehicle', 'tn_number', 'tn_qty', 'updated_by', 'updated_at', 'last_pick_at'];
-const PICK_FIELDS = ['pick_id', 'pick_req', 'pick_no', 'pick', 'job_id', 'pick_day', 'at', 'by_user', 'kind', 'so', 'li', 'item', 'pallet', 'lot', 'insp_lot', 'batch', 'shade', 'qty', 'roll_qty', 'partial', 'tn', 'cancelled_at'];
+const PLAN_FIELDS = ['pick', 'pick_uid', 'job_id', 'plan_type', 'date', 'plant', 'so', 'li', 'item', 'qty', 'ur', 'qi', 'block', 'kfc_ur', 'pfc_ur', 'picked', 'picked_rolls', 'dispatched', 'balance', 'status', 'remarks', 'comment', 'vehicle', 'tn_number', 'tn_qty', 'updated_by', 'updated_at', 'last_pick_at'];
+const PICK_FIELDS = ['pick_id', 'pick_req', 'pick_no', 'pick', 'pick_uid', 'job_id', 'pick_day', 'at', 'by_user', 'kind', 'so', 'li', 'item', 'pallet', 'lot', 'insp_lot', 'batch', 'shade', 'qty', 'roll_qty', 'partial', 'tn', 'cancelled_at'];
 async function handleExt(env: Env, req: Request, p: string) {
   if (req.method !== 'GET') throw new HttpError(405, 'The data API is read-only (GET).');
   const url = new URL(req.url), sp = url.searchParams;
@@ -1992,7 +1998,8 @@ async function handleExt(env: Env, req: Request, p: string) {
     const d = (await r.json()) as { rows?: Row[]; day?: string | null; week?: string | null; type?: string };
     const rows0 = d.rows ?? [];
     const jm = await jobs(rows0.map((x) => String(x.week)));
-    const rows = rows0.map((x) => ({ ...x, pick: x.week, job_id: jm.get(String(x.week)) ?? null, plan_type: type }) as Row);
+    const um = await ensureUids(env, rows0.map((x) => String(x.week)));
+    const rows = rows0.map((x) => ({ ...x, pick: x.week, pick_uid: um.get(String(x.week)) ?? null, job_id: jm.get(String(x.week)) ?? null, plan_type: type }) as Row);
     return out(`plan_${type === 'day' ? d.day ?? sp.get('day') ?? '' : d.week ?? sp.get('week') ?? ''}`, PLAN_FIELDS, rows, { type, day: d.day ?? null, week: d.week ?? null });
   }
   if (what === 'picks') {
@@ -2003,7 +2010,8 @@ async function handleExt(env: Env, req: Request, p: string) {
       FROM picks p LEFT JOIN pick_req r ON r.id = p.req_id WHERE p.day BETWEEN ?1 AND ?2 AND (?3 IS NULL OR p.week = ?3) AND (?4 = 1 OR p.cancelled_at IS NULL) ORDER BY p.id LIMIT 50001`).bind(from, to, pick, sp.get('cancelled') === '1' ? 1 : 0).all<Row>()).results;
     if (rows0.length > 50000) throw new HttpError(400, 'More than 50 000 rows: ask for fewer days.');
     const jm = await jobs(rows0.map((x) => String(x.pick)));
-    return out(`picks_${from}${to !== from ? '_' + to : ''}`, PICK_FIELDS, rows0.map((x) => ({ ...x, job_id: jm.get(String(x.pick)) ?? null }) as Row), { from, to, pick: pick ?? null });
+    const um = await ensureUids(env, rows0.map((x) => String(x.pick)));
+    return out(`picks_${from}${to !== from ? '_' + to : ''}`, PICK_FIELDS, rows0.map((x) => ({ ...x, pick_uid: um.get(String(x.pick)) ?? null, job_id: jm.get(String(x.pick)) ?? null }) as Row), { from, to, pick: pick ?? null });
   }
   throw new HttpError(404, 'Unknown data API path — GET /api/ext/v1 lists them.');
 }
@@ -2037,11 +2045,35 @@ async function zBaseAt0<T extends string | null | undefined>(env: Env, rid: stri
   } catch { return zAt; }
 }
 
+/**
+ * v199 (API 136): the system's unique Pick ID — PK-YYMMDD-NNNN (the date it was given, a number that only goes up in this
+ * system). Given when a Pick is made; a Pick made before this gets its ID the first time it is asked for. Never reused.
+ */
+async function ensureUids(env: Env, rids: string[]): Promise<Map<string, string>> {
+  const ids = Array.from(new Set(rids.filter(Boolean)));
+  const out = new Map<string, string>();
+  if (!ids.length) return out;
+  for (let i = 0; i < ids.length; i += 400) for (const r of (await env.DB.prepare('SELECT rid, uid FROM pick_uid WHERE rid IN (SELECT value FROM json_each(?))').bind(JSON.stringify(ids.slice(i, i + 400))).all<{ rid: string; uid: string }>()).results) out.set(r.rid, r.uid);
+  const miss = ids.filter((r) => !out.has(r)).sort();
+  for (const rid of miss) {
+    for (let tries = 0; tries < 5; tries++) {
+      const n = Number((await env.DB.prepare('SELECT COALESCE(MAX(n), 0) n FROM pick_uid').first<{ n: number }>())?.n ?? 0) + 1;
+      const d = now().slice(2, 10).replace(/-/g, '');
+      const uid = `PK-${d}-${String(n).padStart(4, '0')}`;
+      const r = await env.DB.prepare('INSERT OR IGNORE INTO pick_uid (rid, uid, n, created_at) VALUES (?,?,?,?)').bind(rid, uid, n, now()).run();
+      const got = await env.DB.prepare('SELECT uid FROM pick_uid WHERE rid = ?').bind(rid).first<{ uid: string }>();
+      if (got) { out.set(rid, got.uid); break; }
+      if (!r.meta?.changes) continue; // another device took that number: try the next
+    }
+  }
+  return out;
+}
+
 async function handleRepick(env: Env, req: Request) {
   if (req.method === 'GET') {
     await requireUser(env, req);
     const rids = String(new URL(req.url).searchParams.get('rids') || '').split(',').map((x) => x.trim()).filter(Boolean).slice(0, 80);
-    if (!rids.length) return json({ jobs: [], runs: [], base: [], close: [] });
+    if (!rids.length) return json({ jobs: [], runs: [], base: [], close: [], uids: [], uploads: [] });
     const ids = JSON.stringify(rids);
     const [jobs, runs, base, close] = await Promise.all([
       env.DB.prepare('SELECT rid, job_id, by_user, at FROM pick_job WHERE rid IN (SELECT value FROM json_each(?))').bind(ids).all<Row>(),
@@ -2049,16 +2081,21 @@ async function handleRepick(env: Env, req: Request) {
       env.DB.prepare('SELECT rid, key, date, qty, ur, qi, block, at FROM ur_base WHERE rid IN (SELECT value FROM json_each(?))').bind(ids).all<Row>(),
       env.DB.prepare('SELECT rid, key, date, plant, cat, qty, by_user, at FROM bal_close WHERE rid IN (SELECT value FROM json_each(?))').bind(ids).all<Row>(),
     ]);
-    return json({ jobs: jobs.results, runs: runs.results, base: base.results, close: close.results });
+    // v199: the Pick IDs and the reports uploaded for these Picks (and the shared ones) — the plan's data flow
+    const uids = await ensureUids(env, rids);
+    const uploads = (await env.DB.prepare("SELECT src, file_name, row_count, uploaded_by, uploaded_at, rid, mode FROM uploads WHERE rid IN (SELECT value FROM json_each(?)) OR rid = '' ORDER BY uploaded_at DESC LIMIT 300").bind(ids).all<Row>()).results;
+    return json({ jobs: jobs.results, runs: runs.results, base: base.results, close: close.results, uids: Array.from(uids.entries()).map(([rid, uid]) => ({ rid, uid })), uploads });
   }
   if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed.');
   const s = await requireUser(env, req, 'editor');
-  const b = (await req.json()) as { action?: string; rid?: string; cat?: string; base?: { key: string; date?: string | null; qty?: number; ur?: number; qi?: number; block?: number }[]; lines?: { key: string; date?: string | null; qty?: number; plant?: string | null }[] };
+  const b = (await req.json()) as { action?: string; rid?: string; cat?: string; auto?: boolean; base?: { key: string; date?: string | null; qty?: number; ur?: number; qi?: number; block?: number }[]; lines?: { key: string; date?: string | null; qty?: number; plant?: string | null }[] };
   const rid = String(b.rid || '');
   if (!rid) throw new HttpError(400, 'Unknown Pick.');
   const num = (v: unknown) => (Number.isFinite(Number(v)) ? r3(Number(v)) : 0);
   if (b.action === 'run') {
     const last = await env.DB.prepare('SELECT n, started_at FROM pick_run WHERE rid = ? ORDER BY n DESC LIMIT 1').bind(rid).first<{ n: number; started_at: string }>();
+    // v199: Auto balance pick — only after the 1st pick, and only when a SAP report (ZMMBE) came in since the last run
+    if (b.auto && !last) return json({ ok: true, n: 0, first: false, newRun: false, why: 'no 1st pick yet' });
     if (!last) {
       const at = now();
       const base = (b.base || []).filter((x) => x && typeof x.key === 'string').slice(0, 3000);
@@ -2074,14 +2111,16 @@ async function handleRepick(env: Env, req: Request) {
       const add = (b.base || []).filter((x) => x && typeof x.key === 'string').slice(0, 3000).map((x) => env.DB.prepare('INSERT OR IGNORE INTO ur_base (rid, key, date, qty, ur, qi, block, at) VALUES (?,?,?,?,?,?,?,?)').bind(rid, x.key, x.date ?? '', num(x.qty), num(x.ur), num(x.qi), num(x.block), at));
       for (let i = 0; i < add.length; i += 90) await env.DB.batch(add.slice(i, i + 90));
     }
-    const up = await env.DB.prepare("SELECT COUNT(*) n FROM uploads WHERE rid IN (?1, '') AND uploaded_at > ?2").bind(rid, last.started_at).first<{ n: number }>();
+    const up = await env.DB.prepare(`SELECT COUNT(*) n FROM uploads WHERE rid IN (?1, '') AND uploaded_at > ?2${b.auto ? " AND src = 'zmmbe'" : ''}`).bind(rid, last.started_at).first<{ n: number }>();
     if (!Number(up?.n)) return json({ ok: true, n: last.n, first: last.n === 1, newRun: false });
     const n = Number(last.n) + 1;
-    await env.DB.batch([
+    const [ins] = await env.DB.batch([
       env.DB.prepare('INSERT OR IGNORE INTO pick_run (rid, n, started_at, by_user) VALUES (?,?,?,?)').bind(rid, n, now(), s.u),
-      env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'pick', `${periodLabel(rid)}: balance pick ${n - 1} started (new reports since the last run)`),
     ]);
-    return json({ ok: true, n, first: false, newRun: true });
+    // two devices at once: only the one whose run was saved runs it
+    if (!ins.meta?.changes) return json({ ok: true, n, first: false, newRun: false, why: 'another device started it' });
+    await env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(now(), s.u, 'pick', `${periodLabel(rid)}: balance pick ${n - 1} started${b.auto ? ' by Auto balance pick' : ''} (new reports since the last run)`).run();
+    return json({ ok: true, n, first: false, newRun: true, auto: !!b.auto });
   }
   if (b.action === 'close' || b.action === 'reopen') {
     const lines = (b.lines || []).filter((x) => x && typeof x.key === 'string').slice(0, 3000);
@@ -2123,7 +2162,8 @@ async function handleRounds(env: Env, req: Request) {
       ...(job ? [env.DB.prepare('INSERT OR REPLACE INTO pick_job (rid, job_id, by_user, at) VALUES (?,?,?,?)').bind(rid, job, s.u, now())] : []),
     ]);
     await broadcast(env, { type: 'data', src: 'plan', by: s.u, rows: 0 });
-    return json({ ok: true, rid, day, plant, round: n, job_id: job || null });
+    const uid = (await ensureUids(env, [rid])).get(rid) ?? null;
+    return json({ ok: true, rid, day, plant, round: n, job_id: job || null, pick_uid: uid });
   }
   // PATCH {rid, job_id}: the JOB ID of a Pick (added or changed later; empty removes it)
   if (req.method === 'PATCH') {
@@ -2199,7 +2239,8 @@ async function handleRounds(env: Env, req: Request) {
     .sort((a, b) => String(a.plant ?? '').localeCompare(String(b.plant ?? '')) || a.round - b.round);
   const next = plant ? Math.max(0, ...rows.map((r) => r.round)) + 1 : 1;
   const jobs = new Map((await env.DB.prepare("SELECT rid, job_id FROM pick_job WHERE rid LIKE ? || '~%'").bind(day).all<{ rid: string; job_id: string }>()).results.map((j) => [j.rid, j.job_id]));
-  return json({ day, plant, rounds: rows.map((r) => ({ ...r, job_id: jobs.get(String(r.id)) ?? null })), next });
+  const uidm = await ensureUids(env, rows.map((r) => String(r.id)));
+  return json({ day, plant, rounds: rows.map((r) => ({ ...r, job_id: jobs.get(String(r.id)) ?? null, pick_uid: uidm.get(String(r.id)) ?? null })), next });
 }
 
 /** GET /api/days — the days (created, or with a plan), newest first; POST {day} creates one. */

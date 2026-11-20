@@ -342,14 +342,44 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
   const [closedRefs, setClosedRefs] = useState<Set<string>>(new Set());
   const ridKey = Array.from(new Set(rows.map((l) => l.week))).sort().join(',');
   useEffect(() => { let on = true; void loadRepick(ridKey.split(',')).then((d) => { if (on) setClosedRefs(new Set(d.close.map((c) => `${c.rid}|${c.key}|${c.date}`))); }); return () => { on = false; }; }, [ridKey, rows]);
-  const runAll = async () => {
+  // v212: Auto balance pick — after the Pick's 1st Pick all matched, when a SAP report (ZMMBE) comes in and new UR shows, the balance
+  // lines are picked by themselves (the same matching), until the plan is complete. Switched on per Pick on this device; the worker
+  // lets only one device start each run.
+  const autoKey = `auto-bal|${ridKey}`;
+  const [autoBal, setAutoBal] = useState(false);
+  useEffect(() => { try { setAutoBal(localStorage.getItem(autoKey) === '1'); } catch { setAutoBal(false); } }, [autoKey]);
+  const flipAuto = (v: boolean) => { setAutoBal(v); try { if (v) localStorage.setItem(autoKey, '1'); else localStorage.removeItem(autoKey); } catch { /* this tab only */ } };
+  const runAllRef = useRef<(o?: { auto?: number }) => Promise<void>>();
+  const autoBusy = useRef(false);
+  useEffect(() => {
+    if (!autoBal || runActive || !ridKey) return;
+    const open = rows.filter((l) => !isDone(l) && todo(l) > 1e-9 && !l.hold && !closedRefs.has(lineRef(l)));
+    if (!open.length) return; // complete, or no UR to pick: nothing to ask
+    const t = setTimeout(async () => {
+      if (autoBusy.current) return;
+      autoBusy.current = true;
+      try {
+        for (const rid of ridKey.split(',').filter(Boolean)) {
+          const r = await api<{ n: number; newRun: boolean }>('/api/repick', { method: 'POST', body: { action: 'run', rid, auto: true,
+            base: rows.filter((l) => l.week === rid).map((l) => ({ key: l.key, date: l.date ?? '', qty: Number(l.qty) || 0, ur: Number(l.ur) || 0, qi: Number(l.qi) || 0, block: Number(l.block) || 0 })) } });
+          if (r.newRun) { await runAllRef.current?.({ auto: r.n }); break; }
+        }
+      } catch { /* tried again with the next change */ }
+      finally { autoBusy.current = false; }
+    }, 4000);
+    return () => clearTimeout(t);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoBal, rows, runActive, ridKey, closedRefs]);
+  const runAll = async (opt: { auto?: number } = {}) => {
     const kindNow: 'normal' | 'offsite' = autoRules.allowOffsite && autoKind === 'offsite' ? 'offsite' : 'normal';
     const targets = rows.filter((l) => !isDone(l) && todo(l) > 1e-9 && !l.hold && !closedRefs.has(lineRef(l)));
-    if (!targets.length) { toast('No open line with UR to pick in this Pick.'); return; }
-    if (!window.confirm(`${kindNow === 'offsite' ? 'OFFSITE' : 'NORMAL'} — pick every All-match roll for ${targets.length} open line${targets.length === 1 ? '' : 's'} of ${label || week}?\n\n${kindNow === 'offsite' ? 'Offsite: the last roll of each line is cut to the exact QTY (never over the plan, never closed short).' : 'Normal: the last roll is cut to the QTY, then each cut roll\'s balance is tallied to another SO line that can take it (same Material and LI, SO Plant, UR, a ZINSR lot with the roll\'s Vendor Batch).'}\n\nOnly rolls where everything matches are picked (as the system selects them, the last roll cut to the QTY) — also a roll SAP lists in the lots of several SO lines, up to each line's ZINSR lot QTY (a cut roll's balance first). Lines that need a check or a manual roll are left for you under “Needs manual” — the Smart suggestion shows there, you choose.\n\nKeep this tab open while it runs. If the network drops it waits and goes on by itself.`)) return;
+    if (!targets.length) { if (!opt.auto) toast('No open line with UR to pick in this Pick.'); return; }
+    if (!opt.auto && !window.confirm(`${kindNow === 'offsite' ? 'OFFSITE' : 'NORMAL'} — pick every All-match roll for ${targets.length} open line${targets.length === 1 ? '' : 's'} of ${label || week}?\n\n${kindNow === 'offsite' ? 'Offsite: the last roll of each line is cut to the exact QTY (never over the plan, never closed short).' : 'Normal: the last roll is cut to the QTY, then each cut roll\'s balance is tallied to another SO line that can take it (same Material and LI, SO Plant, UR, a ZINSR lot with the roll\'s Vendor Batch).'}\n\nOnly rolls where everything matches are picked (as the system selects them, the last roll cut to the QTY) — also a roll SAP lists in the lots of several SO lines, up to each line's ZINSR lot QTY (a cut roll's balance first). Lines that need a check or a manual roll are left for you under “Needs manual” — the Smart suggestion shows there, you choose.\n\nKeep this tab open while it runs. If the network drops it waits and goes on by itself.`)) return;
     stopRef.current = false;
     // v203: a run of Pick all matched — the first one keeps each line's UR / QI / Block (first UR); after new reports it is a balance pick
-    try {
+    // (v212: Auto balance pick has started its run already)
+    if (opt.auto) toast(`Auto balance pick — ${runLabel(opt.auto)}: ${targets.length} balance line${targets.length === 1 ? '' : 's'} with new UR`);
+    else try {
       const rs = await Promise.all(ridKey.split(',').filter(Boolean).map((rid) => api<{ n: number; newRun: boolean }>('/api/repick', { method: 'POST', body: { action: 'run', rid,
         base: rows.filter((l) => l.week === rid).map((l) => ({ key: l.key, date: l.date ?? '', qty: Number(l.qty) || 0, ur: Number(l.ur) || 0, qi: Number(l.qi) || 0, block: Number(l.block) || 0 })) } })));
       const bp = rs.find((x) => x.newRun && x.n > 1);
@@ -373,8 +403,8 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
     setRun({ total: targets.length, done: 0, cur: '', res: [], finished: false });
     hudFeed.current = [];
     hud({ t: 'start', kind: kindNow, label: label || week, lines: targets.map((l) => ({ so: l.so, li: String(l.li), item: l.item })) });
-    setHudOpen(true);
-    const task = startTask('Pick all matched', '', targets.length);
+    if (!opt.auto) setHudOpen(true);
+    const task = startTask(opt.auto ? 'Auto balance pick' : 'Pick all matched', '', targets.length);
     try {
       for (let i = 0; i < targets.length; i++) {
         if (stopRef.current) break;
@@ -462,10 +492,11 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
     setRunActive(false);
     setRunWhy(why);
     const n = res.filter((x) => x.ok === 'picked').length;
-    toast(`Pick all matched: ${n} line${n === 1 ? '' : 's'} picked, ${res.length - n} left for manual${stopRef.current ? ' — stopped; press Pick all matched again to go on' : ''}`);
+    toast(`${opt.auto ? `Auto balance pick (${runLabel(opt.auto)})` : 'Pick all matched'}: ${n} line${n === 1 ? '' : 's'} picked, ${res.length - n} left for manual${stopRef.current ? ' — stopped; press Pick all matched again to go on' : ''}`);
     reload(); setHistKey((k) => k + 1);
-    setScope('manual'); setByView('lines');
+    if (!opt.auto) { setScope('manual'); setByView('lines'); }
   };
+  runAllRef.current = runAll;
   // Pick Hold: put a line on hold (a reason) or release it; a held line cannot be picked
   const [holding, setHolding] = useState<LineP | null>(null);
   const setHold = async (l: LineP, reason: string | null) => {
@@ -529,6 +560,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
               </div>
             )}
             {canEdit && manualBlocked && <span className="pill bad mb-pill" role="status" title={mBlock?.msg || undefined}>🔒 Manual pick blocked{mBlock?.until ? ` until ${new Date(mBlock.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''} — use Pick all matched</span>}
+            {canEdit && rid && <label className={'auto-bal' + (autoBal ? ' on' : '')} title="Auto balance pick (this device): after the 1st Pick all matched, each time a new ZMMBE (SAP report) shows new UR, the balance lines are picked by themselves with the same matching — until the plan is complete. Only one device takes each run; keep this tab open."><input type="checkbox" checked={autoBal} onChange={(e) => flipAuto(e.target.checked)} /> Auto balance pick{autoBal ? ' · on' : ''}</label>}
             {canEdit && <button className="btn primary run-all" disabled={!!run && !run.finished} onClick={() => void runAll()} title={autoKind === 'offsite' && autoRules.allowOffsite ? 'Offsite: pick every All-match roll, the last roll cut to the exact QTY' : 'Normal: pick every All-match roll, then tally the cut roll balances'}>⚡ Pick all matched{autoRules.allowOffsite ? ` · ${autoKind === 'offsite' ? 'Offsite' : 'Normal'}` : ''}</button>}
             <button className="btn" disabled={repBusy} aria-busy={repBusy || undefined} onClick={() => void downloadReport()} title="Excel: the lines on screen with their State, and every roll of each line — can it be picked, and why not">{repBusy ? 'Preparing…' : '📄 Plan → Pick report'}</button>
             {ended && <button type="button" className="pill accent de-pill" title={`Day ended by ${ended.by_user} at ${new Date(ended.at).toLocaleString()} — the day's Pick reports were cleared; the Day end report has the final state. Click to download it.`} onClick={() => void downloadLatest('dayend', viewDay).catch((e) => toast(e instanceof Error ? e.message : 'Not found'))}>🌙 Day ended · {ended.by_user} · ⬇ report</button>}
@@ -1661,8 +1693,9 @@ function PickHistoryCard({ canEdit, toast, onChanged, plApi }: { canEdit: boolea
   // v203: the runs of Pick all matched — the 1st pick and each balance pick (after new reports) has its own Packing List
   const [runs, setRuns] = useState<PickRun[]>([]);
   const [jobs, setJobs] = useState<Record<string, string>>({});
+  const [uids, setUids] = useState<Record<string, string>>({});
   const ridList = pickIds.slice().sort().join(',');
-  useEffect(() => { let on = true; void loadRepick(ridList.split(',')).then((d) => { if (on) { setRuns(d.runs); setJobs(Object.fromEntries(d.jobs.map((j) => [j.rid, j.job_id]))); } }); return () => { on = false; }; }, [ridList, h]);
+  useEffect(() => { let on = true; void loadRepick(ridList.split(',')).then((d) => { if (on) { setRuns(d.runs); setJobs(Object.fromEntries(d.jobs.map((j) => [j.rid, j.job_id]))); setUids(Object.fromEntries(d.uids.map((u) => [u.rid, u.uid]))); } }); return () => { on = false; }; }, [ridList, h]);
   const [runSel, setRunSel] = useState(0);
   useEffect(() => { setRunSel(0); }, [day, pickId]);
   // v207: a cut roll's balance tallied to another SO line (at a Packing List download, maybe after a balance pick began) is in the
@@ -1825,7 +1858,7 @@ function PickHistoryCard({ canEdit, toast, onChanged, plApi }: { canEdit: boolea
       // the SAP and Korber data of every roll is checked first: problems are shown before the file is saved
       task.step('checking SAP / Korber and building the file', 0);
       const issues: PLIssue[] = [];
-      const wb = packingListWorkbook(hh, { ids: new Set(target.map((r) => r.id)), combined: oneSheet, pfcSlocs, plan, planTitle: `Plan · ${weeks.map(pickName).join(', ')}`, issues, notPicked, plantNames, jobs });
+      const wb = packingListWorkbook(hh, { ids: new Set(target.map((r) => r.id)), combined: oneSheet, pfcSlocs, plan, planTitle: `Plan · ${weeks.map(pickName).join(', ')}`, issues, notPicked, plantNames, jobs, uids });
       const file = `Packing_List_${day}${ptag}${tag}.xlsx`;
       const tallyMsg = tallied ? ` · ${tallied} cut roll balance${tallied === 1 ? '' : 's'} tallied (${fmtQty(tallyQty)})` : '';
       if (tallyFail.length) toast(`Cut roll tally: ${tallyFail.length} not saved — ${tallyFail[0]}`);

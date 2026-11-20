@@ -4,7 +4,8 @@ import * as XLSX from 'xlsx';
 import { api } from '@/lib/api';
 import { fmt, type Line } from '@/lib/calc';
 import type { DashKpi } from '@/components/Dashboard';
-import { BAL_CATS, catLabel, type BalCat } from '@/lib/repick';
+import { BAL_CATS, catLabel, type BalCat, type RepickData } from '@/lib/repick';
+import PlanFlow from '@/components/PlanFlow';
 import { SOLI_PER_HOUR, fmtTime, plantSummary, timeMinutes, type Bucket, type PlantInfo, type PlantRow, type TimeSetup } from '@/lib/summary';
 
 const q = (n: number) => (Math.abs(n) < 0.0005 ? '' : fmt(n, 2));
@@ -17,7 +18,7 @@ const pickDay = (iso: string) => { const d = new Date(new Date(iso).getTime() + 
  * `week` is the period the received times belong to: the week (2026-W47), or the day for a day plan (2026-11-17).
  * Target times are system settings (admin only); received times are typed by the users.
  */
-export default function PlantSummary({ rows, plants, received = [], week, day, canTarget, canEdit, time, onPlant, onSaved, live, updatedAt, byRound = false, kpi, onRepick }: {
+export default function PlantSummary({ rows, plants, received = [], week, day, canTarget, canEdit, time, onPlant, onSaved, live, updatedAt, byRound = false, kpi, onRepick, repick, toast }: {
   rows: Line[]; plants: PlantInfo[]; received?: { code: string; received: string | null; period?: string }[];
   /** a day plan: a row per plant per Pick No */
   byRound?: boolean; week: string; day?: string | null; canTarget: boolean; canEdit: boolean; time?: TimeSetup; onPlant: (code: string) => void; onSaved: (msg: string) => void;
@@ -27,7 +28,11 @@ export default function PlantSummary({ rows, plants, received = [], week, day, c
   kpi?: (ls: Line[]) => DashKpi;
   /** v203: a balance was completed / reopened (the re-pick data is read again) */
   onRepick?: () => void;
+  /** v212: the re-pick data (runs, uploads, Pick IDs) — a card click opens the plan flow */
+  repick?: RepickData; toast?: (m: string) => void;
 }) {
+  const [flowRow, setFlowRow] = useState<PlantRow | null>(null);
+  const uidsOf = (ls: Line[]) => (repick ? Array.from(new Set(ls.map((l) => l.week))).map((w) => repick.uids.find((u) => u.rid === w)?.uid).filter(Boolean) as string[] : []);
   const s = useMemo(() => plantSummary(rows, plants, received, time, byRound), [rows, plants, received, time, byRound]);
   // v200: the Dashboard figures of each row (and of the Summary row), worked out the same way as the Dashboard tiles
   const kp = useMemo(() => (kpi ? new Map([...s.rows, s.total].map((r) => [r.code, kpi(r.lines)])) : null), [s, kpi]);
@@ -60,6 +65,10 @@ export default function PlantSummary({ rows, plants, received = [], week, day, c
     onSaved(v ? `Received time for ${code} saved` : `Received time for ${code} back to the upload time`);
   };
   const [setup, setSetup] = useState(false);
+  // v211: Simple (cards with the few figures that matter) or All columns (the full table) — remembered on this device
+  const [view, setView] = useState<'simple' | 'full'>('simple');
+  useEffect(() => { try { const v = localStorage.getItem('psum-view'); if (v === 'full' || v === 'simple') setView(v); } catch { /* default */ } }, []);
+  const pickView = (v: 'simple' | 'full') => { setView(v); try { localStorage.setItem('psum-view', v); } catch { /* only a convenience */ } };
   // v203: complete the balance of a row by hand — Block / QI / Dispatched / Shortage (the balance goes to that category, the row's balance becomes 0)
   const [done, setDone] = useState<{ r: PlantRow; k: DashKpi } | null>(null);
   const [doneCat, setDoneCat] = useState<BalCat | ''>('');
@@ -153,6 +162,59 @@ export default function PlantSummary({ rows, plants, received = [], week, day, c
       </tr>
     );
   };
+
+  // v211: the Simple view — one card per plant / Pick: what the plan needs, what UR has, what is picked and dispatched, what is left
+  const simpleCard = (r: PlantRow, isTotal = false) => {
+    const k = K(r);
+    // (zeros show as 0 here — the table leaves them blank)
+    const q = (x: number) => (Math.abs(x) > 0.0005 ? fmt(x, 2) : '0'), c = (x: number) => fmt(x || 0);
+    const ln = (n: number, w = 'line') => `${fmt(n || 0)} ${w}${n === 1 ? '' : 's'}`;
+    if (!k) return null;
+    const plan = k.t.qty, ur = k.planUr.v, picked = k.picked.qty, disp = k.t.dispatched + k.rp.closed.dispatched;
+    const base = Math.max(plan, 1e-9);
+    const pc = (x: number) => `${Math.max(0, Math.min(100, (x / base) * 100))}%`;
+    const dOk = Math.min(disp, plan), pOnly = Math.max(0, Math.min(picked, plan) - dOk), urLeft = Math.max(0, Math.min(ur, plan) - dOk - pOnly), noUr = Math.max(0, plan - Math.max(ur, dOk + pOnly));
+    const toSend = k.rp.urBalance, hold = (k.rep?.qi ?? 0) + (k.rep?.block ?? 0), short = k.t.short + k.rp.closed.shortage, re = k.rp.reQty;
+    const pct = ur > 1e-9 ? Math.round((Math.min(disp, ur) / ur) * 100) : 0;
+    const chips: { t: string; c: string; tip: string }[] = [];
+    if (ur > 1e-9 && toSend <= 0.0005) chips.push({ t: 'Done', c: 'ok', tip: 'All the Plan UR is dispatched' });
+    else if (picked > 1e-9) chips.push({ t: 'In progress', c: 'run', tip: 'Picking / dispatching' });
+    else chips.push({ t: 'Not started', c: 'idle', tip: 'Nothing picked yet' });
+    if (k.t.shortLines) chips.push({ t: `UR short · ${k.t.shortLines} line${k.t.shortLines === 1 ? '' : 's'}`, c: 'bad', tip: 'Lines whose QTY is more than the UR in the warehouse' });
+    if (hold > 1e-9) chips.push({ t: 'QI / Block hold', c: 'warn', tip: 'SO stock in QI or Block — picked when released' });
+    if (re > 1e-9 && k.rp.newUr > 1e-9) chips.push({ t: 'Can re-pick', c: 'info', tip: `New UR since the first pick (${fmt(k.rp.newUr, 2)}): Pick all matched again` });
+    if (k.rp.closedN) chips.push({ t: `Completed · ${k.rp.closedN}`, c: 'done', tip: 'Balance completed by hand' });
+    return (
+      <article key={r.code} className={`ps-card${isTotal ? ' total' : ''}${repick ? ' click' : ''}`} onClick={repick ? () => setFlowRow(r) : isTotal ? undefined : () => onPlant(r.plantCode)} title={repick ? `${isTotal ? 'All plants' : r.name}: how the plan flowed — runs, QI / Block released, dispatch, lines pending` : isTotal ? 'All plants' : `Show ${r.name} lines`}>
+        <header>
+          <div className="ps-name"><b>{isTotal ? 'All plants' : r.name}</b>{(() => { const u = uidsOf(r.lines); const t = [isTotal ? '' : r.responsible, u.length ? `Pick ID ${u.join(', ')}` : '', !isTotal && k.rp.jobs.length ? `JOB ${k.rp.jobs.join(', ')}` : ''].filter(Boolean).join(' · '); return t ? <small>{t}</small> : null; })()}</div>
+          <div className="ps-pct" title="Dispatched of the Plan UR"><b>{pct}%</b><small>sent</small></div>
+        </header>
+        <div className="ps-chips">{chips.map((x) => <span key={x.t} className={`ps-chip ${x.c}`} title={x.tip}>{x.t}</span>)}</div>
+        <div className="ps-bar" role="img" aria-label={`Plan ${fmt(plan, 2)}: dispatched ${fmt(dOk, 2)}, picked not yet dispatched ${fmt(pOnly, 2)}, UR ready ${fmt(urLeft, 2)}, no UR ${fmt(noUr, 2)}`}>
+          <i className="d" style={{ width: pc(dOk) }} /><i className="p" style={{ width: pc(pOnly) }} /><i className="u" style={{ width: pc(urLeft) }} /><i className="n" style={{ width: pc(noUr) }} />
+        </div>
+        <div className="ps-figs">
+          <div><small>Plan QTY</small><b>{q(plan)}</b><em>{ln(k.t.lines)}</em></div>
+          <div><small>UR ready</small><b>{q(ur)}</b><em>Plan UR</em></div>
+          <div><small>Picked</small><b>{q(picked)}</b><em>{ln(k.rolls.rolls, 'roll')}</em></div>
+          <div><small>Dispatched</small><b>{q(disp)}</b><em>{ln(k.t.dispatchedLines)} done</em></div>
+        </div>
+        <div className="ps-todo">
+          <div className={toSend > 1e-9 ? 'hot' : ''}><small>To send</small><b>{q(toSend)}</b><em>{ln(k.rp.urBalLines)}</em></div>
+          <div className={short > 1e-9 ? 'bad' : ''}><small>No UR</small><b>{q(short)}</b><em>{ln(k.t.shortLines)}</em></div>
+          <div className={hold > 1e-9 ? 'warn' : ''} title={`QI ${fmt(k.rep?.qi ?? 0, 2)} · Block ${fmt(k.rep?.block ?? 0, 2)}`}><small>On hold</small><b>{q(hold)}</b><em>QI {q(k.rep?.qi ?? 0)} · Block {q(k.rep?.block ?? 0)}</em></div>
+          <div className={re > 1e-9 ? 'info' : ''} title="Open balance the UR left still covers (picked when rolls match)"><small>Can re-pick</small><b>{q(re)}</b><em>{ln(k.rp.reLines)}</em></div>
+        </div>
+        {!isTotal && canEdit && (k.rp.open.length > 0 || k.rp.closedN > 0) && (
+          <footer onClick={(e) => e.stopPropagation()}>
+            {k.rp.open.length > 0 && <button type="button" className="btn sm" onClick={() => setDone({ r, k })} title="Complete the balance by hand: Block, QI, Dispatched or Shortage">✓ Complete balance</button>}
+            {k.rp.closedN > 0 && <button type="button" className="btn sm" onClick={() => void reopen(r, k)}>↶ Undo</button>}
+          </footer>
+        )}
+      </article>
+    );
+  };
   const exportXlsx = () => {
     const head1 = ['', '', ...COLS.flatMap((g) => g.subs.map((_, i) => (i === 0 ? g.card : '')))];
     const head2 = ['Responsible', 'PLANT', ...COLS.flatMap((g) => g.subs.map((x) => x.h))];
@@ -166,17 +228,32 @@ export default function PlantSummary({ rows, plants, received = [], week, day, c
 
   return (
     <section className="card psum-card" aria-labelledby="psum-title">
+      {flowRow && repick && <PlanFlow title={flowRow === s.total ? 'All plants' : flowRow.name} lines={flowRow.lines} repick={repick} toast={toast || onSaved} onClose={() => setFlowRow(null)}
+        onLines={flowRow === s.total ? undefined : () => { const c = flowRow.plantCode; setFlowRow(null); onPlant(c); }} />}
       <div className="table-head">
         <div>
           <h2 id="psum-title">Plant summary{day ? <span className="pill accent" style={{ marginLeft: 8, fontSize: 12 }}>Day plan · {day}</span> : ''}
             <span className={`psum-live ${live ? 'on' : ''}`} title={live ? 'Updates the moment someone picks, uploads or changes a line' : 'Updates when you use the page and every minute'}><i />{live ? 'Live' : 'Auto'}{updatedAt ? ` · ${fmtTime(updatedAt)}` : ''}</span></h2>
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {kpi && <div className="ps-seg" role="tablist" aria-label="View">
+            <button type="button" role="tab" aria-selected={view === 'simple'} className={view === 'simple' ? 'on' : ''} onClick={() => pickView('simple')}>Simple</button>
+            <button type="button" role="tab" aria-selected={view === 'full'} className={view === 'full' ? 'on' : ''} onClick={() => pickView('full')}>All columns</button>
+          </div>}
           {canTarget && <button className="btn sm" onClick={() => setSetup(true)}>Plant settings</button>}
           <button className="btn sm" onClick={exportXlsx}>Export</button>
         </div>
       </div>
-      <div className="psum-wrap">
+      {kpi && view === 'simple' && (
+        <>
+          <div className="ps-legend" aria-hidden><span><i className="d" />Dispatched</span><span><i className="p" />Picked, not yet dispatched</span><span><i className="u" />UR ready to pick</span><span><i className="n" />No UR</span></div>
+          <div className="ps-grid">
+            {s.rows.length > 1 && simpleCard(s.total, true)}
+            {s.rows.map((r) => simpleCard(r))}
+          </div>
+        </>
+      )}
+      <div className="psum-wrap" hidden={!!kpi && view === 'simple'}>
         <table className="psum psum-cards">
           <thead>
             <tr className="grp"><th rowSpan={2} className="fz1">Responsible</th><th rowSpan={2} className="fz2">PLANT</th>

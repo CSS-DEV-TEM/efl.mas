@@ -317,7 +317,7 @@ export function notPickedWhy(c: Candidates | null, l: { hold?: string | null; st
 const r3n = (n: number) => Math.round(n * 1000) / 1000;
 
 export interface PLIssue { level: 'error' | 'warn'; pallet: string; so: string; li: string; item: string; what: string }
-export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolean; ids?: Set<number> | number[]; combined?: boolean; pfcSlocs?: string[]; /** the Pick's plan lines (dashboard table) → a "Plan" sheet */ plan?: Line[]; planTitle?: string; /** filled with the problems found (SAP and Korber data checked) */ issues?: PLIssue[]; /** plan lines the system did not pick, and why → a "Not Picked" sheet */ notPicked?: NotPicked[]; /** plant code → name (Settings → Plants) */ plantNames?: Record<string, string>; /** v203: Pick (rid) → JOB ID, shown at the top of its sheets */ jobs?: Record<string, string> } = {}) {
+export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolean; ids?: Set<number> | number[]; combined?: boolean; pfcSlocs?: string[]; /** the Pick's plan lines (dashboard table) → a "Plan" sheet */ plan?: Line[]; planTitle?: string; /** filled with the problems found (SAP and Korber data checked) */ issues?: PLIssue[]; /** plan lines the system did not pick, and why → a "Not Picked" sheet */ notPicked?: NotPicked[]; /** plant code → name (Settings → Plants) */ plantNames?: Record<string, string>; /** v203: Pick (rid) → JOB ID, shown at the top of its sheets */ jobs?: Record<string, string>; /** v212: Pick (rid) → the system's Pick ID */ uids?: Record<string, string> } = {}) {
   const only = opts.ids ? new Set(opts.ids) : null;
   const reqs = h.requests.filter((r) => !r.cancelled_at && (!only || !only.size || only.has(r.id)));
   const header = (h.korberHeader || []).map(hn);
@@ -596,6 +596,9 @@ export function packingListWorkbook(h: PickHistory, opts: { korberSheet?: boolea
     // v203: the JOB ID of the Pick(s) on the sheet (only when one was given)
     const jobIds = Array.from(new Set(list0.map((e) => opts.jobs?.[String(e.r.week)] ?? '').filter(Boolean)));
     if (jobIds.length) { aoa[0][7] = 'JOB ID'; aoa[1][7] = jobIds.join(', '); }
+    // v212: the system's Pick ID of the Pick(s) on the sheet
+    const uidList = Array.from(new Set(list0.map((e) => opts.uids?.[String(e.r.week)] ?? '').filter(Boolean)));
+    if (uidList.length) { aoa[0][8] = 'PICK ID'; aoa[1][8] = uidList.join(', '); }
     // the plant: the one chosen in the system for the Pick (its Pick Id), with its name from Settings → Plants;
     // else the plan line's plant; the Korber customer ref only when the Pick has no plant
     const plants = Array.from(new Set(list0.map((e) => {
