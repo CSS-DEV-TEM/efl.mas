@@ -10,7 +10,7 @@
 import * as React from 'react';
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '@/lib/api';
-import { fmt, isDone, type Line } from '@/lib/calc';
+import { fmt, isDone, planUrLine, type Line } from '@/lib/calc';
 import { packingListWorkbook, saveWorkbook, type PickHistory, type PickReq } from '@/lib/pick';
 import { catLabel, lineRef, runLabel, runOf, type RepickData } from '@/lib/repick';
 
@@ -90,7 +90,7 @@ export default function PlanFlow({ title, lines, repick, onClose, onLines, toast
     let plan = 0, ur = 0, qiH = 0, blH = 0, none = 0, disp = 0, pickedNd = 0, pend = 0, firstUr = 0, newUr = 0, qiRel = 0, blRel = 0, based = 0;
     for (const l of lines) {
       const q = Number(l.qty) || 0, u = Math.max(0, Number(l.ur) || 0), qi = Math.max(0, Number(l.qi) || 0), bl = Math.max(0, Number(l.block) || 0);
-      const pu = Math.min(q, u), rest0 = q - pu, qh = Math.min(rest0, qi), bh = Math.min(rest0 - qh, bl);
+      const pu = planUrLine(l), rest0 = q - pu, qh = Math.min(rest0, qi), bh = Math.min(rest0 - qh, bl);
       plan += q; ur += pu; qiH += qh; blH += bh; none += Math.max(0, rest0 - qh - bh);
       const d = Math.min(pu, Number(l.dispatched) || 0), pnd = Math.max(0, Math.min(pu, Number(l.picked) || 0) - d);
       disp += d; pickedNd += pnd; pend += Math.max(0, pu - d - pnd);
@@ -139,7 +139,7 @@ export default function PlanFlow({ title, lines, repick, onClose, onLines, toast
       else if (u <= 1e-9 && qi > 1e-9) { why = `In QI (${q2(qi)}) — picked when released`; cl = 'warn'; }
       else if (u <= 1e-9 && bl > 1e-9) { why = `In Block (${q2(bl)}) — picked when released`; cl = 'warn'; }
       else if (u <= 1e-9) { why = 'No UR stock'; cl = 'bad'; }
-      else if (pk >= Math.min(q, u) - 1e-9) { why = `UR picked (${q2(pk)}) — rest has no UR${qi > 1e-9 ? ` · QI ${q2(qi)}` : ''}${bl > 1e-9 ? ` · Block ${q2(bl)}` : ''}`; cl = 'bad'; }
+      else if (pk >= planUrLine(l) - 1e-9) { why = `UR picked (${q2(pk)}) — rest has no UR${qi > 1e-9 ? ` · QI ${q2(qi)}` : ''}${bl > 1e-9 ? ` · Block ${q2(bl)}` : ''}`; cl = 'bad'; }
       else { why = 'UR there — no matching roll picked yet (Pick → Needs manual)'; cl = 'info'; }
       out.push({ l, bal, why, c: cl });
     }

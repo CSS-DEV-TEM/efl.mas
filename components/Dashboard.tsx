@@ -9,7 +9,7 @@ import PlantSummary from '@/components/PlantSummary';
 import PlanPicks from '@/components/PlanPicks';
 import { fmtTime, type PlantInfo } from '@/lib/summary';
 import { EMPTY_REPICK, loadRepick, lineRef as repRef, type BalCat, type RepickData } from '@/lib/repick';
-import { avail as urLeftOf } from '@/lib/calc';
+import { avail as urLeftOf, planUrLine } from '@/lib/calc';
 import { api, userParam } from '@/lib/api';
 import { useRefreshOnActivity } from '@/lib/freshness';
 import { COVERAGES, periodOf, type DispatchSummary, ago, compact, coverage, fmt, fmtDate, isDone, lineRef, totals, type Coverage, type Line, type Upload, type WeekInfo } from '@/lib/calc';
@@ -52,10 +52,11 @@ export function rollsOfLines(ls: Line[], pickRolls: PickRollRow[] | undefined) {
   const cut = all.filter((x) => x.full > 0 && x.q < x.full - 0.0005);
   return { rolls: all.length, cut: cut.length, cutQty: cut.reduce((t0, x) => t0 + x.q, 0), qty: all.reduce((t0, x) => t0 + x.q, 0) };
 }
-/** Plan UR: what the UR covers of the plan — each line's QTY, at most its UR (QTY 100 / UR 1000 → 100; QTY 100 / UR 50 → 50) */
+/** Plan UR: what the UR covers of the plan — each line's QTY, at most its UR (QTY 100 / UR 1000 → 100; QTY 100 / UR 50 → 50).
+ * v213: what is picked / dispatched stays in it (picked + UR left), so a pick or a later ZMMBE without the picked rolls does not lower it */
 export function planUrOf(ls: Line[]) {
   let v = 0, short = 0, n = 0;
-  for (const l of ls) { const q = Number(l.qty) || 0, u0 = Math.max(0, Number(l.ur) || 0); const c = Math.min(q, u0); v += c; if (c > 1e-9) n++; if (u0 < q - 1e-9) short++; }
+  for (const l of ls) { const q = Number(l.qty) || 0; const c = planUrLine(l); v += c; if (c > 1e-9) n++; if (c < q - 1e-9) short++; }
   return { v, short, n };
 }
 /** the plan report figures of these lines: ALRADY SEND, QI, BLOCK, TN (per SO / LI / Item, counted once) and POSIBAL PENDING (per line) */
@@ -95,7 +96,7 @@ export function repickOf(ls: Line[], d: RepickData) {
     // the balance of the line: plan QTY − dispatched
     const lb = Math.max(0, q - (Number(l.dispatched) || 0));
     // v209: the Plan UR balance of the line: its Plan UR (QTY, at most its UR) − dispatched
-    const ub = Math.max(0, Math.min(q, ur) - (Number(l.dispatched) || 0));
+    const ub = Math.max(0, planUrLine(l) - Math.min(q, Number(l.dispatched) || 0));
     urBalance += ub; if (ub > 1e-9) urBalLines++;
     balance += lb;
     if (lb > 1e-9) open.push({ l, bal: lb });
@@ -480,7 +481,7 @@ export default function Dashboard({ planType = 'week' }: { planType?: 'week' | '
         <div className="kpi"><span className="k">Required QTY</span><span className="v"><CountUp value={t.qty} format={compact} /></span><span className="s" title="QTY − Assigned">Variance {compact(t.variance)}</span>{unfiltered && prevW && thisW && <span className="s">vs {weekLabel(prevW.week)}: {compact(prevW.qty)} {delta(thisW.qty, prevW.qty, false, true)}</span>}</div>
         <div className="kpi"><span className="k">Full UR stock</span><span className="v"><CountUp value={t.ur} format={compact} /></span><span className="s" title="In the warehouse (not at the plant storage locations 40 / 70 / 75)">QI {compact(t.qi)} · Block {compact(t.block)} in the warehouse</span></div>
         <div className="kpi"><span className="k">KFC / PFC UR</span><span className="v"><CountUp value={t.kfc_ur} format={compact} /></span><span className="s">PFC {compact(t.pfc_ur)}</span></div>
-        <div className="kpi"><span className="k">Plan UR</span><span className="v"><CountUp value={planUr.v} format={compact} /></span><span className="s" title="Each line's QTY, at most its UR (Total − QI − Block − Assigned)">of QTY {compact(t.qty)} · {fmt(planUr.short)} lines short</span>
+        <div className="kpi"><span className="k">Plan UR</span><span className="v"><CountUp value={planUr.v} format={compact} /></span><span className="s" title="Each line's QTY, at most what its UR covers: picked / dispatched + UR left (a pick does not lower it)">of QTY {compact(t.qty)} · {fmt(planUr.short)} lines short</span>
           <div className="meter"><span style={{ width: `${t.qty ? Math.min(100, (planUr.v / t.qty) * 100) : 0}%`, background: 'var(--ok)' }} /></div></div>
         {rep && <>
           <div className="kpi"><span className="k">Transfer notes</span><span className="v"><CountUp value={rep.tnCount} format={(n) => fmt(n)} /></span><span className="s" title="ZMM_TRR transfer requests of these SO lines">{fmt(rep.tnLines)} SO/LI lines · {compact(rep.tnQty)} QTY{rep.tnUr > 1e-9 ? ` · TN-UR ${compact(rep.tnUr)}` : ''}</span></div>

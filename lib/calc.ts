@@ -52,6 +52,12 @@ export const lineRef = (l: Pick<Line, 'key' | 'date'>) => `${l.key}@${l.date ?? 
 export const need = (l: Line) => (l.balance ?? l.qty);
 /** UR stock still available after the dispatch (UR − dispatched). */
 export const avail = (l: Line) => (l.ur_left ?? l.ur);
+/**
+ * v213: a line's Plan UR — what the UR covers of its QTY: what is already picked / dispatched plus the UR still left to pick
+ * (at most the QTY). A pick does not lower it: when a later ZMMBE no longer has the picked rolls, they are still in the
+ * dispatched part. No pick yet: QTY, at most its UR.
+ */
+export const planUrLine = (l: Line) => { const q = Number(l.qty) || 0, d = Math.min(q, Math.max(0, Number(l.dispatched) || 0)); return Math.min(q, d + Math.max(0, Number(avail(l)) || 0)); };
 /** Every QTY of the line has gone out on a dispatch. */
 export const isDispatched = (l: Line) => (l.dispatched ?? 0) > 0 && need(l) <= 1e-9;
 

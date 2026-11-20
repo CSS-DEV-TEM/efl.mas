@@ -106,7 +106,7 @@ export default function PlantSummary({ rows, plants, received = [], week, day, c
     { card: 'KFC / PFC UR', tip: 'UR at the KFC and PFC storage locations', subs: [
       { h: 'KFC', get: (k) => ({ v: k.t.kfc_ur, k: 'q' }) }, { h: 'PFC', get: (k) => ({ v: k.t.pfc_ur, k: 'q' }) }] },
     // v202: Plan UR and Dispatched in one place — what the UR covers of the plan, what is dispatched of it, and what is left
-    { card: 'Plan UR · Dispatched', tip: "Plan UR: each line's QTY, at most its UR (Total − QI − Block − Assigned) · Dispatched: QTY dispatched and lines complete · Plan UR balance: Plan UR − Dispatched · Balance: Plan QTY − Dispatched", subs: [
+    { card: 'Plan UR · Dispatched', tip: "Plan UR: each line's QTY, at most what its UR covers — picked / dispatched + UR left (a pick does not lower it) · Dispatched: QTY dispatched and lines complete · Plan UR balance: Plan UR − Dispatched · Balance: Plan QTY − Dispatched", subs: [
       { h: 'Plan UR', get: (k) => ({ v: k.planUr.v, k: 'q', cls: 'strong' }) }, { h: 'Lines short', get: (k) => ({ v: k.planUr.short, k: 'n', cls: k.planUr.short ? 'warn-t' : '' }) },
       { h: 'Dispatched', get: (k) => ({ v: k.t.dispatched + k.rp.closed.dispatched, k: 'q', cls: 'strong', title: k.rp.closed.dispatched ? `incl. ${fmt(k.rp.closed.dispatched, 2)} completed by hand` : undefined }) }, { h: 'Lines', get: (k) => ({ v: k.t.dispatchedLines, k: 'n' }) },
       // v203: the balance of each open line (plan QTY − dispatched); a line completed by hand is 0 (its balance is in the category chosen)
