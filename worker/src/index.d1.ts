@@ -731,7 +731,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 136; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 138; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -3185,6 +3185,9 @@ async function handlePick(env: Env, req: Request, p: string) {
       // Quantity 0 — the row with the most Available Quantity (then Status UR) is the live one
       const seen = new Map<string, Row>();
       const seenBin = new Map<string, Row>();
+      // v215: a roll SAP splits over two System Batches (a part of the roll in each): each batch's row with an Available
+      // Quantity is kept — a SO line of one batch picks only that batch's part of the roll
+      const seenBat = new Map<string, Row>();
       const better = (a: Row, c: Row) => (Number(c.qty ?? 0) > Number(a.qty ?? 0) + 1e-9) || (Math.abs(Number(c.qty ?? 0) - Number(a.qty ?? 0)) <= 1e-9 && up(c.status) === 'UR' && up(a.status) !== 'UR');
       for (const r of b.rows) {
         const barcode = up(g(r, 'barcode'));
@@ -3201,6 +3204,11 @@ async function handlePick(env: Env, req: Request, p: string) {
         if (!prev || better(prev, cand)) seen.set(barcode, cand);
         // v130: the same roll in more than one StorageBin (a part in FIXED, the rest in another bin): each bin's row with an
         // Available Quantity is kept too — the part in an allowed bin is what can be picked
+        if (cand.batch && Number(cand.qty ?? 0) > 1e-9) {
+          const kt = `${barcode}#${cand.batch}#${cand.bin ?? ''}`;
+          const pt = seenBat.get(kt);
+          if (!pt || better(pt, cand)) seenBat.set(kt, cand);
+        }
         if (cand.bin && Number(cand.qty ?? 0) > 1e-9) {
           const kb = `${barcode}#${cand.bin}`;
           const pb = seenBin.get(kb);
@@ -3214,6 +3222,15 @@ async function handlePick(env: Env, req: Request, p: string) {
         if (!best || best === r0 || up(best.bin) === up(r0.bin)) continue;
         if (Array.from(seenBin.entries()).filter(([k2]) => k2.split('#')[0] === r0.barcode).length < 2 && Number(best.qty ?? 0) > 1e-9) continue;
         extra.push(r0); skipped = Math.max(0, skipped - 1);
+      }
+      // v215: the other System Batches of a split roll (rows with an Available Quantity)
+      const kept = new Set<Row>([...Array.from(seen.values()), ...extra]);
+      for (const r0 of seenBat.values()) {
+        if (kept.has(r0)) continue;
+        const best = seen.get(String(r0.barcode));
+        if (!best || normId(best.batch) === normId(r0.batch)) continue;
+        if (Array.from(kept).some((k0) => k0.barcode === r0.barcode && normId(k0.batch) === normId(r0.batch) && up(k0.bin) === up(r0.bin))) continue;
+        kept.add(r0); extra.push(r0); skipped = Math.max(0, skipped - 1);
       }
       rows = [...Array.from(seen.values()), ...extra];
     } else if (b.src === 'zcoment') {
@@ -3670,14 +3687,14 @@ async function handlePick(env: Env, req: Request, p: string) {
     const lineB = new Set(String(url.searchParams.get('batches') || '').split(',').map((x) => normId(x)).filter(Boolean));
     if (lineB.size && !trimK) for (const r of rows) {
       if (r.blocked) continue;
-      const zb = gate.loaded ? await gate.batchOf(String(r.pallet)) : null;
+      const zbs = gate.loaded ? await gate.batchesOf(String(r.pallet)) : [];
       const zcB = (await kenv.DB.prepare('SELECT DISTINCT batch FROM zcoment WHERE barcode = ?').bind(up(r.pallet)).all<Row>()).results.map((z) => normId(z.batch)).filter(Boolean);
-      const known = Array.from(new Set([normId(zb), ...zcB].filter(Boolean)));
+      const known = Array.from(new Set([...zbs, ...zcB].filter(Boolean)));
       if (known.length && !known.some((bt) => lineB.has(bt))) { r.blocked = `Batch ${known.join(' / ')} — not this SO line's ZMMBE batch`; r.available = 0; }
     }
     // the same cap as the save: ZROLLMGT Available Quantity (a roll with a Reserved part has less)
     if (gate.on && !trimK) {
-      const av = await gate.availOf(rows.filter((r) => !r.blocked).map((r) => String(r.pallet)));
+      const av = await gate.availOf(rows.filter((r) => !r.blocked).map((r) => String(r.pallet)), lineB.size ? lineB : undefined);
       for (const r of rows) {
         const a = av.get(up(r.pallet));
         if (!r.blocked && a !== undefined && a < Number(r.available) - 1e-6) { r.reserved = r3(Number(r.available) - Math.max(0, a)); r.available = Math.max(0, r3(a)); }
@@ -3766,14 +3783,14 @@ async function handlePick(env: Env, req: Request, p: string) {
       // ZCOMENT barcode's batch) must be one of this SO line's ZMMBE batches with UR — a roll of another batch is never picked
       if (!byPallet.has(r.pallet) && !cand.trim) {
         const lineB = new Set(cand.stock.filter((z) => Number(z.ur) > 0).map((z) => normId(z.batch)));
-        const zb = gate.loaded ? await gate.batchOf(r.pallet) : null;
+        const zbs = gate.loaded ? await gate.batchesOf(r.pallet) : [];
         const zcB = (await senv.DB.prepare('SELECT DISTINCT batch FROM zcoment WHERE barcode = ?').bind(up(r.pallet)).all<Row>()).results.map((z) => normId(z.batch)).filter(Boolean);
-        const known = Array.from(new Set([normId(zb), ...zcB].filter(Boolean)));
+        const known = Array.from(new Set([...zbs, ...zcB].filter(Boolean)));
         if (lineB.size && known.length && !known.some((bt) => lineB.has(bt)))
           throw new HttpError(409, `Pallet ${r.pallet} is batch ${known.join(' / ')} — not a ZMMBE batch of ${line.so} / ${line.li} (${Array.from(lineB).join(', ')}). A roll of another batch cannot be picked for this SO line.`);
       }
       // a roll chosen by hand: at most its ZROLLMGT Available Quantity too (a Reserved part in SAP is not picked)
-      if (!byPallet.has(up(x.pallet)) && gate.on && !cand.trim) { const a = (await gate.availOf([r.pallet])).get(up(r.pallet)); if (a !== undefined && a < r.available - 1e-6) r.available = Math.max(0, r3(a)); }
+      if (!byPallet.has(up(x.pallet)) && gate.on && !cand.trim) { const a = (await gate.availOf([r.pallet], new Set(cand.stock.filter((z) => Number(z.ur) > 0).map((z) => normId(z.batch))))).get(up(r.pallet)); if (a !== undefined && a < r.available - 1e-6) r.available = Math.max(0, r3(a)); }
       // Korber Pick Id must be 0 (another number: the roll is already on a WMS pick); a rejected roll is not picked again
       const kp = await senv.DB.prepare('SELECT pick_id, location, wh FROM korber WHERE pallet = ?').bind(up(r.pallet)).first<Row>();
       if (kp && String(kp.pick_id ?? '0') !== '0' && String(kp.pick_id ?? '') !== '') throw new HttpError(409, `Pallet ${r.pallet} is on Korber Pick Id ${kp.pick_id} — only rolls with Pick Id 0 can be picked.`);
@@ -4254,9 +4271,9 @@ async function handlePick(env: Env, req: Request, p: string) {
       const lkey = String(reqRow.line ?? '').split('|').slice(0, 3).join('|');
       const okB = new Set([...String(rj.batch ?? '').split(','), ...(await senv.DB.prepare("SELECT batch FROM stock WHERE src = 'zmmbe' AND key = ? AND ur > 0").bind(lkey).all<Row>()).results.map((z) => String(z.batch ?? ''))].map((x) => normId(x)).filter(Boolean));
       const g2 = await makeGate(senv);
-      const zb = g2.loaded ? await g2.batchOf(pallet) : null;
+      const zbs = g2.loaded ? await g2.batchesOf(pallet) : [];
       const zcB = (await senv.DB.prepare('SELECT DISTINCT batch FROM zcoment WHERE barcode = ?').bind(pallet).all<Row>()).results.map((z) => normId(z.batch)).filter(Boolean);
-      const known = Array.from(new Set([normId(zb), ...zcB].filter(Boolean)));
+      const known = Array.from(new Set([...zbs, ...zcB].filter(Boolean)));
       if (okB.size && known.length && !known.some((bt) => okB.has(bt))) throw new HttpError(409, `Pallet ${pallet} is batch ${known.join(' / ')} — not the batch of ${rj.so} / ${rj.li} (${Array.from(okB).join(', ')}).`);
     }
     const pp = await palletPicks(env, pallet);
@@ -5289,39 +5306,60 @@ async function makeGate(env: Env) {
   // v130: a roll in several StorageBins (a part in FIXED, the rest in an allowed bin): only the Available Quantity of its rows
   // in the allowed bins can be picked — counted always (also when the Available Quantity check is off)
   const splitNote = new Map<string, string>();
-  const availOf = async (pallets: string[]) => {
+  // v215: lineB = the SO line's ZMMBE batches — a roll SAP splits over several System Batches gives the line only the part
+  // in the line's batches (never the whole roll for one batch)
+  const availOf = async (pallets: string[], lineB?: Set<string>) => {
     const out = new Map<string, number>();
     if (!on || !loaded || !pallets.length) return out;
-    const all = (await env.DB.prepare('SELECT barcode, qty, rid, bin, status FROM zroll WHERE barcode IN (SELECT value FROM json_each(?)) AND qty IS NOT NULL').bind(JSON.stringify(Array.from(new Set(pallets.map(up))))).all<Row>()).results;
+    const all = (await env.DB.prepare('SELECT barcode, qty, rid, bin, status, batch FROM zroll WHERE barcode IN (SELECT value FROM json_each(?)) AND qty IS NOT NULL').bind(JSON.stringify(Array.from(new Set(pallets.map(up))))).all<Row>()).results;
     const byB = new Map<string, Row[]>();
     for (const z of all) { const k = up(z.barcode); const a = byB.get(k); if (a) a.push(z); else byB.set(k, [z]); }
     const okRow = (z: Row) => rule.ok(z.bin) && (!hasStatus || statusOk(z.status));
     const zs: Row[] = [];
+    const multiB = new Map<string, Set<string>>();
     for (const [k, rs] of byB) {
-      const good = rs.filter(okRow), bad = rs.filter((z) => !rule.ok(z.bin) && Number(z.qty ?? 0) > 1e-9);
+      let good = rs.filter(okRow);
+      const bad = rs.filter((z) => !rule.ok(z.bin) && Number(z.qty ?? 0) > 1e-9);
       const split = good.length > 0 && bad.length > 0;
-      if (!useAvail && !split) continue;
+      // v215: the roll is in several System Batches and some are not this line's: only its rows of the line's batches
+      const bats = new Set(rs.filter((z) => Number(z.qty ?? 0) > 1e-9).map((z) => normId(z.batch)).filter(Boolean));
+      const multi = !!lineB?.size && bats.size > 1 && Array.from(bats).some((bt) => !lineB.has(bt));
+      let other: Row[] = [];
+      if (multi) { other = good.filter((z) => !lineB!.has(normId(z.batch)) && Number(z.qty ?? 0) > 1e-9); good = good.filter((z) => lineB!.has(normId(z.batch))); multiB.set(k, lineB!); }
+      if (!useAvail && !split && !multi) continue;
       const q = r3(good.reduce((t, z) => t + Number(z.qty ?? 0), 0));
-      if (split) splitNote.set(k, `ZROLLMGT: ${q} in ${Array.from(new Set(good.map((z) => z.bin || '–'))).join(', ')} can be picked — ${r3(bad.reduce((t, z) => t + Number(z.qty ?? 0), 0))} is in ${Array.from(new Set(bad.map((z) => z.bin || '–'))).join(', ')}`);
+      const notes: string[] = [];
+      if (multi) notes.push(`ZROLLMGT: the roll is in ${bats.size} System Batches — ${q} of batch ${Array.from(new Set(good.map((z) => normId(z.batch)))).join(', ') || '–'} is for this SO line (${other.map((z) => `${r3(Number(z.qty))} batch ${normId(z.batch)}`).join(', ')} is not)`);
+      if (split) notes.push(`ZROLLMGT: ${q} in ${Array.from(new Set(good.map((z) => z.bin || '–'))).join(', ')} can be picked — ${r3(bad.reduce((t, z) => t + Number(z.qty ?? 0), 0))} is in ${Array.from(new Set(bad.map((z) => z.bin || '–'))).join(', ')}`);
+      if (notes.length) splitNote.set(k, notes.join(' · '));
       zs.push({ barcode: k, qty: q, rid: rs[0].rid });
     }
     if (!zs.length) return out;
     // the Available Quantity is as of the ZROLLMGT upload: what was picked from the roll since then is taken off
     // (SAP does not show it yet), so a roll with a Reserved part is never picked over what SAP has available
     const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zroll' AND rid = ?").bind(String(zs[0].rid ?? '')).first<{ at: string | null }>())?.at ?? '';
-    const after = new Map((await env.DB.prepare('SELECT upper(pallet) p, SUM(qty) q FROM picks WHERE cancelled_at IS NULL AND at > ? AND upper(pallet) IN (SELECT value FROM json_each(?)) GROUP BY upper(pallet)')
-      .bind(zAt, JSON.stringify(zs.map((z) => up(z.barcode)))).all<{ p: string; q: number }>()).results.map((x) => [x.p, Number(x.q) || 0]));
+    const after = new Map<string, number>();
+    for (const x of (await env.DB.prepare('SELECT upper(pallet) p, batch b, SUM(qty) q FROM picks WHERE cancelled_at IS NULL AND at > ? AND upper(pallet) IN (SELECT value FROM json_each(?)) GROUP BY upper(pallet), batch')
+      .bind(zAt, JSON.stringify(zs.map((z) => up(z.barcode)))).all<{ p: string; b: string | null; q: number }>()).results) {
+      // a split roll: only the picks of the line's batches (a pick with no batch counts too) come off that part
+      const lb = multiB.get(x.p);
+      const bs = String(x.b ?? '').split(',').map((t) => normId(t)).filter(Boolean);
+      if (lb && bs.length && !bs.some((t) => lb.has(t))) continue;
+      after.set(x.p, r3((after.get(x.p) ?? 0) + (Number(x.q) || 0)));
+    }
     for (const z of zs) out.set(up(z.barcode), Math.max(0, r3(Number(z.qty) - (after.get(up(z.barcode)) ?? 0))));
     return out;
   };
   /** ZROLLMGT Available Quantity per System Batch over the given pallets, less what was picked from them since the upload */
-  const poolOf = async (pallets: string[]) => {
+  const poolOf = async (pallets: string[], lineB?: Set<string>) => {
     const out = new Map<string, { avail: number; pallets: string[] }>();
     if (!useAvail || !loaded || !pallets.length) return out;
     // a roll with a Reserved Quantity in SAP keeps its own Available (the reserved part is not picked): not shared
     const reserved = (raw: unknown) => { try { const o = JSON.parse(String(raw ?? '{}')) as Record<string, unknown>; const k = Object.keys(o).find((x) => /^reserved\s*(quantity|qty)?$/i.test(x.trim())); return k ? Number(o[k]) || 0 : 0; } catch { return 0; } };
     const zs = (await env.DB.prepare('SELECT barcode, qty, batch, rid, raw FROM zroll WHERE barcode IN (SELECT value FROM json_each(?)) AND qty IS NOT NULL').bind(JSON.stringify(Array.from(new Set(pallets.map(up))))).all<Row>()).results
-      .filter((z) => !(reserved(z.raw) > 1e-9));
+      .filter((z) => !(reserved(z.raw) > 1e-9))
+      // v215: only the line's batches (a split roll's part in another batch is not this line's)
+      .filter((z) => !lineB?.size || !z.batch || lineB.has(normId(z.batch)));
     if (!zs.length) return out;
     const zAt = (await env.DB.prepare("SELECT MAX(uploaded_at) at FROM uploads WHERE src = 'zroll' AND rid = ?").bind(String(zs[0].rid ?? '')).first<{ at: string | null }>())?.at ?? '';
     const after = new Map((await env.DB.prepare('SELECT upper(pallet) p, SUM(qty) q FROM picks WHERE cancelled_at IS NULL AND at > ? AND upper(pallet) IN (SELECT value FROM json_each(?)) GROUP BY upper(pallet)')
@@ -5341,9 +5379,16 @@ async function makeGate(env: Env) {
     const pf = new Set((prefer || []).map((b0) => normId(b0)).filter(Boolean));
     return (pf.size ? bs.find((b0) => pf.has(normId(b0))) : undefined) ?? bs[0] ?? null;
   };
+  /** v215: every System Batch of the roll in ZROLLMGT (a roll SAP splits over batches has more than one) */
+  const batchesOf = async (pallet: string) => {
+    if (!loaded) return [] as string[];
+    const zr = await rowsOf([up(pallet)]);
+    const live = zr.filter((z) => Number(z.qty ?? 0) > 1e-9);
+    return Array.from(new Set((live.length ? live : zr).map((z) => normId(z.batch)).filter(Boolean)));
+  };
   const rowOk = (z: Row) => !on || !rowWhy(z);
   const locWhy = locBlocker(st);
-  return { on, bin, loaded, hasStatus, useAvail, splitNote, check, atBin, rowOk, rowWhy, batchOf, availOf, poolOf, locWhy };
+  return { on, bin, loaded, hasStatus, useAvail, splitNote, check, atBin, rowOk, rowWhy, batchOf, batchesOf, availOf, poolOf, locWhy };
 }
 
 /**
@@ -5742,8 +5787,8 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
           const checks = { item: itemOk, lot: up(k.lot) === up(sh.vendor_batch || lot.vendor_batch), hu: sh.roll_no ? up(k.supplier_hu) === up(sh.roll_no) : null, invoice: lot.invoice && k.invoice ? invRoot(k.invoice) === invRoot(lot.invoice) : null };
           if (why) { block(why, k); continue; }
           // the roll's ZROLLMGT System Batch must be a ZMMBE batch of the line
-          const zb = await gate.batchOf(String(k.pallet));
-          if (zb && urBatches.size && !urBatches.has(normId(zb))) { block(`ZROLLMGT System Batch ${zb} is not this line's ZMMBE batch (${Array.from(urBatches).join(', ')})`, k); continue; }
+          const zbs = await gate.batchesOf(String(k.pallet));
+          if (zbs.length && urBatches.size && !zbs.some((b0) => urBatches.has(b0))) { block(`ZROLLMGT System Batch ${zbs.join(' / ')} is not this line's ZMMBE batch (${Array.from(urBatches).join(', ')})`, k); continue; }
           const kb = await korberBase(k, lot, { shade, barcode: sh.barcode as string, via: up(k.pallet) === up(sh.barcode) ? null : String(k.pallet), checks,
             warnings: itemOk ? [] : [`Item ${k.item} ≠ ${lot.material}`], needsConfirm: !itemOk });
           addRoll(kb, lot);
@@ -6057,7 +6102,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
   }
   // ZROLLMGT Available Quantity: a roll with a Reserved part in SAP is picked only up to what SAP has available
   if (gate.on && !trims) {
-    const av = await gate.availOf(Array.from(rolls.keys()));
+    const av = await gate.availOf(Array.from(rolls.keys()), urBatches);
     const limited: Candidate[] = [];
     for (const r of rolls.values()) {
       const a = av.get(up(r.pallet));
@@ -6065,7 +6110,7 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
     }
     // several rolls of one batch each with a small ZROLLMGT Available (SAP spread the batch's UR over its rolls): their
     // Available counts together, so the QTY is cut from as few rolls as possible — never a little from each roll
-    const pools = limited.length > 1 ? await gate.poolOf(limited.map((r) => r.pallet)) : new Map<string, { avail: number; pallets: string[] }>();
+    const pools = limited.length > 1 ? await gate.poolOf(limited.map((r) => r.pallet), urBatches) : new Map<string, { avail: number; pallets: string[] }>();
     for (const r of limited) {
       const a = av.get(up(r.pallet))!;
       const pool = Array.from(pools.entries()).find(([, e]) => e.pallets.includes(up(r.pallet)) && e.pallets.length > 1);
