@@ -14,6 +14,7 @@ import { ago, fmt, fmtDate, type Upload, type WeekInfo } from '@/lib/calc';
 import { TEMPLATES, downloadTemplate } from '@/lib/templates';
 import DayPickBar, { useDayPick } from '@/components/DayPickBar';
 import UsedPallets from '@/components/UsedPallets';
+import KorberLess from '@/components/KorberLess';
 import PlanReport from '@/components/PlanReport';
 import { todayLocal, weekDays, weekIdOf, weekOptions } from '@/lib/smart';
 import { keepFile } from '@/lib/files';
@@ -343,6 +344,7 @@ function Uploads() {
 
       <DayPickBar day={day} setDay={setDay} rid={rid} setRid={setRid} toast={toast} refreshKey={barKey} onUploaded={() => { void loadStatus(); }} />
       <UsedPallets canEdit={canEdit} toast={toast} />
+      <KorberLess toast={toast} pickName={(w) => { const m = /^(\d{4})-(\d{2})-(\d{2})~([^~]*)~(\d+)$/.exec(w); return m ? `${m[3]}-${m[2]} · ${m[4] === '-' ? 'No plant' : m[4]} · Pick ${m[5]}` : /^\d{4}-W\d{2}/.test(w) ? `Week plan ${w}` : w; }} />
 
       <div className="tabs" role="tablist" style={{ margin: '4px 0 2px' }}>
         <button role="tab" aria-selected={tab === 'upload'} className={tab === 'upload' ? 'on' : ''} onClick={() => setTab('upload')}>Upload reports</button>

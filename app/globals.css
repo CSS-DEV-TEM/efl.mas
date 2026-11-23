@@ -2146,3 +2146,13 @@ input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, te
 .pf-tbl td:last-child{white-space:normal}
 .pf-scroll{max-height:60vh;overflow:auto}
 @media (max-width:600px){.pf-time li{grid-template-columns:1fr}.pf-time time{grid-row:auto}}
+
+/* v214: Korber − all picks dialog (solid, above the page) */
+.kl-dlg{background:var(--panel) !important;backdrop-filter:none}
+
+/* v214: a working (aria-busy) primary button — its spinner shares ::after with the hover light sweep; keep the spinner a
+   centred 14px ring (not stretched to the corner, no sweep gradient, no slide), and no sweep on a disabled button */
+.btn.primary[aria-busy="true"]::after { inset: auto; left: 50%; top: 50%; width: 14px; height: 14px; margin: -7px 0 0 -7px;
+  background: none; transform: none; transition: none; border-radius: 50%; border: 2px solid #fff; border-color: #fff transparent #fff transparent; animation: spin .7s linear infinite; }
+.btn.primary:disabled:not([aria-busy="true"]):hover::after { transform: translateX(-130%); transition: none; }
+.btn[aria-busy="true"], .btn[aria-busy="true"]:hover, .btn[aria-busy="true"]:active { transform: none; }
