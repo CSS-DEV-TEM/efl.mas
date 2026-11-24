@@ -731,7 +731,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 138; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 139; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -5594,7 +5594,14 @@ async function pickCandidates(env: Env, week: string, key: string, date: string,
   });
   const addRoll = (c: Candidate, lot: Row) => {
     const prev = rolls.get(c.pallet);
-    if (prev) { if (!prev.insp_lots.includes(String(lot.lot))) prev.insp_lots.push(String(lot.lot)); if (!prev.batches.includes(String(lot.batch))) prev.batches.push(String(lot.batch)); return; }
+    if (prev) {
+      if (!prev.insp_lots.includes(String(lot.lot))) prev.insp_lots.push(String(lot.lot));
+      if (!prev.batches.includes(String(lot.batch))) prev.batches.push(String(lot.batch));
+      // v216: the same roll in another inspection lot of THIS SO line (SAP splits a roll over the line's PO items: 41.666 + 2.465
+      // of one 45 roll) — the roll serves each of those lots, so the line can take the QTY of all of them from it
+      if (prev.parts?.length && c.parts?.length && !prev.parts.some((p0) => String(p0.lot) === String(lot.lot))) prev.parts.push(...c.parts.filter((p0) => String(p0.lot) === String(lot.lot)));
+      return;
+    }
     rolls.set(c.pallet, c);
   };
   // pallets that are the Barcode Number of a ZCOMENT roll belong to that roll
