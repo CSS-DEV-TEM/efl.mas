@@ -971,21 +971,29 @@ export function autoPlan(c: Candidates, withPool = false): { sel: Sel; last: Las
   }
   // no batch split: the TRANSFER NOTE rolls first, up to their TN QTY
   if (!need) for (const g of tnGroups(avail.filter((x) => x.tn && x.available > 1e-9))) tnFill(g, () => left, null);
+  // v217: after the batches, a roll still gives at most what its batches still need — a batch never gets more than its
+  // ZMMBE UR (a roll part of a batch the batch split does not know stays as before)
+  const bRoom = (r: Candidate) => {
+    if (!need) return Infinity;
+    let t = 0;
+    for (const p of rollParts(r)) { if (!need.has(p.batch)) return Infinity; t += Math.min(p.qty, need.get(p.batch) ?? 0); }
+    return r3(t);
+  };
   // whatever the batches do not explain: any matched roll, full rolls first (an exact set first: no cut), then the best fit
   if (left > 1e-9) {
-    const rest = avail.filter((r) => !r.tn && !sel[r.pallet] && r.available > 1e-9 && r.available <= left + 1e-9 && r.available <= room(r) + 1e-9);
+    const rest = avail.filter((r) => !r.tn && !sel[r.pallet] && r.available > 1e-9 && r.available <= left + 1e-9 && r.available <= room(r) + 1e-9 && r.available <= bRoom(r) + 1e-9);
     const exact = exactSubset(rest.map((r) => ({ id: r.pallet, q: r.available })), left);
-    if (exact && fitsLots(rest.filter((r) => exact.has(r.pallet)))) for (const r of rest) if (exact.has(r.pallet)) take(r, r.available, null);
+    if (exact && fitsLots(rest.filter((r) => exact.has(r.pallet)))) for (const r of rest) if (exact.has(r.pallet)) take(r, r.available, need);
   }
   for (const r of avail.filter((x) => !x.tn).sort((a, b) => Number(b.picked_before > 0) - Number(a.picked_before > 0))) {
     if (left <= 1e-9) break;
-    if (!sel[r.pallet] && r.available > 1e-9 && r.available <= left + 1e-9 && r.available <= room(r) + 1e-9) take(r, r.available, null);
+    if (!sel[r.pallet] && r.available > 1e-9 && r.available <= left + 1e-9 && r.available <= room(r) + 1e-9 && r.available <= bRoom(r) + 1e-9) take(r, r.available, need);
   }
   if (left > 1e-9) {
-    const fit = avail.filter((r) => !r.tn && !sel[r.pallet] && r.available >= left && room(r) >= left - 1e-9).sort((a, b) => Number(b.picked_before > 0) - Number(a.picked_before > 0) || a.available - b.available)[0];
-    if (fit) { last = { pallet: fit.pallet, hu: fit.supplier_hu, full: r3(fit.available), cut: left }; take(fit, left, null); }
+    const fit = avail.filter((r) => !r.tn && !sel[r.pallet] && r.available >= left && room(r) >= left - 1e-9 && bRoom(r) >= left - 1e-9).sort((a, b) => Number(b.picked_before > 0) - Number(a.picked_before > 0) || a.available - b.available)[0];
+    if (fit) { last = { pallet: fit.pallet, hu: fit.supplier_hu, full: r3(fit.available), cut: left }; take(fit, left, need); }
     // no roll covers the rest inside its lot: cut a roll in each lot that still gives some (v184: every lot, not only one)
-    else cutPerLot(() => left, () => avail.filter((r) => !r.tn && !sel[r.pallet] && r.available > 1e-9), null, null);
+    else cutPerLot(() => left, () => avail.filter((r) => !r.tn && !sel[r.pallet] && r.available > 1e-9 && bRoom(r) > 1e-9), need ? bRoom : null, need);
   }
   return { sel, last };
 }
