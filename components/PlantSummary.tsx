@@ -7,6 +7,7 @@ import type { DashKpi } from '@/components/Dashboard';
 import { BAL_CATS, catLabel, type BalCat, type RepickData } from '@/lib/repick';
 import PlanFlow from '@/components/PlanFlow';
 import { SOLI_PER_HOUR, fmtTime, plantSummary, timeMinutes, type Bucket, type PlantInfo, type PlantRow, type TimeSetup } from '@/lib/summary';
+import { askConfirm } from '@/lib/ask';
 
 const q = (n: number) => (Math.abs(n) < 0.0005 ? '' : fmt(n, 2));
 const c = (n: number) => (n ? fmt(n) : '');
@@ -86,7 +87,7 @@ export default function PlantSummary({ rows, plants, received = [], week, day, c
     finally { setDoneBusy(false); }
   };
   const reopen = async (r: PlantRow, k: DashKpi) => {
-    if (!window.confirm(`${r.name}: open the completed balance of ${k.rp.closedN} line${k.rp.closedN === 1 ? '' : 's'} again (${fmt(k.rp.closedQty, 2)})?`)) return;
+    if (!await askConfirm(`${r.name}: open the completed balance of ${k.rp.closedN} line${k.rp.closedN === 1 ? '' : 's'} again (${fmt(k.rp.closedQty, 2)})?`)) return;
     try {
       const groups = byRid(k.rp.closedLines.map((l) => ({ l })));
       for (const [rid, xs] of Array.from(groups.entries())) await api('/api/repick', { method: 'POST', body: { action: 'reopen', rid, lines: xs.map((x) => ({ key: x.l.key, date: x.l.date ?? '' })) } });

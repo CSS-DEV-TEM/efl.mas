@@ -7,6 +7,7 @@ import DayPickBar, { useDayPick } from '@/components/DayPickBar';
 import { api, isBossRole } from '@/lib/api';
 import { ago, fmt, fmtDate, fmtQty } from '@/lib/calc';
 import { uploadPickFile } from '@/lib/pick';
+import { askPrompt } from '@/lib/ask';
 
 export default function Page() {
   return <Shell><DataPage /></Shell>;
@@ -157,7 +158,7 @@ function PalletHistory({ boss, toast }: { boss: boolean; toast: (m: string) => v
   };
   const del = async () => {
     if (!res) return;
-    const t = prompt(`Delete the whole pick history of pallet ${res.pallet}?\n\n${res.picks.length} pick${res.picks.length === 1 ? '' : 's'} (${fmtQty(res.picked)})${res.rejects.length ? ` and ${res.rejects.length} reject${res.rejects.length === 1 ? '' : 's'}` : ''} are deleted: the plan lines lose that picked QTY and the pallet can be picked in full again. This cannot be undone.\n\nType DELETE to confirm.`);
+    const t = await askPrompt(`Delete the whole pick history of pallet ${res.pallet}?\n\n${res.picks.length} pick${res.picks.length === 1 ? '' : 's'} (${fmtQty(res.picked)})${res.rejects.length ? ` and ${res.rejects.length} reject${res.rejects.length === 1 ? '' : 's'}` : ''} are deleted: the plan lines lose that picked QTY and the pallet can be picked in full again. This cannot be undone.\n\nType DELETE to confirm.`);
     if (t === null) return;
     if (t.trim().toUpperCase() !== 'DELETE') { toast('Not deleted — type DELETE to confirm.'); return; }
     try { const r = await api<{ picks: number; rejects: number }>('/api/pick/pallet?p=' + encodeURIComponent(res.pallet), { method: 'DELETE' }); toast(`History of ${res.pallet} deleted (${r.picks} pick${r.picks === 1 ? '' : 's'}${r.rejects ? `, ${r.rejects} reject${r.rejects === 1 ? '' : 's'}` : ''})`); void find(res.pallet); }

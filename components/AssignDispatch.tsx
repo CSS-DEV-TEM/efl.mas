@@ -2,6 +2,7 @@
 import { useMemo, useState } from 'react';
 import { api } from '@/lib/api';
 import { avail, fmt, fmtDate, fmtQty, need, type DispatchAssign, type DispatchItem, type Line } from '@/lib/calc';
+import { askConfirm, notify } from '@/lib/ask';
 
 /** Dispatch QTY that did not match a plan line (item not in plan, or more than planned): assign it to a plan line by hand. */
 export default function AssignDispatch({ week, leftover, assigns, rows, canEdit, onDone }: {
@@ -10,8 +11,8 @@ export default function AssignDispatch({ week, leftover, assigns, rows, canEdit,
   const [open, setOpen] = useState<DispatchItem | null>(null);
   const byLine = useMemo(() => new Map(rows.map((r) => [`${r.key}|${r.date ?? ''}`, r])), [rows]);
   const remove = async (a: DispatchAssign) => {
-    if (!confirm('Remove this assignment? The plan line goes back to its balance before it.')) return;
-    try { await api(`/api/dispatch/assign/${a.id}`, { method: 'DELETE' }); onDone('Assignment removed'); } catch (e) { alert(e instanceof Error ? e.message : 'Failed'); }
+    if (!await askConfirm('Remove this assignment? The plan line goes back to its balance before it.')) return;
+    try { await api(`/api/dispatch/assign/${a.id}`, { method: 'DELETE' }); onDone('Assignment removed'); } catch (e) { void notify(e instanceof Error ? e.message : 'Failed'); }
   };
   if (!leftover.length && !assigns.length) return null;
   const label = (item: string) => (item === '#UR' ? <span className="pill ok">UR left</span> : item);

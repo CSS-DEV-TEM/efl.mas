@@ -1,4 +1,5 @@
 'use client';
+import { askConfirm, askPrompt } from '@/lib/ask';
 import { startTask } from '@/lib/progress';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Loader } from '@/components/Loader';
@@ -302,7 +303,7 @@ function Uploads() {
 
   // a Pick with its whole pick history (picks, packing lists, rejected rolls, balances) — Admin / Head
   async function deleteWithHistory(w: string) {
-    const t = prompt(`Delete ${roundName(w, plantNames)} WITH its pick history?\n\nThe plan, its reports, every pick saved for it, its packing lists, rejected rolls and balance follow-up are deleted. This cannot be undone.\n\nType DELETE to confirm.`);
+    const t = await askPrompt(`Delete ${roundName(w, plantNames)} WITH its pick history?\n\nThe plan, its reports, every pick saved for it, its packing lists, rejected rolls and balance follow-up are deleted. This cannot be undone.\n\nType DELETE to confirm.`);
     if (t === null) return;
     if (t.trim().toUpperCase() !== 'DELETE') { toast('Not deleted — type DELETE to confirm.'); return; }
     try {
@@ -315,13 +316,13 @@ function Uploads() {
   const setTab = (t: 'upload' | 'plans') => { setTabS(t); try { window.history.replaceState(null, '', t === 'plans' ? '#plans' : location.pathname); } catch { /* ignore */ } };
 
   async function deleteWeek(w: string) {
-    if (!window.confirm(`Delete the plan ${roundName(w, plantNames)}? Stock reports and the other Picks stay.`)) return;
+    if (!await askConfirm(`Delete the plan ${roundName(w, plantNames)}? Stock reports and the other Picks stay.`)) return;
     try { await api('/api/data/plan?week=' + encodeURIComponent(w), { method: 'DELETE' }); toast(`${roundName(w, plantNames)} deleted`); loadStatus(); }
     catch (e) { toast(e instanceof Error ? e.message : 'Could not delete.'); }
   }
 
   async function clear(src: Src) {
-    if (!window.confirm(`Remove all ${SRC_INFO[src].title} rows? The dashboard will update for everyone.`)) return;
+    if (!await askConfirm(`Remove all ${SRC_INFO[src].title} rows? The dashboard will update for everyone.`)) return;
     try { await api('/api/data/' + src, { method: 'DELETE' }); toast(`${SRC_INFO[src].title} cleared`); loadStatus(); }
     catch (e) { toast(e instanceof Error ? e.message : 'Could not clear.'); }
   }

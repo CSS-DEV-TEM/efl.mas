@@ -6,6 +6,7 @@
 import * as React from 'react';
 import { useCallback, useEffect, useState } from 'react';
 import { API_URL, api } from '@/lib/api';
+import { askConfirm } from '@/lib/ask';
 
 interface Key { id: number; name: string; prefix: string; created_by: string; created_at: string; last_used_at: string | null; uses: number; revoked_at: string | null }
 
@@ -20,7 +21,7 @@ export default function DataApi({ toast }: { toast: (m: string) => void }) {
     catch (e) { toast(e instanceof Error ? e.message : 'Could not make the key.'); }
   };
   const revoke = async (k: Key) => {
-    if (!window.confirm(`Revoke "${k.name}" (mas_${k.prefix}_…)? Anything using it stops getting data.`)) return;
+    if (!await askConfirm(`Revoke "${k.name}" (mas_${k.prefix}_…)? Anything using it stops getting data.`)) return;
     try { await api('/api/apikeys?id=' + k.id, { method: 'DELETE' }); toast(`"${k.name}" revoked`); await load(); }
     catch (e) { toast(e instanceof Error ? e.message : 'Could not revoke.'); }
   };

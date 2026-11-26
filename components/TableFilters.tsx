@@ -1,5 +1,6 @@
 'use client';
 import { useEffect } from 'react';
+import { notify } from '@/lib/ask';
 
 /**
  * Excel-like column filters on every data table of the site (no per-table code):
@@ -262,7 +263,7 @@ export default function TableFilters() {
     const b = document.createElement('button');
     b.type = 'button'; b.className = 'tx-btn'; b.textContent = '⤓ Excel'; b.title = 'Download this table as an Excel report (the rows shown, with the filters)';
     b.style.display = 'none';
-    b.onclick = (e) => { e.stopPropagation(); const t = xTable; if (t) void exportTable(t).catch(() => alert('Could not make the Excel file.')); };
+    b.onclick = (e) => { e.stopPropagation(); const t = xTable; if (t) void exportTable(t).catch(() => void notify('Could not make the Excel file.')); };
     document.body.append(b); xbtn = b;
     const over = (e: MouseEvent) => {
       const el = e.target as Element | null;

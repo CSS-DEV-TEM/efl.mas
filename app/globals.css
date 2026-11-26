@@ -2162,3 +2162,10 @@ input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, te
 
 /* v220: picked pallets — rows left out */
 .plu-left{margin:6px 0}.plu-left summary{cursor:pointer;font-size:.85rem}.plu-left .table-wrap{max-height:240px;overflow:auto}
+
+/* v221: the page's own OK / Cancel box (lib/ask.ts) */
+.ask-back{position:fixed;inset:0;z-index:2000;background:rgba(10,12,20,.45);display:grid;place-items:center;padding:16px}
+.ask-dlg{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.35);width:min(520px,100%);padding:18px 18px 14px}
+.ask-msg{margin:0 0 12px;white-space:pre-wrap;line-height:1.45;max-height:60vh;overflow:auto}
+.ask-in{width:100%;font:inherit;padding:8px 10px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--ink);margin-bottom:12px}
+.ask-acts{display:flex;justify-content:flex-end;gap:8px}

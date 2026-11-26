@@ -1,6 +1,7 @@
 'use client';
 import { useCallback, useEffect, useState } from 'react';
 import { api, type MaintInfo } from '@/lib/api';
+import { askConfirm } from '@/lib/ask';
 
 /**
  * v167: Settings → Maintenance (Admin only). Shut the system down for maintenance: MAS Active and MAS Kreeda stop for everyone
@@ -19,14 +20,14 @@ export default function Maintenance({ toast }: { toast: (m: string, kind?: 'ok' 
   async function shutDown() {
     if (pw.length < 4) { toast('Set a maintenance password (4 or more characters).', 'bad'); return; }
     if (pw !== pw2) { toast('The two maintenance passwords are not the same.', 'bad'); return; }
-    if (!confirm('Shut the system down for maintenance?\n\nMAS Active and MAS Kreeda stop for every user (they are signed out). Only the Admin, and a sign-in with the maintenance password, can open the system until you bring it back online.')) return;
+    if (!await askConfirm('Shut the system down for maintenance?\n\nMAS Active and MAS Kreeda stop for every user (they are signed out). Only the Admin, and a sign-in with the maintenance password, can open the system until you bring it back online.')) return;
     setBusy(true);
     try { setM(await api<MaintInfo>('/api/maint', { method: 'POST', body: { on: true, msg, password: pw, until: until || null } })); setPw(''); setPw2(''); window.dispatchEvent(new Event('mas-maint')); toast('System is down for maintenance.'); }
     catch (e) { toast(e instanceof Error ? e.message : 'Could not shut down.', 'bad'); }
     finally { setBusy(false); }
   }
   async function bringUp() {
-    if (!confirm('Bring the system back online for everyone?')) return;
+    if (!await askConfirm('Bring the system back online for everyone?')) return;
     setBusy(true);
     try { setM(await api<MaintInfo>('/api/maint', { method: 'POST', body: { on: false } })); window.dispatchEvent(new Event('mas-maint')); toast('System is back online.'); }
     catch (e) { toast(e instanceof Error ? e.message : 'Could not bring it online.', 'bad'); }

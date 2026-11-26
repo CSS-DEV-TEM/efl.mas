@@ -4,6 +4,7 @@ import { api, getSession, isBossRole } from '@/lib/api';
 import { fmt, type Line } from '@/lib/calc';
 import { fmtTime } from '@/lib/summary';
 import { korberWorkbook, ordinal, packingListWorkbook, saveWorkbook, type PickHistory, type PickReq } from '@/lib/pick';
+import { askConfirm } from '@/lib/ask';
 
 const q = (n: number) => fmt(Math.round(n * 1000) / 1000, 2);
 const dmy = (d: string) => (d ? `${d.slice(8, 10)}-${d.slice(5, 7)}-${d.slice(0, 4)}` : '');
@@ -75,7 +76,7 @@ export default function PlanPicks({ rows, label, reloadKey, plantName }: { rows:
   const cancelable = marked.filter((r) => boss || r.by_user === me);
   const [busy, setBusy] = useState('');
   const cancelMarked = async () => {
-    if (!cancelable.length || !confirm(`Cancel ${cancelable.length} marked pick${cancelable.length === 1 ? '' : 's'} (${q(cancelable.reduce((t, r) => t + Number(r.qty), 0))} QTY)? They are deleted from the pick history and their rolls become pickable again.${marked.length > cancelable.length ? `\n${marked.length - cancelable.length} marked pick(s) of another user stay.` : ''}`)) return;
+    if (!cancelable.length || !await askConfirm(`Cancel ${cancelable.length} marked pick${cancelable.length === 1 ? '' : 's'} (${q(cancelable.reduce((t, r) => t + Number(r.qty), 0))} QTY)? They are deleted from the pick history and their rolls become pickable again.${marked.length > cancelable.length ? `\n${marked.length - cancelable.length} marked pick(s) of another user stay.` : ''}`)) return;
     let ok = 0, bad = 0;
     for (const r of cancelable) { setBusy(`Cancelling ${ok + bad + 1} / ${cancelable.length}…`); try { await api(`/api/pick/req/${r.id}`, { method: 'DELETE' }); ok++; } catch { bad++; } }
     setBusy(''); setSel(new Set()); setMsg(`${ok} pick${ok === 1 ? '' : 's'} cancelled${bad ? ` · ${bad} could not be cancelled` : ''}`); void load();

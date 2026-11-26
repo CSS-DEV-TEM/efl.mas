@@ -8,6 +8,7 @@ import { todayLocal, weekDays, weekIdOf, weekOptions } from '@/lib/smart';
 import PlanReport from '@/components/PlanReport';
 import { keepFile } from '@/lib/files';
 import { useShell } from '@/components/Shell';
+import { askConfirm } from '@/lib/ask';
 
 type Mode = 'add' | 'update' | 'replace';
 interface Preview { weeks?: string[]; added: number; updated: number; same?: number; removed: number; kept: number; inFileDups: number; lines: number; plant: string | null; mode: string }
@@ -185,7 +186,7 @@ export default function WeekPlanManager({ toast, onChanged }: { toast: (m: strin
     finally { setBusy(''); }
   };
   const del = async (w: string) => {
-    if (!confirm(`Delete the week plan ${w}? Its lines are deleted (the day plans and Picks are not touched).`)) return;
+    if (!await askConfirm(`Delete the week plan ${w}? Its lines are deleted (the day plans and Picks are not touched).`)) return;
     try { await api(`/api/data/plan?week=${encodeURIComponent(w)}`, { method: 'DELETE' }); toast(`Week plan ${w} deleted`); load(); onChanged(); } catch (e) { toast(e instanceof Error ? e.message : 'Could not delete.'); }
   };
   const done = jobs.length > 0 && jobs.every((j) => j.kind === 'skip' || j.state === 'ok' || j.state === 'err');

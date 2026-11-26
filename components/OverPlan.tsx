@@ -2,6 +2,7 @@
 import { useMemo, useState } from 'react';
 import { api } from '@/lib/api';
 import { avail, fmt, fmtDate, fmtQty, need, type DispatchItem, type Line } from '@/lib/calc';
+import { notify } from '@/lib/ask';
 
 /**
  * Items dispatched more than their plan lines need ("Over plan" in Dispatch vs plan).
@@ -37,7 +38,7 @@ export default function OverPlan({ week, items, rows, canEdit, onDone }: { week:
       }
       setPick({}); setQty({});
       onDone(n ? `Over-plan QTY added to Dispatched: ${fmt(total, 2)} on ${n} line${n === 1 ? '' : 's'}` : 'Nothing to add');
-    } catch (e) { alert(e instanceof Error ? e.message : 'Could not add.'); onDone('Partly added'); } finally { setBusy(false); }
+    } catch (e) { void notify(e instanceof Error ? e.message : 'Could not add.'); onDone('Partly added'); } finally { setBusy(false); }
   };
   if (!over.length) return null;
   return (

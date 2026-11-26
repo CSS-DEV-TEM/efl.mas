@@ -7,6 +7,7 @@ import { uploadPickFile, korberCheckText, docText, type PickSrc } from '@/lib/pi
 import PlanReport from '@/components/PlanReport';
 import KorberAfter from '@/components/KorberAfter';
 import { todayLocal } from '@/lib/smart';
+import { askConfirm, askPrompt } from '@/lib/ask';
 
 export interface DayRow { day: string; picks: number; lines: number }
 export interface PickRound { id: string; plant: string | null; round: number; lines: number; qty: number; src_at?: string | null; created_by?: string; reports: string[]; /** made from a Packing List (Import Packing List) */ imported?: number; /** v203: the JOB ID typed when the Pick was made (or later) */ job_id?: string | null; /** v212: the system's unique Pick ID */ pick_uid?: string | null }
@@ -72,14 +73,14 @@ export default function DayPickBar({ day, setDay, rid, setRid, toast, refreshKey
   const editJob = async () => {
     const r = rounds.find((x) => x.id === rid);
     if (!r) return;
-    const v = prompt(`JOB ID of ${pickLabel(r, names)} (${fmtDate(day)}) — leave empty to remove it`, r.job_id ?? '');
+    const v = await askPrompt(`JOB ID of ${pickLabel(r, names)} (${fmtDate(day)}) — leave empty to remove it`, r.job_id ?? '');
     if (v === null) return;
     try { await api('/api/rounds', { method: 'PATCH', body: { rid, job_id: v.trim() } }); toast(v.trim() ? `JOB ID ${v.trim()} saved` : 'JOB ID removed'); await loadRounds(); onUploaded?.(); }
     catch (e) { toast(e instanceof Error ? e.message : 'Could not save the JOB ID.'); }
   };
   const deletePick = async () => {
     const r = rounds.find((x) => x.id === rid);
-    if (!r || !confirm(`Delete ${pickLabel(r, names)} of ${fmtDate(day)} with its plan and its own reports? (Not possible once picks were saved for it.)`)) return;
+    if (!r || !await askConfirm(`Delete ${pickLabel(r, names)} of ${fmtDate(day)} with its plan and its own reports? (Not possible once picks were saved for it.)`)) return;
     try { await api(`/api/rounds?rid=${encodeURIComponent(rid)}`, { method: 'DELETE' }); setRid(''); toast('Pick deleted'); await loadRounds(); onUploaded?.(); }
     catch (e) { toast(e instanceof Error ? e.message : 'Could not delete.'); }
   };
@@ -87,7 +88,7 @@ export default function DayPickBar({ day, setDay, rid, setRid, toast, refreshKey
   const deleteWithHistory = async () => {
     const r = rounds.find((x) => x.id === rid);
     if (!r) return;
-    const t = prompt(`Delete ${pickLabel(r, names)} of ${fmtDate(day)} WITH its pick history?\n\nThe plan, its reports, every pick saved for it, its packing lists, rejected rolls and balance follow-up are deleted. This cannot be undone.\n\nType DELETE to confirm.`);
+    const t = await askPrompt(`Delete ${pickLabel(r, names)} of ${fmtDate(day)} WITH its pick history?\n\nThe plan, its reports, every pick saved for it, its packing lists, rejected rolls and balance follow-up are deleted. This cannot be undone.\n\nType DELETE to confirm.`);
     if (t === null) return;
     if (t.trim().toUpperCase() !== 'DELETE') { toast('Not deleted — type DELETE to confirm.'); return; }
     try {
@@ -109,7 +110,7 @@ export default function DayPickBar({ day, setDay, rid, setRid, toast, refreshKey
     } catch (e) { toast(e instanceof Error ? e.message : 'Upload failed.'); } finally { setBusy(''); }
   };
   const clearOwn = async (src: string) => {
-    if (!confirm(`Remove this Pick's own ${REPORT_NAME[src]}? The Pick then reads the shared ${REPORT_NAME[src]} (if any).`)) return;
+    if (!await askConfirm(`Remove this Pick's own ${REPORT_NAME[src]}? The Pick then reads the shared ${REPORT_NAME[src]} (if any).`)) return;
     try { await api(`/api/data/${src}?rid=${encodeURIComponent(rid)}`, { method: 'DELETE' }); toast(`${REPORT_NAME[src]} of this Pick removed`); await loadReports(); onUploaded?.(); }
     catch (e) { toast(e instanceof Error ? e.message : 'Could not remove.'); }
   };

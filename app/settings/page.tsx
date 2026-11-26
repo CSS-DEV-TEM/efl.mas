@@ -9,6 +9,7 @@ import Maintenance from '@/components/Maintenance';
 import DataApi from '@/components/DataApi';
 import { api } from '@/lib/api';
 import type { PlantInfo } from '@/lib/summary';
+import { askConfirm } from '@/lib/ask';
 
 export default function Page() {
   return <Shell admin><Settings /></Shell>;
@@ -329,7 +330,7 @@ function PlansAdmin({ toast }: { toast: (m: string) => void }) {
   useEffect(() => { load(); }, [load]);
   const act = async (p: PlanRow, action: 'reassign' | 'delete', to?: string) => {
     const label = `${p.type === 'day' ? 'day plan ' + planPeriod(p) : 'week plan ' + p.week} of ${p.owner}`;
-    if (action === 'delete' && !confirm(`Delete the ${label} (${p.lines} lines)? Picks already made stay in the pick history.`)) return;
+    if (action === 'delete' && !await askConfirm(`Delete the ${label} (${p.lines} lines)? Picks already made stay in the pick history.`)) return;
     setBusy(`${p.owner}${p.type}${p.week}${p.day}`);
     try { const r = await api<{ lines: number }>('/api/admin/plans', { method: 'POST', body: { action, owner: p.owner, type: p.type, week: p.week, day: p.day, to } }); toast(`${action === 'delete' ? 'Deleted' : 'Moved'} ${label}: ${r.lines} lines`); load(); }
     catch (e) { toast(e instanceof Error ? e.message : 'Failed.'); } finally { setBusy(''); }

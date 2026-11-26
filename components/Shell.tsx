@@ -13,6 +13,7 @@ import { useLive, type LiveMessage, type LiveState } from '@/lib/live';
 import { Credit, Logo } from '@/components/Brand';
 import TableFilters from '@/components/TableFilters';
 import { CommandSearch, ICON, Icon, SideNav, isOn, type NavItem } from '@/components/SideNav';
+import AskHost from '@/components/AskHost';
 
 interface Ctx {
   user: User;
@@ -310,6 +311,7 @@ export default function Shell({ children, admin, allowGuest }: { children: React
       </div>
       {!guest && <SmartCoach />}
       {!guest && <Welcome name={user.username} />}
+      <AskHost />
       <div className="toasts" aria-live="polite">
         {toasts.map((t) => <div key={t.id} className="toast">{t.text}</div>)}
       </div>

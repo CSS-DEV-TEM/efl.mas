@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useShell } from '@/components/Shell';
 import { DIV_NAME, ROLE_NAME, api, getDiv, type Div, type Role } from '@/lib/api';
 import { ago } from '@/lib/calc';
+import { askConfirm } from '@/lib/ask';
 
 
 interface U { username: string; role: Role; plant?: string | null; created_at: string; divs?: string | null }
@@ -47,7 +48,7 @@ export function UsersAdmin() {
     } catch (e) { setErr(e instanceof Error ? e.message : 'Could not save.'); } finally { setBusy(false); }
   }
   async function remove(u: string) {
-    if (!window.confirm(`Remove ${u}? They will be signed out when their session ends.`)) return;
+    if (!await askConfirm(`Remove ${u}? They will be signed out when their session ends.`)) return;
     try { await api('/api/users/' + encodeURIComponent(u), { method: 'DELETE' }); load(); } catch (e) { toast(e instanceof Error ? e.message : 'Could not remove.'); }
   }
   async function setDivs(u: U, divs: Div[]) {

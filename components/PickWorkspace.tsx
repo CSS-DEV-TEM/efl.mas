@@ -1,4 +1,5 @@
 'use client';
+import { askConfirm, askPrompt } from '@/lib/ask';
 import LineCoach from './LineCoach';
 import MatchHud, { type HudEv } from './MatchHud';
 import { loadRepick, lineRef, runLabel, runOf, type PickRun } from '@/lib/repick';
@@ -374,7 +375,7 @@ export default function PickWorkspace({ week, rows, canEdit, toast, reload, labe
     const kindNow: 'normal' | 'offsite' = autoRules.allowOffsite && autoKind === 'offsite' ? 'offsite' : 'normal';
     const targets = rows.filter((l) => !isDone(l) && todo(l) > 1e-9 && !l.hold && !closedRefs.has(lineRef(l)));
     if (!targets.length) { if (!opt.auto) toast('No open line with UR to pick in this Pick.'); return; }
-    if (!opt.auto && !window.confirm(`${kindNow === 'offsite' ? 'OFFSITE' : 'NORMAL'} — pick every All-match roll for ${targets.length} open line${targets.length === 1 ? '' : 's'} of ${label || week}?\n\n${kindNow === 'offsite' ? 'Offsite: the last roll of each line is cut to the exact QTY (never over the plan, never closed short).' : 'Normal: the last roll is cut to the QTY, then each cut roll\'s balance is tallied to another SO line that can take it (same Material and LI, SO Plant, UR, a ZINSR lot with the roll\'s Vendor Batch).'}\n\nOnly rolls where everything matches are picked (as the system selects them, the last roll cut to the QTY) — also a roll SAP lists in the lots of several SO lines, up to each line's ZINSR lot QTY (a cut roll's balance first). Lines that need a check or a manual roll are left for you under “Needs manual” — the Smart suggestion shows there, you choose.\n\nKeep this tab open while it runs. If the network drops it waits and goes on by itself.`)) return;
+    if (!opt.auto && !await askConfirm(`${kindNow === 'offsite' ? 'OFFSITE' : 'NORMAL'} — pick every All-match roll for ${targets.length} open line${targets.length === 1 ? '' : 's'} of ${label || week}?\n\n${kindNow === 'offsite' ? 'Offsite: the last roll of each line is cut to the exact QTY (never over the plan, never closed short).' : 'Normal: the last roll is cut to the QTY, then each cut roll\'s balance is tallied to another SO line that can take it (same Material and LI, SO Plant, UR, a ZINSR lot with the roll\'s Vendor Batch).'}\n\nOnly rolls where everything matches are picked (as the system selects them, the last roll cut to the QTY) — also a roll SAP lists in the lots of several SO lines, up to each line's ZINSR lot QTY (a cut roll's balance first). Lines that need a check or a manual roll are left for you under “Needs manual” — the Smart suggestion shows there, you choose.\n\nKeep this tab open while it runs. If the network drops it waits and goes on by itself.`)) return;
     stopRef.current = false;
     // v203: a run of Pick all matched — the first one keeps each line's UR / QI / Block (first UR); after new reports it is a balance pick
     // (v212: Auto balance pick has started its run already)
@@ -1060,7 +1061,7 @@ function BatchCompletePanel({ week, line }: { week: string; line: LineP }) {
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
             <b>{l.so} / {l.li}</b><span className="muted small">Item {l.item} · SO Plant {l.so_plant || '–'} · batch {l.batch} · UR free {fmtQty(l.ur_free)} · ZINSR lot room {fmtQty(l.lot_room)} (lot {l.lots.join(', ')})</span>
             <span style={{ flex: 1 }} />
-            <button type="button" className="btn sm primary" disabled={!!busy} onClick={() => { if (window.confirm(`Pick ${l.rolls.length} roll${l.rolls.length === 1 ? '' : 's'} (${fmtQty(l.total)}) for ${l.so} / ${l.li}?`)) void pick(l, l.rolls); }}>{busy === l.key ? 'Picking…' : `Pick all for ${l.so} / ${l.li} (${fmtQty(l.total)})`}</button>
+            <button type="button" className="btn sm primary" disabled={!!busy} onClick={async () => { if (await askConfirm(`Pick ${l.rolls.length} roll${l.rolls.length === 1 ? '' : 's'} (${fmtQty(l.total)}) for ${l.so} / ${l.li}?`)) void pick(l, l.rolls); }}>{busy === l.key ? 'Picking…' : `Pick all for ${l.so} / ${l.li} (${fmtQty(l.total)})`}</button>
           </div>
           <table className="mini" data-nofilter style={{ marginTop: 6 }}>
             <thead><tr><th>Pallet</th><th>Lot</th><th>Shade</th><th>Location</th><th className="n">On shelf</th><th className="n">Suggested</th><th /></tr></thead>
@@ -1895,7 +1896,7 @@ function PickHistoryCard({ canEdit, toast, onChanged, plApi }: { canEdit: boolea
   const downloadKorber = () => saveWorkbook(korberWorkbook(h!, new Set(target.map((r) => r.id))), `Korber_Picked_${day}${ptag}${tag}.xlsx`);
   const markedQty = marked.reduce((t, r) => t + r.qty, 0);
   const cancel = async (path: string, what: string) => {
-    if (!confirm(`Cancel ${what}? It is deleted from the pick history and the roll${path.includes('/req/') ? 's become' : ' becomes'} pickable again.`)) return;
+    if (!await askConfirm(`Cancel ${what}? It is deleted from the pick history and the roll${path.includes('/req/') ? 's become' : ' becomes'} pickable again.`)) return;
     try { await api(path, { method: 'DELETE' }); toast(`${what} cancelled and deleted from the history`); load(); onChanged(); } catch (e) { toast(e instanceof Error ? e.message : 'Failed.'); }
   };
   // the marked picks this user may cancel (their own; Admin / Head: anyone's), cancelled together
@@ -1904,7 +1905,7 @@ function PickHistoryCard({ canEdit, toast, onChanged, plApi }: { canEdit: boolea
   const cancelMarked = async () => {
     if (!cancelable.length) return;
     const others = marked.length - cancelable.length;
-    if (!confirm(`Cancel ${cancelable.length} marked pick${cancelable.length === 1 ? '' : 's'} (${fmtQty(cancelable.reduce((t, r) => t + r.qty, 0))} QTY, ${cancelable.reduce((t, r) => t + r.rolls, 0)} rolls)?\n\nThey are deleted from the pick history and their rolls become pickable again.${others ? `\n${others} marked pick${others === 1 ? ' is' : 's are'} another user's and stay.` : ''}`)) return;
+    if (!await askConfirm(`Cancel ${cancelable.length} marked pick${cancelable.length === 1 ? '' : 's'} (${fmtQty(cancelable.reduce((t, r) => t + r.qty, 0))} QTY, ${cancelable.reduce((t, r) => t + r.rolls, 0)} rolls)?\n\nThey are deleted from the pick history and their rolls become pickable again.${others ? `\n${others} marked pick${others === 1 ? ' is' : 's are'} another user's and stay.` : ''}`)) return;
     let ok = 0; const fail: string[] = [];
     for (const r of cancelable) {
       setBulkBusy(`Cancelling ${ok + fail.length + 1} / ${cancelable.length}…`);
@@ -1916,7 +1917,7 @@ function PickHistoryCard({ canEdit, toast, onChanged, plApi }: { canEdit: boolea
   };
   // Reject: a problem with a picked roll — it goes to the rejected rolls (not picked again) and a replacement is assigned there
   const rejectRoll = async (id: number, pallet: string) => {
-    const reason = window.prompt(`Reject roll ${pallet}: what is the problem? (e.g. Damaged, Wrong shade, Short length, Wrong item)`, '');
+    const reason = await askPrompt(`Reject roll ${pallet}: what is the problem? (e.g. Damaged, Wrong shade, Short length, Wrong item)`, '');
     if (reason === null) return;
     if (!reason.trim()) { toast('Give the reason to reject the roll.'); return; }
     try { await api('/api/pick/reject', { method: 'POST', body: { pickId: id, reason: reason.trim() } }); toast(`Roll ${pallet} rejected — assign a replacement under Rejected rolls`); load(); onChanged(); }

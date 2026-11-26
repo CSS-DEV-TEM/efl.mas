@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { getSession, isBossRole } from '@/lib/api';
 import { ago } from '@/lib/calc';
 import { downloadFile, fmtSize, listFiles, type KeptFile } from '@/lib/files';
+import { askConfirm } from '@/lib/ask';
 
 const SRC_NAME: Record<string, string> = {
   plan: 'Plan', zmmbe: 'ZMMBE', kfc: 'ZMMBE KFC', pfc: 'ZMMBE PFC', plant: 'PLANT', trr: 'TRR',
@@ -39,7 +40,7 @@ export default function UploadedFiles({ toast, rid, title = 'Uploaded files' }: 
     try { await downloadFile(f); } catch (e) { toast(e instanceof Error ? e.message : 'Could not download.'); } finally { setBusy(null); }
   };
   const del = async (f: KeptFile) => {
-    if (!confirm(`Delete the kept file ${f.name}? The data it uploaded stays in the system.`)) return;
+    if (!await askConfirm(`Delete the kept file ${f.name}? The data it uploaded stays in the system.`)) return;
     try { const { api } = await import('@/lib/api'); await api('/api/files?id=' + f.id, { method: 'DELETE' }); toast(`${f.name} deleted`); load(); } catch (e) { toast(e instanceof Error ? e.message : 'Could not delete.'); }
   };
   return (
