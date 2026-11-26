@@ -2159,3 +2159,6 @@ input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, te
 
 /* v218: Packing List → picked pallets */
 .plu-tbl tr.off td{opacity:.5}
+
+/* v220: picked pallets — rows left out */
+.plu-left{margin:6px 0}.plu-left summary{cursor:pointer;font-size:.85rem}.plu-left .table-wrap{max-height:240px;overflow:auto}

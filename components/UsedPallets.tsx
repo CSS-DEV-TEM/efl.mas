@@ -69,7 +69,18 @@ export default function UsedPallets({ canEdit, toast, onChanged }: { canEdit: bo
     try {
       const sheets = readWorkbook(await f.arrayBuffer());
       // v218: a Packing List — checked against the system first, then saved from the dialog
-      const pl = readPL(sheets);
+      let pl = readPL(sheets);
+      // v220: a Korber Inventory file goes through the same check window (no browser confirm box — a browser that blocks
+      // those boxes made the upload do nothing)
+      if (!pl) {
+        const t = findTable(sheets, 'korber');
+        if (!t) throw new Error(`${f.name} does not look like a Korber Inventory or a Packing List: no header row with Pallet, Item Number, Actual Qty.`);
+        const h = t.header.map(hn);
+        const pi = h.indexOf('pallet'), qi = h.indexOf('actual qty'), ii = h.indexOf('item number'), di = h.indexOf('display item number'), li = h.indexOf('lot number');
+        const rows = t.rows.map((r) => ({ pallet: String(r[pi] ?? '').trim().toUpperCase(), item: String((di >= 0 && r[di]) || r[ii] || '').trim(), lot: li >= 0 ? String(r[li] ?? '').trim() : '', qty: r3(num(r[qi])) })).filter((r) => r.pallet && r.qty > 0);
+        if (!rows.length) throw new Error(`${f.name}: no pallet with an Actual Qty above 0.`);
+        pl = [{ name: t.sheet || 'Korber', pickId: '', hj: '', rows }];
+      }
       if (pl) {
         const all = pl.flatMap((x) => x.rows);
         const ck = await api<{ pallets: Plan['info']; picks: { uid: string }[] }>('/api/used', { method: 'POST', body: { check: true, rows: all.map((r) => ({ pallet: r.pallet })), pickIds: pl.map((x) => x.pickId).filter(Boolean) } });
@@ -77,16 +88,6 @@ export default function UsedPallets({ canEdit, toast, onChanged }: { canEdit: bo
         setPlan({ file: f.name, info: ck.pallets, sheets: pl.map((x) => ({ ...x, known: !!x.pickId && known.has(x.pickId.toUpperCase()), on: !(x.pickId && known.has(x.pickId.toUpperCase())) })) });
         return;
       }
-      const t = findTable(sheets, 'korber');
-      if (!t) throw new Error(`${f.name} does not look like a Korber Inventory or a Packing List: no header row with Pallet, Item Number, Actual Qty.`);
-      const h = t.header.map(hn);
-      const pi = h.indexOf('pallet'), qi = h.indexOf('actual qty'), ii = h.indexOf('item number'), di = h.indexOf('display item number'), li = h.indexOf('lot number');
-      const rows = t.rows.map((r) => ({ pallet: r[pi], item: (di >= 0 && r[di]) || r[ii], lot: li >= 0 ? r[li] : null, qty: r[qi] }));
-      const n = new Set(rows.map((r) => String(r.pallet ?? '').trim()).filter(Boolean)).size;
-      if (!window.confirm(`${f.name}: save ${fmt(n)} pallet${n === 1 ? '' : 's'} as PICKED (outside the system)?\n\nTheir Actual Qty comes off those pallets for every Pick — the system will not pick that QTY again. You can remove the upload later.`)) return;
-      const r = await api<{ pallets: number; qty: number; over: number; unknown: number; dup?: number }>('/api/used', { method: 'POST', body: { fileName: f.name, rows } });
-      toast(`${f.name}: ${fmt(r.pallets)} pallet${r.pallets === 1 ? '' : 's'} · ${fmt(r.qty, 2)} QTY saved as picked — not picked again${r.dup ? ` · ${r.dup} already in the system, not saved again` : ''}${r.over ? ` · ${r.over} over what the pallet had` : ''}${r.unknown ? ` · ${r.unknown} not in the Korber Inventory` : ''}`);
-      await load(); onChanged?.();
     } catch (e) { toast(e instanceof Error ? e.message : 'Could not upload.'); }
     finally { setBusy(false); }
   };
@@ -120,8 +121,11 @@ export default function UsedPallets({ canEdit, toast, onChanged }: { canEdit: bo
     } catch (e) { toast(e instanceof Error ? e.message : 'Could not save.'); }
     finally { setBusy(false); }
   };
+  // v220: Remove asks on the button itself (press again within 5 s) — no browser confirm box
+  const [arm, setArm] = useState('');
   const remove = async (b: Batch) => {
-    if (!window.confirm(`Remove ${b.file_name} (${fmt(b.n)} pallet rows, ${fmt(b.qty, 2)} QTY)? That QTY can be picked again.`)) return;
+    if (arm !== b.batch) { setArm(b.batch); setTimeout(() => setArm((x) => (x === b.batch ? '' : x)), 5000); return; }
+    setArm('');
     try { await api('/api/used?batch=' + encodeURIComponent(b.batch), { method: 'DELETE' }); toast(`${b.file_name} removed — ${fmt(b.qty, 2)} QTY free again`); await load(); onChanged?.(); }
     catch (e) { toast(e instanceof Error ? e.message : 'Could not remove.'); }
   };
@@ -143,7 +147,7 @@ export default function UsedPallets({ canEdit, toast, onChanged }: { canEdit: bo
           <thead><tr><th>File</th><th className="n">Pallets</th><th className="n">QTY</th><th>By</th><th>Uploaded</th>{canEdit && <th />}</tr></thead>
           <tbody>{list.map((b) => (
             <tr key={b.batch}><td>{b.file_name}</td><td className="n">{fmt(b.n)}</td><td className="n">{fmt(b.qty, 2)}</td><td>{b.by_user}</td><td>{new Date(b.at).toLocaleString()}</td>
-              {canEdit && <td><button className="btn sm danger" onClick={() => void remove(b)}>Remove</button></td>}</tr>
+              {canEdit && <td><button className="btn sm danger" onClick={() => void remove(b)} title={`Remove ${b.file_name} — its ${fmt(b.qty, 2)} QTY can be picked again`}>{arm === b.batch ? 'Sure? Remove' : 'Remove'}</button></td>}</tr>
           ))}</tbody>
         </table></div>
       )}
@@ -157,8 +161,8 @@ export default function UsedPallets({ canEdit, toast, onChanged }: { canEdit: bo
         return createPortal(
           <div className="bal-back" role="dialog" aria-modal="true" aria-labelledby="plu-title" onClick={() => !busy && setPlan(null)}>
             <div className="bal-dlg card ka-dlg kl-dlg" onClick={(e) => e.stopPropagation()}>
-              <h3 id="plu-title">Packing List → picked pallets</h3>
-              <p className="muted small"><b>{plan.file}</b> · tick the sheets to save. Their pallets&apos; Actual Qty is saved as picked — the system does not pick it again.</p>
+              <h3 id="plu-title">Save as picked pallets</h3>
+              <p className="muted small"><b>{plan.file}</b> · {plan.sheets.length > 1 ? 'tick the sheets to save. ' : ''}The pallets&apos; Actual Qty is saved as picked — the system does not pick it again (every Pick). You can remove the upload later.</p>
               <div className="table-wrap"><table className="tbl plu-tbl">
                 <thead><tr><th /><th>Sheet</th><th>HJ pick</th><th>Pick ID</th><th className="n">Pallets</th><th className="n">QTY</th><th>Already in the system</th></tr></thead>
                 <tbody>{plan.sheets.map((x, i) => {
@@ -175,6 +179,13 @@ export default function UsedPallets({ canEdit, toast, onChanged }: { canEdit: bo
                 })}</tbody>
               </table></div>
               {(nUsed > 0 || nSys > 0 || nDup > 0) && <div className="notice small">Left out — already in the system (same pallet and QTY), never saved twice: {[nUsed ? `${nUsed} uploaded before` : '', nSys ? `${nSys} picked in the system` : '', nDup ? `${nDup} a second same row in this file` : ''].filter(Boolean).join(', ')}.</div>}
+              {(nUsed > 0 || nSys > 0 || nDup > 0) && (
+                <details className="plu-left"><summary>Show the {nUsed + nSys + nDup} row{nUsed + nSys + nDup === 1 ? '' : 's'} left out</summary>
+                  <div className="table-wrap"><table className="tbl"><thead><tr><th>Pallet</th><th className="n">QTY</th><th>Why</th></tr></thead><tbody>
+                    {all.map((r, k) => fl[k] ? <tr key={k}><td>{r.pallet}</td><td className="n">{fmt(r.qty, 3)}</td><td>{fl[k] === 'used' ? 'uploaded before (same QTY)' : fl[k] === 'sys' ? `picked in the system (same QTY${plan.info[r.pallet]?.sys ? `; system picks ${fmt(plan.info[r.pallet].sys, 3)}` : ''})` : 'a second same row in this file'}</td></tr> : null)}
+                  </tbody></table></div>
+                </details>
+              )}
               <p className="small"><b>To save:</b> {fmt(rows.length)} row{rows.length === 1 ? '' : 's'} · {fmt(pal)} pallet{pal === 1 ? '' : 's'} · {fmt(qty, 2)} QTY</p>
               <div className="bal-acts">
                 <button type="button" className="btn" onClick={() => setPlan(null)} disabled={busy}>Cancel</button>
