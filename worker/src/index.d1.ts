@@ -731,7 +731,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 139; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 141; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1900,9 +1900,46 @@ async function handleUsed(env: Env, req: Request) {
     return json({ ok: true, removed: Number(n?.n), qty: Number(n?.q) });
   }
   if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed.');
-  const b = (await req.json()) as { fileName?: string; rows?: { pallet?: unknown; item?: unknown; lot?: unknown; qty?: unknown }[] };
-  const rows = (b.rows || []).map((r) => ({ pallet: up(r.pallet), item: normId(r.item), lot: String(r.lot ?? '').trim(), qty: r3(Number(String(r.qty ?? '').replace(/,/g, '')) || 0) })).filter((r) => r.pallet && r.qty > 0);
-  if (!rows.length) throw new HttpError(400, 'No pallet with an Actual Qty above 0 in the file.');
+  const b = (await req.json()) as { fileName?: string; rows?: { pallet?: unknown; item?: unknown; lot?: unknown; qty?: unknown }[]; check?: boolean; pickIds?: string[] };
+  if (b.check) {
+    // v218: before a Packing List is saved — per pallet what the system already has (live system picks, earlier picked-pallets
+    // uploads, the Korber QTY) and which of the PL's Pick IDs are this system's Picks (their picks are counted already)
+    const pals = Array.from(new Set((b.rows || []).map((r) => up(r.pallet)).filter(Boolean))).slice(0, 20000);
+    const info: Record<string, { sys: number; used: number; korber: number | null; sysQ: number[]; usedQ: number[] }> = {};
+    for (const pl of pals) info[pl] = { sys: 0, used: 0, korber: null, sysQ: [], usedQ: [] };
+    for (let i = 0; i < pals.length; i += 400) {
+      const j = JSON.stringify(pals.slice(i, i + 400));
+      for (const x of (await env.DB.prepare('SELECT upper(pallet) p, qty q FROM picks WHERE cancelled_at IS NULL AND upper(pallet) IN (SELECT value FROM json_each(?))').bind(j).all<Row>()).results) { const o = info[String(x.p)]; if (o) { o.sys = r3(o.sys + (Number(x.q) || 0)); o.sysQ.push(r3(Number(x.q) || 0)); } }
+      for (const x of (await env.DB.prepare('SELECT upper(pallet) p, qty q FROM pallet_used WHERE upper(pallet) IN (SELECT value FROM json_each(?))').bind(j).all<Row>()).results) { const o = info[String(x.p)]; if (o) { o.used = r3(o.used + (Number(x.q) || 0)); o.usedQ.push(r3(Number(x.q) || 0)); } }
+      for (const x of (await env.DB.prepare('SELECT upper(pallet) p, MAX(qty) q FROM korber WHERE upper(pallet) IN (SELECT value FROM json_each(?)) GROUP BY upper(pallet)').bind(j).all<Row>()).results) if (info[String(x.p)]) info[String(x.p)].korber = Number(x.q) || 0;
+    }
+    const ids = Array.from(new Set((b.pickIds || []).map((x) => String(x ?? '').trim().toUpperCase()).filter(Boolean))).slice(0, 200);
+    const known = ids.length ? (await env.DB.prepare('SELECT uid, rid FROM pick_uid WHERE uid IN (SELECT value FROM json_each(?))').bind(JSON.stringify(ids)).all<Row>()).results.map((x) => ({ uid: String(x.uid), rid: String(x.rid) })) : [];
+    return json({ ok: true, pallets: info, picks: known });
+  }
+  const rows0 = (b.rows || []).map((r) => ({ pallet: up(r.pallet), item: normId(r.item), lot: String(r.lot ?? '').trim(), qty: r3(Number(String(r.qty ?? '').replace(/,/g, '')) || 0) })).filter((r) => r.pallet && r.qty > 0);
+  if (!rows0.length) throw new HttpError(400, 'No pallet with an Actual Qty above 0 in the file.');
+  // v219: never a duplicate — a pallet row with the same QTY the system already has for that pallet (an earlier picked-pallets
+  // row, a system pick, or all the pallet's system picks together), or a second same row in this file, is not saved
+  const have = new Map<string, number[]>();
+  {
+    const pals0 = Array.from(new Set(rows0.map((r) => r.pallet)));
+    const sysSum = new Map<string, number>();
+    for (let i = 0; i < pals0.length; i += 400) {
+      const j = JSON.stringify(pals0.slice(i, i + 400));
+      for (const x of (await env.DB.prepare('SELECT upper(pallet) p, qty q FROM picks WHERE cancelled_at IS NULL AND upper(pallet) IN (SELECT value FROM json_each(?))').bind(j).all<Row>()).results) { const k = String(x.p), q = r3(Number(x.q) || 0); have.set(k, [...(have.get(k) ?? []), q]); sysSum.set(k, r3((sysSum.get(k) ?? 0) + q)); }
+      for (const x of (await env.DB.prepare('SELECT upper(pallet) p, qty q FROM pallet_used WHERE upper(pallet) IN (SELECT value FROM json_each(?))').bind(j).all<Row>()).results) { const k = String(x.p); have.set(k, [...(have.get(k) ?? []), r3(Number(x.q) || 0)]); }
+    }
+    for (const [k, q] of Array.from(sysSum.entries())) have.set(k, [...(have.get(k) ?? []), q]);
+  }
+  const rows: typeof rows0 = [];
+  let dup = 0;
+  for (const r of rows0) {
+    const hs = have.get(r.pallet) ?? [];
+    if (hs.some((q) => Math.abs(q - r.qty) <= 0.0005)) { dup++; continue; }
+    hs.push(r.qty); have.set(r.pallet, hs); rows.push(r);
+  }
+  if (!rows.length) throw new HttpError(409, `Nothing new: all ${dup} pallet row${dup === 1 ? '' : 's'} are already in the system (the same pallet and QTY) — not saved again.`);
   if (rows.length > 20000) throw new HttpError(400, 'Too many rows (20 000 at most).');
   // what each pallet has now (before this upload): QTY over it is still saved, and reported
   const ppm = await palletPicksMany(env, Array.from(new Set(rows.map((r) => r.pallet))));
@@ -1923,7 +1960,7 @@ async function handleUsed(env: Env, req: Request) {
   stmts.push(env.DB.prepare('INSERT INTO activity (at, username, action, detail) VALUES (?,?,?,?)').bind(at, s.u, 'picked-pallets', `${fn}: ${sum.size} pallet${sum.size === 1 ? '' : 's'}, ${qty} QTY saved as picked (not picked again)`));
   for (let i = 0; i < stmts.length; i += 90) await env.DB.batch(stmts.slice(i, i + 90));
   await broadcast(env, { type: 'data', src: 'used', by: s.u, rows: rows.length });
-  return json({ ok: true, batch, pallets: sum.size, rows: rows.length, qty, over, unknown });
+  return json({ ok: true, batch, pallets: sum.size, rows: rows.length, qty, over, unknown, dup });
 }
 
 /**
