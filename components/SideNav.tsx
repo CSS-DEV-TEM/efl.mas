@@ -36,6 +36,54 @@ export const iconOf = (href: string) => P[href] ?? P['/'];
 
 export const isOn = (href: string, path: string | null) => (href === '/' ? path === '/' : !!path?.startsWith(href.replace(/\/$/, '')));
 
+/** v222: the open page's parts (its cards' headings) for the sidebar — they follow what the page shows */
+function useSections(path: string | null) {
+  const [secs, setSecs] = useState<{ id: string; label: string }[]>([]);
+  const [act, setAct] = useState('');
+  useEffect(() => {
+    const root = document.querySelector<HTMLElement>('.app .main') || document.querySelector<HTMLElement>('.main');
+    if (!root) return;
+    const labelOf = (h: HTMLElement) => {
+      // the heading's own words (not its live badges such as "Live · 8:10 PM" or "Auto-generated")
+      const own = Array.from(h.childNodes).filter((x) => x.nodeType === 3).map((x) => x.textContent || '').join(' ').replace(/\s+/g, ' ').trim();
+      if (own.length > 1) return own.replace(/\s*\(?[\d,]+\)?\s*$/, '').trim();
+      const c = h.cloneNode(true) as HTMLElement;
+      c.querySelectorAll('small, .pill, .badge, .count, .chip, button, input, select, [aria-hidden="true"]').forEach((x) => x.remove());
+      return (c.textContent || '').replace(/\s+/g, ' ').replace(/\s*\(?[\d,]+\)?\s*$/, '').trim();
+    };
+    const slug = (t: string) => 'sec-' + t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
+    const scan = () => {
+      const out: { id: string; label: string }[] = [];
+      const seen = new Set<string>();
+      for (const h of Array.from(root.querySelectorAll<HTMLElement>('h2'))) {
+        if (h.closest('.bal-back, .ask-back, [role="dialog"], header.bar, .site-foot') || !h.offsetParent) continue;
+        const label = labelOf(h);
+        if (!label || seen.has(label)) continue;
+        seen.add(label);
+        const box = (h.closest('section, .card') as HTMLElement | null) || h;
+        if (!box.id) { let id = slug(label), n = 2; while (document.getElementById(id)) id = `${slug(label)}-${n++}`; box.id = id; }
+        out.push({ id: box.id, label });
+        if (out.length >= 14) break;
+      }
+      setSecs((p) => (p.length === out.length && p.every((x, i) => x.id === out[i].id && x.label === out[i].label) ? p : out));
+    };
+    let t: ReturnType<typeof setTimeout> | undefined;
+    const mo = new MutationObserver(() => { clearTimeout(t); t = setTimeout(scan, 400); });
+    mo.observe(root, { childList: true, subtree: true, characterData: true });
+    scan();
+    // the part in view: the last one whose top is above the top bar
+    const onScroll = () => {
+      let cur = '';
+      for (const el of Array.from(root.querySelectorAll<HTMLElement>('[id^="sec-"]'))) if (el.getBoundingClientRect().top <= 170) cur = el.id;
+      setAct(cur);
+    };
+    document.addEventListener('scroll', onScroll, { passive: true, capture: true });
+    onScroll();
+    return () => { mo.disconnect(); clearTimeout(t); document.removeEventListener('scroll', onScroll, { capture: true }); };
+  }, [path]);
+  return { secs, act };
+}
+
 /** the sidebar list with the sliding pill: it stretches toward the new page first, then its back end follows (power3.out) */
 export function SideNav({ items, path, onGo }: { items: NavItem[]; path: string | null; onGo?: () => void }) {
   const box = useRef<HTMLDivElement>(null);
@@ -54,6 +102,7 @@ export function SideNav({ items, path, onGo }: { items: NavItem[]; path: string 
     if (ro && box.current) ro.observe(box.current);
     return () => ro?.disconnect();
   }, [path, items.length]);
+  const { secs, act } = useSections(path);
   const fast = '.26s cubic-bezier(.215,.61,.355,1)', slow = '.55s cubic-bezier(.215,.61,.355,1)';
   return (
     <div className="side-nav" ref={box}>
@@ -64,10 +113,20 @@ export function SideNav({ items, path, onGo }: { items: NavItem[]; path: string 
         }} />
       )}
       {items.map((n) => (
-        <Link key={n.href} href={n.href} className={isOn(n.href, path) ? 'on' : ''} title={n.label} onClick={onGo} aria-current={isOn(n.href, path) ? 'page' : undefined}>
-          <Icon d={iconOf(n.href)} />
-          <span className="side-label">{n.label}</span>
-        </Link>
+        <React.Fragment key={n.href}>
+          <Link href={n.href} className={isOn(n.href, path) ? 'on' : ''} title={n.label} onClick={onGo} aria-current={isOn(n.href, path) ? 'page' : undefined}>
+            <Icon d={iconOf(n.href)} />
+            <span className="side-label">{n.label}</span>
+          </Link>
+          {isOn(n.href, path) && secs.length > 1 && (
+            <div className="side-sub" role="group" aria-label={`${n.label} — parts`}>
+              {secs.map((x) => (
+                <button key={x.id} type="button" className={act === x.id ? 'on' : ''} title={x.label}
+                  onClick={() => { document.getElementById(x.id)?.scrollIntoView({ behavior: 'smooth', block: 'start' }); onGo?.(); }}>{x.label}</button>
+              ))}
+            </div>
+          )}
+        </React.Fragment>
       ))}
     </div>
   );

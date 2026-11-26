@@ -8,6 +8,7 @@ import { fmtDate, type Line, type WeekInfo } from '@/lib/calc';
 import { fmtTime } from '@/lib/summary';
 import PickWorkspace from '@/components/PickWorkspace';
 import type { RoundInfo } from '@/components/Dashboard';
+import { loadRepick } from '@/lib/repick';
 
 export default function Page() {
   return <Shell><PickPage /></Shell>;
@@ -147,6 +148,21 @@ function Dispatch({ toggle }: { toggle: React.ReactNode }) {
   const plantName = (c: string | null | undefined) => { const k = (c || '').toUpperCase(); return (plan?.plants || []).find((p) => p.code.toUpperCase() === k)?.name || k || 'No plant'; };
   const rounds = plan?.rounds || [];
   const cur = rounds.find((r) => r.id === round);
+  // v222: each Pick's Pick ID (and JOB ID) beside the Pick selector
+  const ridsKey = rounds.map((r) => r.id).join(',');
+  const [ids, setIds] = useState<Record<string, { uid?: string; job?: string }>>({});
+  useEffect(() => {
+    let live = true;
+    if (!ridsKey) { setIds({}); return; }
+    void loadRepick(ridsKey.split(',')).then((d) => {
+      if (!live) return;
+      const m: Record<string, { uid?: string; job?: string }> = {};
+      for (const u of d.uids) m[u.rid] = { ...(m[u.rid] || {}), uid: u.uid };
+      for (const j of d.jobs) m[j.rid] = { ...(m[j.rid] || {}), job: j.job_id };
+      setIds(m);
+    });
+    return () => { live = false; };
+  }, [ridsKey]);
   const label = `${fmtDate(plan?.day || '')}${cur ? ` · ${plantName(cur.plant)} Pick ${cur.round}` : ' · all picks'}`;
 
   return (
@@ -165,9 +181,10 @@ function Dispatch({ toggle }: { toggle: React.ReactNode }) {
           <label htmlFor="d-round" style={{ display: 'grid', gap: 2 }}>Pick
             <select id="d-round" value={round || ''} onChange={(e) => setRound(e.target.value || null)}>
               <option value="">All picks of the day ({rounds.reduce((t, r) => t + r.lines, 0)} lines)</option>
-              {rounds.map((r) => <option key={r.id} value={r.id}>{plantName(r.plant)} · Pick {r.round} · {r.lines} lines{r.src_at ? ` · ${fmtTime(r.src_at)}` : ''}{r.lines && r.done >= r.lines ? ' · completed' : ''}</option>)}
+              {rounds.map((r) => <option key={r.id} value={r.id}>{plantName(r.plant)} · Pick {r.round}{ids[r.id]?.uid ? ` · ${ids[r.id].uid}` : ''} · {r.lines} lines{r.src_at ? ` · ${fmtTime(r.src_at)}` : ''}{r.lines && r.done >= r.lines ? ' · completed' : ''}</option>)}
             </select>
           </label>
+          {cur && ids[cur.id]?.uid && <span className="dpb-uid disp-uid" title="The system's Pick ID of this Pick">Pick ID <b>{ids[cur.id].uid}</b>{ids[cur.id].job ? <> · JOB <b>{ids[cur.id].job}</b></> : null}</span>}
         </div>
       </div>
       {err && <div className="notice bad">{err}</div>}

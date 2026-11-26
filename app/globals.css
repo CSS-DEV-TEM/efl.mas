@@ -2169,3 +2169,13 @@ input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, te
 .ask-msg{margin:0 0 12px;white-space:pre-wrap;line-height:1.45;max-height:60vh;overflow:auto}
 .ask-in{width:100%;font:inherit;padding:8px 10px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--ink);margin-bottom:12px}
 .ask-acts{display:flex;justify-content:flex-end;gap:8px}
+
+/* v222: the open page's parts under its sidebar item */
+.side-sub { display: grid; gap: 1px; margin: 0 0 6px 28px; padding-left: 10px; border-left: 1px solid var(--line); }
+.side-sub button { text-align: left; background: none; border: 0; color: var(--ink-3); font: 500 13px/1.25 var(--font-head); padding: 6px 8px; border-radius: 9px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.side-sub button:hover { color: var(--ink); background: var(--panel-2); }
+.side-sub button.on { color: var(--ink); font-weight: 600; background: var(--panel-2); }
+.app.side-min .side-sub { display: none; }
+@media (max-width: 900px) { .app.side-min .side-sub { display: grid; } }
+.main [id^="sec-"] { scroll-margin-top: 124px; }
+.disp-uid { align-self: end; margin-bottom: 6px; }
