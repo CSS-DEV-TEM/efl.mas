@@ -2179,3 +2179,12 @@ input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, te
 @media (max-width: 900px) { .app.side-min .side-sub { display: grid; } }
 .main [id^="sec-"] { scroll-margin-top: 124px; }
 .disp-uid { align-self: end; margin-bottom: 6px; }
+
+/* v223: Remark report */
+.rr-bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin: 10px 0; }
+.rr-bar label { display: grid; gap: 3px; font-size: 12px; color: var(--muted, #667); }
+.rr-bar .rr-rm { min-width: 220px; flex: 1 1 220px; max-width: 420px; }
+.rr-bar select, .rr-bar input { width: 100%; }
+.rr-kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin: 8px 0 12px; }
+.rr-kpis div { background: var(--panel-2); border-radius: 12px; padding: 10px 12px; display: grid; gap: 2px; }
+.rr-kpis b { font-size: 1.15rem; } .rr-kpis small { color: var(--ink-3); font-size: 12px; }

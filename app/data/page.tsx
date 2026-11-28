@@ -8,6 +8,7 @@ import { api, isBossRole } from '@/lib/api';
 import { ago, fmt, fmtDate, fmtQty } from '@/lib/calc';
 import { uploadPickFile } from '@/lib/pick';
 import { askPrompt } from '@/lib/ask';
+import RemarkReport from '@/components/RemarkReport';
 
 export default function Page() {
   return <Shell><DataPage /></Shell>;
@@ -75,6 +76,8 @@ function DataPage() {
       </div>
 
       <DayPickBar day={day} setDay={setDay} rid={rid} setRid={setRid} toast={toast} refreshKey={barKey} onUploaded={load} />
+
+      <RemarkReport toast={toast} />
 
       <section className="card" aria-labelledby="zr-title">
         <div className="sheet-top">

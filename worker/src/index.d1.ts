@@ -731,7 +731,7 @@ async function logActivity(env: Env, user: string, action: string, detail: strin
 
 type Row = Record<string, unknown>;
 /** Raised whenever the website needs a newer Worker. 5 = dispatch + letter SOs (E101697207). */
-const API_VERSION = 141; // 10 = D1 with refresh-on-activity (/api/changes)
+const API_VERSION = 142; // 10 = D1 with refresh-on-activity (/api/changes)
 
 function mapPlan(rows: Row[], fallbackWeek: string) {
   const out: Row[] = [];
@@ -1287,6 +1287,53 @@ async function getSettings(env: Env): Promise<Settings> {
  * Whose plan / picks a request shows. Editors: always their own. Admins and viewers: everyone, or the user chosen
  * with ?user=. The public dashboard (not signed in): everyone, or ?user=.  null = everyone.
  */
+/**
+ * v223 (API 142): the Remark report — the day plan lines of a date range (plan date) with a plan Remark (or all remarks), each
+ * with what was picked (Pick all matched = auto, the rest = manual: Needs manual, Import Packing List), the picked rolls, and the
+ * picked-pallets uploads (pallets picked outside the system) of those items in that range. Read only.
+ * GET /api/remark-report?from=YYYY-MM-DD&to=YYYY-MM-DD[&remark=…]   (remark '-' = lines with no remark)
+ */
+async function handleRemarkReport(env: Env, req: Request) {
+  if (req.method !== 'GET') throw new HttpError(405, 'GET only');
+  const { owner } = await viewScope(env, req);
+  const q = new URL(req.url).searchParams;
+  const from = normDate(q.get('from') || ''), to = normDate(q.get('to') || '');
+  if (!from || !to) throw new HttpError(400, 'Give the date range: from=YYYY-MM-DD&to=YYYY-MM-DD');
+  if (to < from) throw new HttpError(400, 'The end date is before the start date.');
+  if ((Date.parse(to) - Date.parse(from)) / 864e5 > 186) throw new HttpError(400, 'Six months at most per report.');
+  const remark = (q.get('remark') ?? '').trim();
+  const rmOf = (v: unknown) => String(v ?? '').trim();
+  const all = (await env.DB.prepare(`SELECT p.week, p.key, p.so, p.li, p.item, p.date, p.qty, p.plant, p.remarks FROM plan p
+      WHERE p.plan_type = 'day' AND p.date >= ?1 AND p.date <= ?2 AND (?3 IS NULL OR p.owner = ?3) ORDER BY p.date, p.week, p.row_no`).bind(from, to, owner).all<Row>()).results;
+  // the remarks of the range (for the chooser)
+  const rc = new Map<string, { lines: number; qty: number }>();
+  for (const l of all) { const k = rmOf(l.remarks) || '-'; const x = rc.get(k) || { lines: 0, qty: 0 }; x.lines++; x.qty = r3(x.qty + (Number(l.qty) || 0)); rc.set(k, x); }
+  const remarks = Array.from(rc.entries()).map(([k, v]) => ({ remark: k, ...v })).sort((a, b) => (a.remark === '-' ? 1 : b.remark === '-' ? -1 : a.remark.localeCompare(b.remark)));
+  const lines = !remark ? all : all.filter((l) => (remark === '-' ? !rmOf(l.remarks) : rmOf(l.remarks).toUpperCase() === remark.toUpperCase()));
+  const weeks = Array.from(new Set(lines.map((l) => String(l.week))));
+  // the picks of those lines (their Picks), auto / manual
+  const picks: Row[] = [];
+  for (let i = 0; i < weeks.length; i += 50) {
+    picks.push(...(await env.DB.prepare(`SELECT k.week, k.line, k.so, k.li, k.item, k.pallet, k.qty, k.roll_qty, k.batch, k.lot, k.insp_lot, k.by_user, k.at, k.note, COALESCE(r.auto, 0) auto, r.kind, r.pick_no
+        FROM picks k LEFT JOIN pick_req r ON r.id = k.req_id WHERE k.cancelled_at IS NULL AND k.week IN (SELECT value FROM json_each(?)) ORDER BY k.at`).bind(JSON.stringify(weeks.slice(i, i + 50))).all<Row>()).results);
+  }
+  const want = new Set(lines.map((l) => `${l.week}|${l.key}|${l.date ?? ''}`));
+  const mine = picks.filter((k) => want.has(`${k.week}|${k.line}`));
+  const agg = new Map<string, { auto: number; manual: number; rolls: number }>();
+  for (const k of mine) { const id = `${k.week}|${k.line}`; const a = agg.get(id) || { auto: 0, manual: 0, rolls: 0 }; if (Number(k.auto)) a.auto = r3(a.auto + Number(k.qty)); else a.manual = r3(a.manual + Number(k.qty)); a.rolls++; agg.set(id, a); }
+  const uids = await ensureUids(env, weeks);
+  const out = lines.map((l) => {
+    const a = agg.get(`${l.week}|${l.key}|${l.date ?? ''}`) || { auto: 0, manual: 0, rolls: 0 };
+    const picked = r3(a.auto + a.manual), qty = Number(l.qty) || 0;
+    return { pick: l.week, pick_uid: uids.get(String(l.week)) ?? null, date: l.date, plant: l.plant, remarks: rmOf(l.remarks) || null, so: l.so, li: l.li, item: l.item, key: l.key, qty, auto: a.auto, manual: a.manual, picked, rolls: a.rolls, balance: r3(Math.max(0, qty - picked)) };
+  });
+  // pallets picked outside the system (picked-pallets / Packing List uploads) of the report's items, uploaded in the range
+  const items = Array.from(new Set(lines.map((l) => normId(l.item))));
+  const used = items.length ? (await env.DB.prepare(`SELECT pallet, item, lot, qty, file_name, by_user, at FROM pallet_used WHERE substr(at, 1, 10) >= ?1 AND substr(at, 1, 10) <= ?2 ORDER BY at`).bind(from, to).all<Row>()).results
+    .filter((u) => { const it = normId(u.item); return items.some((x) => it === x || it.endsWith('-' + x)); }) : [];
+  return json({ from, to, remark: remark || null, remarks, lines: out, picks: mine.map((k) => ({ ...k, auto: Number(k.auto) ? 1 : 0, pick_uid: uids.get(String(k.week)) ?? null })), used });
+}
+
 async function viewScope(env: Env, req: Request): Promise<{ owner: string | null; s: Session | null }> {
   const h = req.headers.get('Authorization') || '';
   const s = await verifyToken(env, h.startsWith('Bearer ') ? h.slice(7) : null);
@@ -7109,6 +7156,7 @@ export default {
       else if (p === '/api/rounds') res = await handleRounds(env, req);
       else if (p === '/api/repick') res = await handleRepick(env, req);
       else if (p === '/api/used') res = await handleUsed(env, req);
+      else if (p === '/api/remark-report') res = await handleRemarkReport(env, req);
       else if (p === '/api/apikeys') res = await handleApiKeys(env, req);
       else if (p === '/api/ext/v1' || p.startsWith('/api/ext/v1/')) res = await handleExt(env, req, p);
       // the Plant + SO Plant pairs in the ZMMBE uploads (for Settings → ZMMBE plants)
